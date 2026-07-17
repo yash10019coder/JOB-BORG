@@ -5,6 +5,7 @@ Env-driven via django-environ. Override per-environment in dev.py / prod.py.
 from pathlib import Path
 
 import environ
+from celery.schedules import crontab
 
 # config/settings/base.py -> config/settings -> config -> project root
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -123,6 +124,18 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 # Named queues per pipeline stage so a slow stage never blocks another.
 CELERY_TASK_DEFAULT_QUEUE = "default"
+
+# The DatabaseScheduler syncs these static entries into PeriodicTask on startup.
+CELERY_BEAT_SCHEDULE = {
+    "ingest-all-sources-hourly": {
+        "task": "apps.jobs.ingest_all_active_sources",
+        "schedule": crontab(minute=0),  # top of every hour
+    },
+    "classification-sweep": {
+        "task": "apps.classification.sweep_unclassified",
+        "schedule": crontab(minute="*/5"),  # catch anything the event path missed
+    },
+}
 
 # ---------------------------------------------------------------------------
 # JobBorg domain constants
