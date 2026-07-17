@@ -1,0 +1,60 @@
+# JobBorg classification ruleset v1.
+#
+# Bootstrap note: these rules were seeded by an offline, one-time LLM pass over
+# a sample of real job descriptions to discover tag patterns, then hand-curated
+# into the cheap declarative form below. There are NO runtime LLM calls — the
+# engine only ever evaluates these static rules. Re-sample periodically and
+# promote a new versioned file (v2.yaml, ...) when tag drift is observed.
+version: v1
+rules:
+  # --- Tech stack --------------------------------------------------------
+  - tag: python
+    type: keyword_any
+    keywords: [python, django, flask, fastapi]
+  - tag: javascript
+    type: keyword_any
+    keywords: [javascript, typescript, react, node.js, nodejs]
+  - tag: golang
+    type: keyword_any
+    keywords: [golang, " go "]
+  - tag: kubernetes
+    type: keyword_any
+    keywords: [kubernetes, k8s]
+  - tag: devops
+    type: keyword_any
+    keywords: [kubernetes, terraform, ansible, ci/cd, "ci / cd"]
+
+  # --- Seniority (word-boundary regex so "senioritis" never matches) -----
+  - tag: senior
+    type: regex
+    pattern: '\bsenior\b'
+  - tag: staff
+    type: regex
+    pattern: '\bstaff\b'
+  - tag: junior
+    type: regex
+    pattern: '\b(junior|entry[- ]level|graduate)\b'
+
+  # --- Discipline --------------------------------------------------------
+  - tag: backend
+    type: keyword_any
+    keywords: [backend, back-end, "back end", server-side]
+  - tag: frontend
+    type: keyword_any
+    keywords: [frontend, front-end, "front end", ui engineer]
+  - tag: data
+    type: keyword_any
+    keywords: [data scientist, data analyst, machine learning, "ml ", analytics]
+  - tag: design
+    type: keyword_any
+    keywords: [designer, "ux ", "ui/ux", product design]
+
+  # --- Structured fields -------------------------------------------------
+  - tag: remote
+    type: field_equals
+    field: is_remote
+    value: true
+  - tag: high_comp
+    type: salary_threshold
+    field: salary_min
+    min: 150000

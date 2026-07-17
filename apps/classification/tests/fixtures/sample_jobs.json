@@ -1,0 +1,32 @@
+[
+  {
+    "name": "senior_backend_remote",
+    "job": {
+      "title": "Senior Backend Engineer",
+      "description": "We use Python and Kubernetes to run our platform.",
+      "is_remote": true,
+      "salary_min": 160000
+    },
+    "expected_tags": ["backend", "devops", "high_comp", "kubernetes", "python", "remote", "senior"]
+  },
+  {
+    "name": "onsite_designer",
+    "job": {
+      "title": "Product Designer",
+      "description": "Craft delightful UX for our users.",
+      "is_remote": false,
+      "salary_min": null
+    },
+    "expected_tags": ["design"]
+  },
+  {
+    "name": "no_signal",
+    "job": {
+      "title": "Office Manager",
+      "description": "Keep the office running smoothly.",
+      "is_remote": false,
+      "salary_min": null
+    },
+    "expected_tags": []
+  }
+]
