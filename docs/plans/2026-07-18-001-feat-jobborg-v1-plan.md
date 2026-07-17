@@ -1,7 +1,7 @@
 ---
 title: JobBorg — Job Search Automation Platform (v1)
 type: feat
-status: active
+status: completed
 date: 2026-07-18
 ---
 

@@ -15,8 +15,10 @@ rules:
     type: keyword_any
     keywords: [javascript, typescript, react, node.js, nodejs]
   - tag: golang
-    type: keyword_any
-    keywords: [golang, " go "]
+    type: regex
+    # Match "golang", or "go" only in an unambiguous programming context, so the
+    # common English word "go" never trips the tag.
+    pattern: '\bgolang\b|\bgo (developer|engineer|programmer|programming|lang)\b'
   - tag: kubernetes
     type: keyword_any
     keywords: [kubernetes, k8s]
