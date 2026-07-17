@@ -1,0 +1,32 @@
+{
+  "jobs": [
+    {
+      "id": 7982460,
+      "title": "Senior Backend Engineer",
+      "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/7982460",
+      "location": {"name": "Remote - United States"},
+      "updated_at": "2026-07-15T19:37:58-04:00",
+      "company_name": "Acme",
+      "content": "&lt;p&gt;We use &lt;strong&gt;Python&lt;/strong&gt; and Kubernetes.&lt;/p&gt;"
+    },
+    {
+      "id": 7982461,
+      "title": "Product Designer",
+      "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/7982461",
+      "location": {"name": "New York, NY"},
+      "updated_at": "2026-07-14T10:00:00-04:00",
+      "company_name": "Acme",
+      "content": "&lt;p&gt;Design delightful experiences.&lt;/p&gt;"
+    },
+    {
+      "id": 7982462,
+      "title": "Data Analyst",
+      "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/7982462",
+      "location": null,
+      "updated_at": "2026-07-13T09:00:00-04:00",
+      "company_name": "Acme",
+      "content": null
+    }
+  ],
+  "meta": {"total": 3}
+}

@@ -68,6 +68,8 @@ class Job(models.Model):
 
     title = models.CharField(max_length=512)
     description = models.TextField(blank=True, default="")
+    # Link back to the original posting (shown on the recommendation card).
+    source_url = models.URLField(max_length=1024, blank=True, default="")
 
     # Location — free-text plus an explicit remote flag (never inferred from
     # the location string) so the matching pre-filter/scorer has a reliable key.
