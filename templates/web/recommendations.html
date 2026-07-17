@@ -1,21 +1,37 @@
 {% extends "base.html" %}
 {% block title %}Recommendations — JobBorg{% endblock %}
 {% block content %}
-<h1>Your recommendations</h1>
+<div style="display:flex; align-items:baseline; gap:1rem;">
+    <h1 style="flex:1;">{% if show_all %}All matches{% else %}Your recommendations{% endif %}</h1>
+    {% if show_all %}
+        <a class="btn" href="{% url 'recommendations' %}">Show recommended only</a>
+    {% else %}
+        <a class="btn" href="{% url 'recommendations' %}?all=1">Show all matches</a>
+    {% endif %}
+</div>
+{% if show_all %}
+<p class="muted">Showing every scored job for you, including those below the recommendation threshold.</p>
+{% endif %}
 
 {% if page_obj and page_obj.object_list %}
     {% for match in page_obj %}
-        {% include "web/_job_card.html" with match=match %}
+        {% include "web/_job_card.html" with match=match show_all=show_all %}
     {% endfor %}
 
     {% if page_obj.has_other_pages %}
     <nav class="muted">
-        {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}">&larr; Prev</a>{% endif %}
+        {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}{% if show_all %}&all=1{% endif %}">&larr; Prev</a>{% endif %}
         <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
-        {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}">Next &rarr;</a>{% endif %}
+        {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}{% if show_all %}&all=1{% endif %}">Next &rarr;</a>{% endif %}
     </nav>
     {% endif %}
 {% else %}
-    <p class="muted">No recommendations yet. <a href="{% url 'profile' %}">Set your profile criteria</a> and check back after the next ingestion cycle.</p>
+    <p class="muted">
+        {% if show_all %}
+            No scored jobs yet. <a href="{% url 'profile' %}">Set your profile criteria</a> and check back after the next ingestion cycle.
+        {% else %}
+            No recommendations above the threshold yet. Try <a href="?all=1">showing all matches</a>, or <a href="{% url 'profile' %}">refine your profile</a>.
+        {% endif %}
+    </p>
 {% endif %}
 {% endblock %}

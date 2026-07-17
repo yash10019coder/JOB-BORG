@@ -62,6 +62,32 @@ class RecommendationsViewTests(TestCase):
         titles = [m.job.title for m in resp.context["page_obj"]]
         self.assertEqual(titles, ["Visible"])
 
+    def test_show_all_toggle_includes_below_threshold(self):
+        rec = self._job("Recommended")
+        low = self._job("Low")
+        self._match(self.alice, rec, 0.8)
+        self._match(self.alice, low, 0.2, status=MatchStatus.BELOW_THRESHOLD)
+
+        self.client.force_login(self.alice)
+        # Default: recommended only.
+        default = self.client.get(reverse("recommendations"))
+        self.assertEqual([m.job.title for m in default.context["page_obj"]], ["Recommended"])
+        # ?all=1: everything, ranked.
+        all_resp = self.client.get(reverse("recommendations"), {"all": "1"})
+        self.assertEqual(
+            [m.job.title for m in all_resp.context["page_obj"]], ["Recommended", "Low"]
+        )
+        self.assertTrue(all_resp.context["show_all"])
+
+    def test_show_all_still_excludes_dismissed(self):
+        low = self._job("Low")
+        self._match(self.alice, low, 0.2, status=MatchStatus.BELOW_THRESHOLD)
+        self.client.force_login(self.alice)
+        self.client.post(reverse("job_action", args=[low.id]), {"action": "dismiss"})
+
+        resp = self.client.get(reverse("recommendations"), {"all": "1"})
+        self.assertEqual([m.job.title for m in resp.context["page_obj"]], [])
+
     def test_matched_tags_explanation_rendered(self):
         job = self._job("Tagged")
         self._match(self.alice, job, 0.8, tags=["python", "kubernetes"])
@@ -74,7 +100,7 @@ class RecommendationsViewTests(TestCase):
         self.client.force_login(self.alice)
         resp = self.client.get(reverse("recommendations"))
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "No recommendations yet")
+        self.assertContains(resp, "No recommendations above the threshold yet")
 
     def test_save_creates_saved_application(self):
         job = self._job()

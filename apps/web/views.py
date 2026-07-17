@@ -55,24 +55,27 @@ def profile(request):
 
 @login_required
 def recommendations(request):
-    """Ranked, recommended-only matches for the current user.
+    """Ranked matches for the current user.
 
-    Dismissed jobs are hidden; each card carries the user's current action
-    state (saved/applied) so the UI can reflect it.
+    Defaults to recommended-only; ``?all=1`` shows every scored match for the
+    user (including below-threshold), each card labelled by status. Dismissed
+    jobs are hidden either way; each card carries the user's action state.
     """
     user = request.user
+    show_all = request.GET.get("all") == "1"
+
     dismissed_job_ids = JobApplication.objects.filter(
         user=user, status=JobApplication.Status.DISMISSED
     ).values_list("job_id", flat=True)
 
     matches = (
-        UserJobMatch.objects.filter(
-            user=user, match_status=MatchStatus.RECOMMENDED
-        )
+        UserJobMatch.objects.filter(user=user)
         .exclude(job_id__in=dismissed_job_ids)
         .select_related("job", "job__employer")
         .order_by("-match_score")
     )
+    if not show_all:
+        matches = matches.filter(match_status=MatchStatus.RECOMMENDED)
 
     paginator = Paginator(matches, RECOMMENDATIONS_PER_PAGE)
     page_obj = paginator.get_page(request.GET.get("page"))
@@ -87,7 +90,11 @@ def recommendations(request):
     for match in page_obj:
         match.user_status = app_status.get(match.job_id, "")
 
-    return render(request, "web/recommendations.html", {"page_obj": page_obj})
+    return render(
+        request,
+        "web/recommendations.html",
+        {"page_obj": page_obj, "show_all": show_all},
+    )
 
 
 @login_required

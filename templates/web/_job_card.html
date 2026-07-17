@@ -8,6 +8,9 @@
         {{ job.employer.name }}
         {% if job.is_remote %}&middot; Remote{% elif job.location %}&middot; {{ job.location }}{% endif %}
         &middot; <span class="score">{{ match.match_score|floatformat:2 }}</span>
+        {% if show_all and match.match_status != "recommended" %}
+            <span class="tag" style="background:#f3f4f6; color:#6b7280;">below threshold</span>
+        {% endif %}
     </p>
 
     {% if match.matched_tags %}
