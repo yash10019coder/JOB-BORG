@@ -2,5 +2,20 @@
 {% block title %}Recommendations — JobBorg{% endblock %}
 {% block content %}
 <h1>Your recommendations</h1>
-{% block reco_body %}{% endblock %}
+
+{% if page_obj and page_obj.object_list %}
+    {% for match in page_obj %}
+        {% include "web/_job_card.html" with match=match %}
+    {% endfor %}
+
+    {% if page_obj.has_other_pages %}
+    <nav class="muted">
+        {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}">&larr; Prev</a>{% endif %}
+        <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}">Next &rarr;</a>{% endif %}
+    </nav>
+    {% endif %}
+{% else %}
+    <p class="muted">No recommendations yet. <a href="{% url 'profile' %}">Set your profile criteria</a> and check back after the next ingestion cycle.</p>
+{% endif %}
 {% endblock %}

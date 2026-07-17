@@ -2,9 +2,25 @@
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
-from django.shortcuts import redirect, render
+from django.core.paginator import Paginator
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_POST
+
+from apps.applications.models import JobApplication
+from apps.jobs.models import Job
+from apps.matching.constants import MatchStatus
+from apps.matching.models import UserJobMatch
 
 from .forms import ProfileForm
+
+RECOMMENDATIONS_PER_PAGE = 20
+
+# Map an action name from the UI to a JobApplication status.
+_ACTION_STATUS = {
+    "save": JobApplication.Status.SAVED,
+    "apply": JobApplication.Status.APPLIED,
+    "dismiss": JobApplication.Status.DISMISSED,
+}
 
 
 def signup(request):
@@ -34,14 +50,54 @@ def profile(request):
     return render(request, "web/profile_form.html", {"form": form})
 
 
-# --- Recommendations (fleshed out in U12) ---------------------------------
+# --- Recommendations ------------------------------------------------------
 
 
 @login_required
-def recommendations(request):  # replaced by the full implementation in U12
-    return render(request, "web/recommendations.html", {"page_obj": None})
+def recommendations(request):
+    """Ranked, recommended-only matches for the current user.
+
+    Dismissed jobs are hidden; each card carries the user's current action
+    state (saved/applied) so the UI can reflect it.
+    """
+    user = request.user
+    dismissed_job_ids = JobApplication.objects.filter(
+        user=user, status=JobApplication.Status.DISMISSED
+    ).values_list("job_id", flat=True)
+
+    matches = (
+        UserJobMatch.objects.filter(
+            user=user, match_status=MatchStatus.RECOMMENDED
+        )
+        .exclude(job_id__in=dismissed_job_ids)
+        .select_related("job", "job__employer")
+        .order_by("-match_score")
+    )
+
+    paginator = Paginator(matches, RECOMMENDATIONS_PER_PAGE)
+    page_obj = paginator.get_page(request.GET.get("page"))
+
+    # Annotate each match on this page with the user's current action state.
+    page_job_ids = [m.job_id for m in page_obj]
+    app_status = dict(
+        JobApplication.objects.filter(
+            user=user, job_id__in=page_job_ids
+        ).values_list("job_id", "status")
+    )
+    for match in page_obj:
+        match.user_status = app_status.get(match.job_id, "")
+
+    return render(request, "web/recommendations.html", {"page_obj": page_obj})
 
 
 @login_required
-def job_action(request, job_id):  # implemented in U12
+@require_POST
+def job_action(request, job_id):
+    """Idempotently record save/apply/dismiss for the current user's job."""
+    job = get_object_or_404(Job, pk=job_id)
+    status = _ACTION_STATUS.get(request.POST.get("action"))
+    if status is not None:
+        JobApplication.objects.update_or_create(
+            user=request.user, job=job, defaults={"status": status}
+        )
     return redirect("recommendations")

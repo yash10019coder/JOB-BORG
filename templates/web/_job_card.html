@@ -1,0 +1,30 @@
+{% with job=match.job %}
+<div class="card">
+    <h3>
+        {% if job.source_url %}<a href="{{ job.source_url }}" target="_blank" rel="noopener">{{ job.title }}</a>
+        {% else %}{{ job.title }}{% endif %}
+    </h3>
+    <p class="muted">
+        {{ job.employer.name }}
+        {% if job.is_remote %}&middot; Remote{% elif job.location %}&middot; {{ job.location }}{% endif %}
+        &middot; <span class="score">{{ match.match_score|floatformat:2 }}</span>
+    </p>
+
+    {% if match.matched_tags %}
+    <p>
+        <span class="muted">Why:</span>
+        {% for tag in match.matched_tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+    </p>
+    {% endif %}
+
+    <div>
+        {% if match.user_status %}<span class="muted">Status: {{ match.user_status }}</span>{% endif %}
+        <form class="actions" method="post" action="{% url 'job_action' job.id %}">
+            {% csrf_token %}
+            <button type="submit" name="action" value="save">Save</button>
+            <button type="submit" name="action" value="apply">Mark applied</button>
+            <button type="submit" name="action" value="dismiss">Dismiss</button>
+        </form>
+    </div>
+</div>
+{% endwith %}
