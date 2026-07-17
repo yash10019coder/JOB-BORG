@@ -144,3 +144,18 @@ CELERY_BEAT_SCHEDULE = {
 CLASSIFICATION_BATCH_SIZE = env.int("CLASSIFICATION_BATCH_SIZE", default=200)
 # Recency window (days) for profile-centric rematch (U10).
 REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
+# Debounce delay (seconds) collapsing rapid successive profile saves into one
+# rematch execution (U10).
+REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
+# Upsert batch size for the matching fan-out.
+MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
+
+# ---------------------------------------------------------------------------
+# Cache — Redis-backed so the rematch debounce token is shared across workers.
+# ---------------------------------------------------------------------------
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": env("CACHE_URL", default="redis://localhost:6379/3"),
+    },
+}
