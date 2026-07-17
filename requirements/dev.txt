@@ -1,0 +1,4 @@
+-r base.txt
+
+# Development & test dependencies
+responses==0.25.3

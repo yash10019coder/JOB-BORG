@@ -1,0 +1,10 @@
+# Core runtime dependencies for JobBorg (v1)
+Django==5.1.4
+django-environ==0.11.2
+psycopg[binary]==3.2.3
+celery==5.4.0
+redis==5.2.0
+django-celery-beat==2.7.0
+pgvector==0.3.6
+requests==2.32.3
+PyYAML==6.0.2
