@@ -83,6 +83,45 @@ class DiscoverBoardsTaskTests(TestCase):
         self.assertEqual(stats["failed"], 1)
         self.assertFalse(DiscoveredBoard.objects.filter(board_token="not-a-real-board").exists())
 
+    def test_persistence_failure_for_one_token_does_not_abort_the_rest_of_the_run(self):
+        # A DiscoveredBoard already exists with the same token as one of the
+        # search hits but *not* yet reflected in known_tokens -- simulates a
+        # race (or any other create()-time failure) hitting the UniqueConstraint.
+        # The run must still process the remaining, unrelated token.
+        DiscoveredBoard.objects.create(
+            board_token="racey", derived_employer_name="Racey Co"
+        )
+        # Bypass the known_tokens pre-filter by mutating it wouldn't be possible
+        # from here, so instead assert directly against create() raising via a
+        # duplicate insert triggered by two identical tokens slipping through.
+        from apps.jobs import tasks
+
+        with mock.patch(
+            "apps.jobs.tasks.BoardSearchClient",
+            return_value=_FakeSearchClient(
+                SearchResult(tokens=["racey", "figma"], pages_fetched=1, failed=False)
+            ),
+        ), mock.patch(
+            "apps.jobs.tasks.GreenhouseClient",
+            return_value=_FakeGreenhouseClient(
+                by_board={
+                    "racey": [{"title": "Job"}],
+                    "figma": [{"title": "Job"}],
+                }
+            ),
+        ), mock.patch(
+            "apps.jobs.tasks.DiscoveredBoard.objects.filter"
+        ) as fake_filter:
+            # known_tokens comes back empty so "racey" isn't pre-filtered,
+            # forcing its create() to hit the real UniqueConstraint below.
+            fake_filter.return_value.values_list.return_value = []
+            stats = tasks.discover_boards()
+
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["validated"], 1)
+        self.assertTrue(DiscoveredBoard.objects.filter(board_token="figma").exists())
+        self.assertEqual(DiscoveredBoard.objects.filter(board_token="racey").count(), 1)
+
     def test_blocked_search_step_completes_the_run_and_reports_zero_found(self):
         # Covers AE3.
         stats = _run_discover_boards(

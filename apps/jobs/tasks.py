@@ -10,6 +10,7 @@
 import logging
 
 from celery import shared_task
+from django.db import transaction
 
 from .ingestion.board_search import BoardSearchClient
 from .ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
@@ -115,12 +116,24 @@ def discover_boards():
             stats["failed"] += 1
             continue
 
-        DiscoveredBoard.objects.create(
-            ats=JobSource.ATS.GREENHOUSE,
-            board_token=token,
-            derived_employer_name=token.replace("-", " ").title(),
-            discovered_job_count=len(jobs),
-        )
+        try:
+            # A savepoint, not just a try/except: a failed INSERT poisons the
+            # enclosing transaction for every later query until rolled back
+            # (Postgres aborts the whole transaction on a constraint
+            # violation) -- atomic() here means one token's persistence
+            # failure can't take the rest of the run down with it.
+            with transaction.atomic():
+                DiscoveredBoard.objects.create(
+                    ats=JobSource.ATS.GREENHOUSE,
+                    board_token=token,
+                    derived_employer_name=token.replace("-", " ").title(),
+                    discovered_job_count=len(jobs),
+                )
+        except Exception:  # noqa: BLE001 — one token's failure must not abort the rest
+            logger.exception("Discovery persistence failed for token %s", token)
+            stats["failed"] += 1
+            continue
+
         stats["validated"] += 1
 
     logger.info("Discovery run: %s", stats)
