@@ -140,6 +140,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.jobs.ingest_all_active_sources",
         "schedule": crontab(minute=0),  # top of every hour
     },
+    "discover-boards-daily": {
+        "task": "apps.jobs.discover_boards",
+        "schedule": crontab(minute=0, hour=3),  # off-peak
+    },
     "classification-sweep": {
         "task": "apps.classification.sweep_unclassified",
         "schedule": crontab(minute="*/5"),  # catch anything the event path missed
