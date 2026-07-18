@@ -1,5 +1,6 @@
 # JobBorg v1 — local development stack.
-# Services: db (Postgres+pgvector), redis, web (Django), worker (Celery), beat (Celery Beat).
+# Core services: db (Postgres+pgvector), redis, web (Django), worker (Celery), beat (Celery Beat).
+# Observability services: pgadmin, prometheus (+exporters), loki+promtail, grafana.
 # One Dockerfile, different commands per service.
 
 services:
@@ -45,7 +46,8 @@ services:
 
   worker:
     build: .
-    command: celery -A config worker -l info
+    # -E emits task events so celery-exporter can scrape task metrics.
+    command: celery -A config worker -l info -E
     env_file: .env
     volumes:
       - .:/app
@@ -67,5 +69,95 @@ services:
       redis:
         condition: service_healthy
 
+  # --- Observability -----------------------------------------------------
+
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@jobborg.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-jobborg}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./observability/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    ports:
+      - "5050:80"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://jobborg:jobborg@db:5432/jobborg?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      - redis
+
+  celery-exporter:
+    # Pinned by digest — the project doesn't currently publish version tags
+    # matching common semver conventions; `latest` resolved to this digest.
+    image: ghcr.io/danihodovic/celery-exporter@sha256:f344aacb6ebf2cd55f347ba0736ff9b083b69125840621c08f07d9ebcdd5c704
+    command: --broker-url=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - postgres-exporter
+      - redis-exporter
+      - celery-exporter
+
+  loki:
+    image: grafana/loki:3.2.1
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./observability/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-jobborg}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   pgdata:
+  pgadmin_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:

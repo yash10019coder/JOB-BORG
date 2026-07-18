@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     "django.contrib.postgres",
     # Third-party
     "django_celery_beat",
+    "django_prometheus",
     # Local apps
     "apps.accounts",
     "apps.employers",
@@ -45,6 +46,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First/last per django-prometheus: brackets the full request/response
+    # cycle so latency includes everything in between.
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -52,6 +56,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -121,6 +126,10 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Task events power celery-exporter's Prometheus metrics (throughput,
+# failures, runtime). Belt-and-suspenders alongside `-E` on the worker CLI.
+CELERY_WORKER_SEND_TASK_EVENTS = True
+CELERY_TASK_SEND_SENT_EVENT = True
 
 # Named queues per pipeline stage so a slow stage never blocks another.
 CELERY_TASK_DEFAULT_QUEUE = "default"
@@ -157,5 +166,42 @@ CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": env("CACHE_URL", default="redis://localhost:6379/3"),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Logging — JSON lines to stdout by default so Promtail/Loki can parse and
+# filter by level/logger. Set DJANGO_LOG_FORMAT=plain for human-readable
+# console output during local (non-container) development.
+# ---------------------------------------------------------------------------
+DJANGO_LOG_LEVEL = env("DJANGO_LOG_LEVEL", default="INFO")
+DJANGO_LOG_FORMAT = env("DJANGO_LOG_FORMAT", default="json")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+        "plain": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": DJANGO_LOG_FORMAT if DJANGO_LOG_FORMAT in ("json", "plain") else "json",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": DJANGO_LOG_LEVEL,
+    },
+    "loggers": {
+        "django": {"handlers": ["console"], "level": DJANGO_LOG_LEVEL, "propagate": False},
+        "celery": {"handlers": ["console"], "level": DJANGO_LOG_LEVEL, "propagate": False},
+        "apps": {"handlers": ["console"], "level": DJANGO_LOG_LEVEL, "propagate": False},
     },
 }

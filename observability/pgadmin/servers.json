@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "JobBorg",
+      "Group": "Servers",
+      "Host": "db",
+      "Port": 5432,
+      "MaintenanceDB": "jobborg",
+      "Username": "jobborg",
+      "SSLMode": "prefer",
+      "Comment": "Local dev Postgres (docker-compose `db` service). Password entered on first connect."
+    }
+  }
+}

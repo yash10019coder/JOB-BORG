@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: JobBorg
+    orgId: 1
+    folder: JobBorg
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

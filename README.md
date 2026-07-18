@@ -20,8 +20,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Brings up five services: `db` (Postgres+pgvector), `redis`, `web` (Django on
-:8000), `worker` (Celery), and `beat` (hourly ingestion + classification sweep).
+Brings up five core services: `db` (Postgres+pgvector), `redis`, `web` (Django on
+:8000), `worker` (Celery), and `beat` (hourly ingestion + classification sweep) —
+plus the [observability stack](#observability) (pgAdmin, Prometheus, Loki, Grafana).
 
 Then, in another shell:
 
@@ -59,6 +60,39 @@ Each stage is a decoupled Celery task. Ingestion is idempotent (keyed on
 `(source_ats, source_job_id)`); classification only re-runs on content change;
 matching fans out to pre-filtered active profiles and refreshes immediately when
 a profile is edited.
+
+## Observability
+
+Local development stack for inspecting the database and watching the pipeline run:
+
+| Service | URL | Login | Purpose |
+|---|---|---|---|
+| pgAdmin | http://localhost:5050 | `.env` `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` (default `admin@jobborg.dev` / `jobborg`) | Browse the `db` Postgres instance — a `JobBorg` server is pre-registered (enter the DB password `jobborg` on first connect) |
+| Grafana | http://localhost:3000 | `admin` / `.env` `GF_SECURITY_ADMIN_PASSWORD` (default `jobborg`) | Dashboards + log explorer; Prometheus and Loki datasources are pre-provisioned |
+| Prometheus | http://localhost:9090 | — | Raw metrics + `/targets` scrape health |
+| Loki | http://localhost:3100 | — | Raw log API (mostly queried via Grafana Explore) |
+
+**Metrics:** `web` exposes `django-prometheus` metrics at `/metrics` (request rate,
+latency, status codes). Celery workers emit task events (`-E` flag +
+`CELERY_WORKER_SEND_TASK_EVENTS`) scraped by `celery-exporter`. `postgres-exporter`
+and `redis-exporter` cover the two data stores. Prometheus scrapes all four every
+15s — check `http://localhost:9090/targets` to confirm they're all `UP`.
+
+**Logs:** every container's stdout is tailed by `promtail` and shipped to `loki`.
+Django/Celery logs are JSON by default (`DJANGO_LOG_FORMAT=json`) so they're
+queryable — e.g. in Grafana Explore, `{compose_service="web"}` or
+`{compose_service="worker"} | json | levelname="ERROR"`.
+
+**Starter dashboards** (auto-loaded in Grafana under the `JobBorg` folder):
+`JobBorg: Django` (request rate/latency/errors), `JobBorg: Celery` (task
+throughput/failures/runtime), `JobBorg: Infra` (Postgres/Redis health).
+
+Try it end-to-end: trigger ingestion (see above), then watch the `JobBorg: Celery`
+dashboard and Grafana Explore logs update in real time — this is the fastest way
+to answer "did anything actually happen?" instead of grepping raw container logs.
+
+This is a **development-only** setup (no auth on Prometheus/Loki, ports bound to
+localhost, Promtail reads the Docker socket) — do not expose it as-is in production.
 
 ## Tests
 

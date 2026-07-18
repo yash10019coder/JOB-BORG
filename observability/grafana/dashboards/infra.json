@@ -1,0 +1,80 @@
+{
+  "title": "JobBorg: Infra (Postgres & Redis)",
+  "uid": "jobborg-infra",
+  "tags": ["jobborg", "postgres", "redis"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Postgres up",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "pg_up" }]
+    },
+    {
+      "id": 2,
+      "title": "Postgres active connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(pg_stat_activity_count)",
+          "legendFormat": "active connections"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Redis up",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "redis_up" }]
+    },
+    {
+      "id": 4,
+      "title": "Postgres transactions/sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(pg_stat_database_xact_commit[5m])) + sum(rate(pg_stat_database_xact_rollback[5m]))",
+          "legendFormat": "txn/s"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Redis memory used",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes",
+          "legendFormat": "used bytes"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Redis ops/sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "rate(redis_commands_processed_total[5m])",
+          "legendFormat": "ops/s"
+        }
+      ]
+    }
+  ]
+}
