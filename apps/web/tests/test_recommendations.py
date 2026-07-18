@@ -24,11 +24,12 @@ class RecommendationsViewTests(TestCase):
         self.bob = User.objects.create_user(username="bob", password="pw")
         self._seq = 0
 
-    def _job(self, title="Backend Engineer"):
+    def _job(self, title="Backend Engineer", description=""):
         self._seq += 1
         return Job.objects.create(
             source_ats="greenhouse", source_job_id=str(self._seq),
-            employer=self.employer, title=title, source_url="https://x/1",
+            employer=self.employer, title=title, description=description,
+            source_url="https://x/1",
         )
 
     def _match(self, user, job, score, status=MatchStatus.RECOMMENDED, tags=None):
@@ -87,6 +88,175 @@ class RecommendationsViewTests(TestCase):
 
         resp = self.client.get(reverse("recommendations"), {"all": "1"})
         self.assertEqual([m.job.title for m in resp.context["page_obj"]], [])
+
+    def test_search_matches_title(self):
+        py = self._job("Python Backend Engineer")
+        other = self._job("Frontend Designer")
+        self._match(self.alice, py, 0.9)
+        self._match(self.alice, other, 0.8)
+
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        titles = [m.job.title for m in resp.context["page_obj"]]
+        self.assertEqual(titles, ["Python Backend Engineer"])
+        self.assertEqual(resp.context["query"], "python")
+
+    def test_search_matches_description_only(self):
+        job = self._job("Engineer", description="Deep experience with kubernetes clusters.")
+        other = self._job("Other Engineer", description="No mention of that word.")
+        self._match(self.alice, job, 0.9)
+        self._match(self.alice, other, 0.8)
+
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("recommendations"), {"q": "kubernetes"})
+        titles = [m.job.title for m in resp.context["page_obj"]]
+        self.assertEqual(titles, ["Engineer"])
+
+    def test_search_stems_and_is_case_insensitive(self):
+        # Postgres FTS stems "Engineering" to match a search for "engineer" —
+        # a plain icontains substring match would not do this, so this proves
+        # the FTS config is actually wired up rather than a lucky substring hit.
+        job = self._job("Senior Engineering Manager")
+        self._match(self.alice, job, 0.9)
+
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("recommendations"), {"q": "ENGINEER"})
+        titles = [m.job.title for m in resp.context["page_obj"]]
+        self.assertEqual(titles, ["Senior Engineering Manager"])
+
+    def test_empty_query_behaves_identically_to_no_search(self):
+        job = self._job("Backend Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        no_param = self.client.get(reverse("recommendations"))
+        empty_q = self.client.get(reverse("recommendations"), {"q": ""})
+        self.assertEqual(
+            [m.job.title for m in no_param.context["page_obj"]],
+            [m.job.title for m in empty_q.context["page_obj"]],
+        )
+        self.assertEqual(empty_q.context["query"], "")
+
+    def test_search_layers_on_top_of_toggle_not_bypasses_it(self):
+        rec = self._job("Python Recommended")
+        low = self._job("Python Below Threshold")
+        self._match(self.alice, rec, 0.9)
+        self._match(self.alice, low, 0.2, status=MatchStatus.BELOW_THRESHOLD)
+        self.client.force_login(self.alice)
+
+        # Recommended-only + search: below-threshold match excluded even
+        # though it matches the search term — toggle still governs status.
+        default = self.client.get(reverse("recommendations"), {"q": "python"})
+        self.assertEqual(
+            [m.job.title for m in default.context["page_obj"]], ["Python Recommended"]
+        )
+        # Show-all + search: both matching the term are returned.
+        all_resp = self.client.get(reverse("recommendations"), {"q": "python", "all": "1"})
+        self.assertEqual(
+            [m.job.title for m in all_resp.context["page_obj"]],
+            ["Python Recommended", "Python Below Threshold"],
+        )
+
+    def test_search_still_excludes_dismissed(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+        self.client.post(reverse("job_action", args=[job.id]), {"action": "dismiss"})
+
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        self.assertEqual([m.job.title for m in resp.context["page_obj"]], [])
+
+    def test_search_returns_no_results_without_error(self):
+        job = self._job("Backend Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "nonexistentzzz"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context["page_obj"]), [])
+
+    def test_search_isolated_per_user(self):
+        job_alice = self._job("Python Engineer")
+        job_bob = self._job("Python Engineer")
+        self._match(self.alice, job_alice, 0.9)
+        self._match(self.bob, job_bob, 0.9)
+
+        self.client.force_login(self.alice)
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        matches = list(resp.context["page_obj"])
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].job_id, job_alice.id)
+
+    def test_search_strips_nul_bytes_instead_of_erroring(self):
+        # Postgres text columns reject NUL bytes outright (DataError, not a
+        # validation error) -- a raw %00 in ?q= must not 500 the page.
+        job = self._job("Backend Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "back\x00end"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["query"], "backend")
+
+    def test_job_action_redirect_preserves_search_and_toggle(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.2, status=MatchStatus.BELOW_THRESHOLD)
+        self.client.force_login(self.alice)
+
+        resp = self.client.post(
+            reverse("job_action", args=[job.id]),
+            {"action": "save", "q": "python", "all": "1"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("q=python", resp["Location"])
+        self.assertIn("all=1", resp["Location"])
+
+    def test_job_action_redirect_omits_empty_search_and_toggle(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.post(
+            reverse("job_action", args=[job.id]), {"action": "save"}
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], reverse("recommendations"))
+
+    def test_search_input_prefilled_with_query(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        self.assertContains(resp, 'value="python"')
+
+    def test_toggle_link_preserves_search(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        self.assertContains(resp, "all=1")
+        self.assertContains(resp, "q=python")
+
+    def test_pagination_preserves_search(self):
+        for i in range(25):
+            job = self._job(f"Python Engineer {i}")
+            self._match(self.alice, job, 0.9 - i * 0.01)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "python"})
+        self.assertContains(resp, "Next")
+        self.assertContains(resp, "q=python")
+
+    def test_search_empty_state_renders_distinct_message(self):
+        job = self._job("Backend Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(reverse("recommendations"), {"q": "nonexistentzzz"})
+        self.assertContains(resp, "No matches found for")
+        self.assertNotContains(resp, "No recommendations above the threshold yet")
 
     def test_matched_tags_explanation_rendered(self):
         job = self._job("Tagged")

@@ -1,7 +1,13 @@
 """Job + JobSource models — global/shared postings ingested from ATS boards."""
 from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVector
 from django.db import models
 from pgvector.django import VectorField
+
+# Single source of truth for the full-text search config. Any query filtering
+# against ``job_search_gin`` (see Job.Meta.indexes) must use this exact value
+# — a mismatch doesn't error, it silently falls back to a sequential scan.
+JOB_SEARCH_CONFIG = "english"
 
 
 class JobSource(models.Model):
@@ -115,6 +121,15 @@ class Job(models.Model):
             models.Index(fields=["location"], name="job_location_idx"),
             models.Index(
                 fields=["needs_classification"], name="job_needs_class_idx"
+            ),
+            # Full-text search over title/description (search bar). config
+            # must be a literal string, not the default get_current_ts_config()
+            # lookup — Postgres rejects non-IMMUTABLE functions in an index
+            # expression. Queries against this index must use the same
+            # config="english" or they'll silently fall back to a seq scan.
+            GinIndex(
+                SearchVector("title", "description", config=JOB_SEARCH_CONFIG),
+                name="job_search_gin",
             ),
         ]
 

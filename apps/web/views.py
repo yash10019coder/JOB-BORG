@@ -2,12 +2,15 @@
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
+from django.contrib.postgres.search import SearchQuery, SearchVector
 from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from apps.applications.models import JobApplication
-from apps.jobs.models import Job
+from apps.jobs.models import JOB_SEARCH_CONFIG, Job
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
 
@@ -58,11 +61,18 @@ def recommendations(request):
     """Ranked matches for the current user.
 
     Defaults to recommended-only; ``?all=1`` shows every scored match for the
-    user (including below-threshold), each card labelled by status. Dismissed
-    jobs are hidden either way; each card carries the user's action state.
+    user (including below-threshold), each card labelled by status. ``?q=``
+    further narrows whichever set is active (title/description full-text
+    search) — search layers on top of the toggle, it never bypasses it.
+    Dismissed jobs are hidden either way; each card carries the user's
+    action state.
     """
     user = request.user
     show_all = request.GET.get("all") == "1"
+    # Postgres text columns reject NUL bytes outright (DataError, not a
+    # validation error) — strip them so a stray %00 in the query string can't
+    # 500 the page.
+    query = request.GET.get("q", "").replace("\x00", "").strip()
 
     dismissed_job_ids = JobApplication.objects.filter(
         user=user, status=JobApplication.Status.DISMISSED
@@ -76,6 +86,14 @@ def recommendations(request):
     )
     if not show_all:
         matches = matches.filter(match_status=MatchStatus.RECOMMENDED)
+    if query:
+        # config must match the GinIndex on Job (job_search_gin) exactly, or
+        # this silently falls back to a sequential scan instead of using it.
+        # .alias() (not .annotate()) so the tsvector expression is usable in
+        # the filter without also being materialized into the SELECT list.
+        matches = matches.alias(
+            search=SearchVector("job__title", "job__description", config=JOB_SEARCH_CONFIG)
+        ).filter(search=SearchQuery(query, config=JOB_SEARCH_CONFIG))
 
     paginator = Paginator(matches, RECOMMENDATIONS_PER_PAGE)
     page_obj = paginator.get_page(request.GET.get("page"))
@@ -93,7 +111,7 @@ def recommendations(request):
     return render(
         request,
         "web/recommendations.html",
-        {"page_obj": page_obj, "show_all": show_all},
+        {"page_obj": page_obj, "show_all": show_all, "query": query},
     )
 
 
@@ -107,4 +125,17 @@ def job_action(request, job_id):
         JobApplication.objects.update_or_create(
             user=request.user, job=job, defaults={"status": status}
         )
-    return redirect("recommendations")
+
+    # Preserve the toggle/search state the action was taken from (carried as
+    # hidden fields on the action form) so Save/Apply/Dismiss doesn't silently
+    # reset the user back to the unfiltered recommended-only view.
+    redirect_url = reverse("recommendations")
+    params = {}
+    if request.POST.get("all") == "1":
+        params["all"] = "1"
+    query = request.POST.get("q", "").replace("\x00", "").strip()
+    if query:
+        params["q"] = query
+    if params:
+        redirect_url = f"{redirect_url}?{urlencode(params)}"
+    return redirect(redirect_url)
