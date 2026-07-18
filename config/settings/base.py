@@ -162,6 +162,11 @@ REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
 REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
+# Cap on how many not-yet-known boards discover_boards will validate and
+# queue for review in a single run (R1/R7) -- the candidate dataset can
+# return thousands of tokens at once, and reviewer throughput, not
+# candidate-source volume, is meant to be the growth bottleneck.
+DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", default=50)
 
 # ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.

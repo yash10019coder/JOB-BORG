@@ -1,39 +1,42 @@
-"""Board-discovery search client.
+"""Board-discovery candidate source.
 
-Queries Bing (not Google — see docs/plans/2026-07-18-004-feat-job-source-
-discovery-plan.md Key Technical Decisions for why) for public
-boards.greenhouse.io URLs and extracts candidate board tokens.
+Loads a maintained, open-source, MIT-licensed dataset of companies known to
+use Greenhouse (kalil0321/ats-scrapers) instead of querying a search engine.
+Superseded three earlier approaches -- see docs/plans/2026-07-18-004-feat-
+job-source-discovery-plan.md Key Technical Decisions for the original
+rationale, now stale:
 
-Kept behind a narrow interface so swapping the search source later (a paid
-search API, a directory dataset) is a contained change if scraping proves
-unstable in practice — see the plan's Risks & Dependencies.
+- Scraping Bing's HTML search results directly.
+- Rendering the same query through a full headless Chromium.
+- Brave Search API -- turned out to require a paid, card-verified account
+  even at our volume, not the no-strings free tier it was first taken for.
+
+The first two get CAPTCHA-blocked from a datacenter egress IP regardless of
+client fidelity (confirmed by hand); the third isn't actually free. This
+dataset is a plain HTTPS GET against GitHub's raw content CDN -- a normal
+file download, not a scraped session or a metered API call -- so none of
+that applies. Its tradeoff: freshness depends on the upstream project's own
+scrape cadence, and it only ever surfaces companies someone else has already
+found, so it will always lag genuinely brand-new boards. See the plan's
+Risks & Dependencies.
+
+Kept behind the same narrow interface (``SearchResult``, ``BoardSearchClient``)
+so swapping the source again is a contained change if this dataset goes
+stale or the upstream project is abandoned.
 """
-import re
+import csv
+import io
 import time
 from dataclasses import dataclass, field
 
 import requests
 
-SEARCH_URL = "https://www.bing.com/search"
-QUERY = "site:boards.greenhouse.io"
-
-# Capped, not open-ended pagination -- bounds both block risk and query
-# volume. The exact ceiling is a Deferred to Implementation item in the
-# plan; this is a conservative starting point.
-MAX_PAGES_PER_RUN = 5
-RESULTS_PER_PAGE = 10
-FAILURE_THRESHOLD = 3
-
-_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-
-# A realistic non-default User-Agent -- the bare `requests` default UA is
-# one of the first signals search engines filter on.
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+DATASET_URL = (
+    "https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/"
+    "ats-companies/greenhouse.csv"
 )
 
-_TOKEN_PATTERN = re.compile(r"boards\.greenhouse\.io/([a-zA-Z0-9][a-zA-Z0-9-]*)")
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -44,11 +47,11 @@ class SearchResult:
 
 
 class BoardSearchClient:
-    """Searches Bing for Greenhouse board URLs.
+    """Fetches the current Greenhouse-companies dataset and extracts tokens.
 
-    Never raises on a failed query -- a bad run is signalled through
-    ``SearchResult.failed`` so the caller's per-run failure isolation (R6)
-    doesn't need its own try/except around every call.
+    Never raises on a failed fetch -- signalled via ``SearchResult.failed``
+    so the caller's per-run failure isolation (R6) doesn't need its own
+    try/except around every call.
     """
 
     def __init__(
@@ -57,7 +60,7 @@ class BoardSearchClient:
         *,
         max_retries=3,
         backoff_factor=0.5,
-        timeout=10,
+        timeout=30,
         sleep=time.sleep,
     ):
         self._session = session or requests.Session()
@@ -67,38 +70,20 @@ class BoardSearchClient:
         self._sleep = sleep
 
     def search_greenhouse_boards(self):
-        tokens = set()
-        pages_fetched = 0
-        consecutive_failures = 0
+        response = self._get_with_retry()
+        if response is None:
+            return SearchResult(tokens=[], pages_fetched=0, failed=True)
 
-        for page in range(MAX_PAGES_PER_RUN):
-            response = self._get_with_retry(page)
-            if response is None:
-                consecutive_failures += 1
-                if consecutive_failures >= FAILURE_THRESHOLD:
-                    return SearchResult(
-                        tokens=sorted(tokens), pages_fetched=pages_fetched, failed=True
-                    )
-                continue
-
-            consecutive_failures = 0
-            pages_fetched += 1
-            tokens.update(self._extract_tokens(response.text))
-
-        return SearchResult(tokens=sorted(tokens), pages_fetched=pages_fetched, failed=False)
+        tokens = self._extract_tokens(response.text)
+        return SearchResult(tokens=sorted(tokens), pages_fetched=1, failed=False)
 
     # -- internals ---------------------------------------------------------
 
-    def _get_with_retry(self, page):
-        params = {"q": QUERY, "first": page * RESULTS_PER_PAGE + 1}
-        headers = {"User-Agent": _USER_AGENT}
-
+    def _get_with_retry(self):
         for attempt in range(self.max_retries + 1):
             response = None
             try:
-                response = self._session.get(
-                    SEARCH_URL, params=params, headers=headers, timeout=self.timeout
-                )
+                response = self._session.get(DATASET_URL, timeout=self.timeout)
             except requests.RequestException:
                 response = None
             else:
@@ -113,5 +98,15 @@ class BoardSearchClient:
         return None
 
     @staticmethod
-    def _extract_tokens(html):
-        return {match.group(1) for match in _TOKEN_PATTERN.finditer(html)}
+    def _extract_tokens(csv_text):
+        # The dataset's `slug` column is the exact Greenhouse board token
+        # (what boards-api.greenhouse.io/v1/boards/<token>/jobs expects) --
+        # using it directly avoids re-deriving it from the `url` column,
+        # which mixes `boards.greenhouse.io` and newer `job-boards.
+        # greenhouse.io` hosts.
+        reader = csv.DictReader(io.StringIO(csv_text))
+        return {
+            row["slug"].strip()
+            for row in reader
+            if row.get("slug", "").strip()
+        }

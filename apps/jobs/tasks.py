@@ -10,6 +10,7 @@
 import logging
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 
 from .ingestion.board_search import BoardSearchClient
@@ -95,20 +96,25 @@ def discover_boards():
         )
     )
 
+    # The candidate dataset can hand back thousands of tokens at once
+    # (unlike a paginated search engine query); capping how many new ones get
+    # validated and queued per run keeps reviewer throughput -- not
+    # candidate-source volume -- the bottleneck on growth, per R7/success
+    # criteria.
+    new_tokens = [token for token in search_result.tokens if token not in known_tokens]
+    capped_tokens = new_tokens[: settings.DISCOVERY_MAX_NEW_BOARDS_PER_RUN]
+
     stats = {
         "found": len(search_result.tokens),
-        "already_known": 0,
+        "already_known": len(search_result.tokens) - len(new_tokens),
         "validated": 0,
         "failed": 0,
         "search_failed": search_result.failed,
+        "skipped_for_cap": len(new_tokens) - len(capped_tokens),
     }
 
     client = GreenhouseClient()
-    for token in search_result.tokens:
-        if token in known_tokens:
-            stats["already_known"] += 1
-            continue
-
+    for token in capped_tokens:
         try:
             jobs = client.fetch_jobs(token)
         except (GreenhouseUnavailable, GreenhouseParseError):
