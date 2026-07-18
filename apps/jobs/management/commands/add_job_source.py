@@ -6,10 +6,9 @@ token fails fast instead of creating a dead Employer/JobSource pair.
 """
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.employers.models import Employer
 from apps.jobs.ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
 from apps.jobs.ingestion.greenhouse_client import GreenhouseClient
-from apps.jobs.models import JobSource
+from apps.jobs.ingestion.register import register_job_source
 
 
 class Command(BaseCommand):
@@ -45,24 +44,17 @@ class Command(BaseCommand):
 
     def _register_one(self, client, token, name_override):
         try:
-            jobs = client.fetch_jobs(token)
+            outcome = register_job_source(token, name_override, client=client)
         except (GreenhouseUnavailable, GreenhouseParseError) as exc:
             self.stderr.write(self.style.ERROR(f"{token}: unreachable or invalid board ({exc})"))
             return
 
-        if JobSource.objects.filter(ats=JobSource.ATS.GREENHOUSE, board_token=token).exists():
+        if outcome.status == "already_registered":
             self.stdout.write(self.style.WARNING(f"{token}: JobSource already registered, skipping"))
             return
 
-        employer_name = name_override or token.replace("-", " ").title()
-        employer, _ = Employer.objects.get_or_create(
-            slug=token, defaults={"name": employer_name}
-        )
-        JobSource.objects.create(
-            ats=JobSource.ATS.GREENHOUSE, board_token=token, employer=employer
-        )
         self.stdout.write(
             self.style.SUCCESS(
-                f"{token}: registered ({employer.name}, {len(jobs)} open jobs live now)"
+                f"{token}: registered ({outcome.employer.name}, {outcome.job_count} open jobs live now)"
             )
         )

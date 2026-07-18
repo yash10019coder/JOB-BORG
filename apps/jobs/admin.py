@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Job, JobSource
+from .models import DiscoveredBoard, Job, JobSource
 
 
 @admin.register(JobSource)
@@ -8,6 +8,14 @@ class JobSourceAdmin(admin.ModelAdmin):
     list_display = ("ats", "board_token", "employer", "is_active", "created_at")
     list_filter = ("ats", "is_active")
     search_fields = ("board_token", "employer__name")
+
+
+@admin.register(DiscoveredBoard)
+class DiscoveredBoardAdmin(admin.ModelAdmin):
+    list_display = ("ats", "board_token", "derived_employer_name", "status", "discovered_at")
+    list_filter = ("ats", "status")
+    search_fields = ("board_token", "derived_employer_name")
+    readonly_fields = ("discovered_at", "reviewed_at", "created_at", "updated_at")
 
 
 @admin.register(Job)

@@ -51,6 +51,64 @@ class JobSource(models.Model):
         return f"{self.get_ats_display()}:{self.board_token} ({self.employer})"
 
 
+class DiscoveredBoard(models.Model):
+    """A candidate Greenhouse board found by the discovery pipeline.
+
+    Kept as a separate model from ``JobSource`` rather than a status flag on
+    it — the hourly ingestion sweep filters ``JobSource.is_active`` on every
+    run, and review-queue-only fields (status, discovered_job_count, ...)
+    would sit unused on every row that query touches.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    ats = models.CharField(
+        max_length=32, choices=JobSource.ATS.choices, default=JobSource.ATS.GREENHOUSE
+    )
+    board_token = models.CharField(
+        max_length=255,
+        help_text="ATS board identifier extracted from the discovery search result.",
+    )
+    source_url = models.URLField(
+        max_length=1024,
+        blank=True,
+        default="",
+        help_text="Where this candidate was found (the search result URL).",
+    )
+    derived_employer_name = models.CharField(max_length=255)
+    discovered_job_count = models.IntegerField(
+        default=0,
+        help_text=(
+            "Open job count seen at discovery-time validation — compared "
+            "against the approval-time re-fetch to flag a board that "
+            "changed materially between discovery and review."
+        ),
+    )
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+
+    discovered_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["ats", "board_token"],
+                name="uniq_discoveredboard_ats_board_token",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.get_ats_display()}:{self.board_token} ({self.get_status_display()})"
+
+
 class Job(models.Model):
     """A single job posting, shared by all users.
 
