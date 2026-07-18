@@ -31,14 +31,18 @@ docker compose exec web python manage.py migrate
 docker compose exec web python manage.py createsuperuser
 ```
 
-Register a Greenhouse board to ingest (via the admin at `/admin/` or the shell):
+Register a Greenhouse board to ingest — the `board_token` is the path segment
+in a company's `boards.greenhouse.io/<board_token>` careers URL:
 
-```python
-from apps.employers.models import Employer
-from apps.jobs.models import JobSource
-emp = Employer.objects.create(name="Greenhouse", slug="greenhouse")
-JobSource.objects.create(ats="greenhouse", board_token="greenhouse", employer=emp)
+```bash
+docker compose exec web python manage.py add_job_source stripe airbnb figma
 ```
+
+Validates each token against the live Greenhouse API before creating anything
+(so a typo'd token fails with a clear error instead of a dead row), creates the
+`Employer` if it doesn't exist yet, and skips tokens already registered. Pass
+`--name "Display Name"` when registering a single token to override the
+auto-derived (title-cased) employer name.
 
 Trigger ingestion immediately instead of waiting for the hourly Beat run:
 
