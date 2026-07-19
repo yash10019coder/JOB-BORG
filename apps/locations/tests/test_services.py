@@ -1,0 +1,170 @@
+"""Backfill service tests.
+
+Uses the real Job/Profile models (DB-backed, TestCase) since the service
+functions operate on querysets -- but they accept the model class as a
+parameter rather than importing it, so the same functions are exercised here
+exactly as a migration's historical model or the management command's live
+model would call them.
+"""
+from django.test import TestCase
+
+from apps.accounts.models import Profile
+from apps.employers.models import Employer
+from apps.jobs.models import Job, JobSource
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
+from apps.locations.services import (
+    backfill_jobs,
+    backfill_profiles,
+    normalize_target_locations,
+)
+
+
+def _make_job(source_job_id, location="New York, NY, US", alias_version=""):
+    employer = Employer.objects.get_or_create(slug="acme", defaults={"name": "Acme"})[0]
+    source = JobSource.objects.get_or_create(
+        ats=JobSource.ATS.GREENHOUSE, board_token="acme", defaults={"employer": employer}
+    )[0]
+    return Job.objects.create(
+        source_ats="greenhouse",
+        source_job_id=str(source_job_id),
+        employer=employer,
+        title="Engineer",
+        location=location,
+        location_alias_version=alias_version,
+        needs_classification=False,
+    )
+
+
+class BackfillJobsTests(TestCase):
+    def test_unnormalized_rows_get_structured_fields(self):
+        job = _make_job(1, location="Austin, TX, US")
+        backfill_jobs(Job)
+        job.refresh_from_db()
+        self.assertEqual(job.location_city, "Austin")
+        self.assertEqual(job.location_region, "TX")
+        self.assertEqual(job.location_country, "US")
+        self.assertTrue(job.location_resolved)
+        self.assertEqual(job.location_alias_version, CURRENT_LOCATION_ALIAS_VERSION)
+
+    def test_already_current_row_is_skipped_not_reprocessed(self):
+        job = _make_job(1, location="Austin, TX, US",
+                         alias_version=CURRENT_LOCATION_ALIAS_VERSION)
+        job.location_city = "Manually Set"
+        job.save(update_fields=["location_city"])
+
+        backfill_jobs(Job)
+
+        job.refresh_from_db()
+        self.assertEqual(job.location_city, "Manually Set")
+
+    def test_rerun_is_a_safe_no_op(self):
+        _make_job(1, location="Austin, TX, US")
+        first = backfill_jobs(Job)
+        second = backfill_jobs(Job)
+        self.assertEqual(first["updated"], 1)
+        self.assertEqual(second["updated"], 0)
+
+    def test_batch_size_smaller_than_row_count_processes_all_rows(self):
+        for i in range(5):
+            _make_job(i, location="Austin, TX, US")
+        result = backfill_jobs(Job, batch_size=2)
+        self.assertEqual(result["updated"], 5)
+        self.assertEqual(
+            Job.objects.filter(location_alias_version=CURRENT_LOCATION_ALIAS_VERSION).count(),
+            5,
+        )
+
+    def test_concurrently_advanced_row_is_not_regressed(self):
+        # Simulates U3's ingestion path writing fresh, current data to a row
+        # between the backfill's read and write phases -- the backfill must
+        # not overwrite it with stale data computed from the old location.
+        job = _make_job(1, location="Austin, TX, US")
+
+        real_normalize = __import__(
+            "apps.locations.services", fromlist=["normalize_location"]
+        ).normalize_location
+
+        def racing_normalize(raw):
+            # Simulate the race: a concurrent writer advances the row to the
+            # current version with different (fresh) data right after this
+            # backfill call reads the row but before it writes.
+            Job.objects.filter(pk=job.pk).update(
+                location_city="Concurrent City",
+                location_region="CC",
+                location_country="US",
+                location_resolved=True,
+                location_alias_version=CURRENT_LOCATION_ALIAS_VERSION,
+            )
+            return real_normalize(raw)
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = racing_normalize
+        try:
+            backfill_jobs(Job)
+        finally:
+            services_module.normalize_location = original
+
+        job.refresh_from_db()
+        self.assertEqual(job.location_city, "Concurrent City")
+        self.assertEqual(job.location_region, "CC")
+
+    def test_no_signals_or_side_effect_tasks_triggered(self):
+        job = _make_job(1, location="Austin, TX, US")
+        job.needs_classification = False
+        job.save(update_fields=["needs_classification"])
+
+        backfill_jobs(Job)
+
+        job.refresh_from_db()
+        self.assertFalse(job.needs_classification)
+
+
+class BackfillProfilesTests(TestCase):
+    def _make_profile(self, username, locations, alias_version=""):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(username=username, password="pw")
+        profile = user.profile
+        profile.target_locations = locations
+        profile.target_locations_alias_version = alias_version
+        profile.save()
+        return profile
+
+    def test_unnormalized_profile_gets_structured_mirror(self):
+        profile = self._make_profile("alice", ["New York", "London"])
+        backfill_profiles(Profile)
+        profile.refresh_from_db()
+        self.assertEqual(len(profile.target_locations_normalized), 2)
+        self.assertEqual(profile.target_locations_alias_version, CURRENT_LOCATION_ALIAS_VERSION)
+
+    def test_already_current_profile_is_skipped(self):
+        profile = self._make_profile(
+            "bob", ["New York"], alias_version=CURRENT_LOCATION_ALIAS_VERSION
+        )
+        profile.target_locations_normalized = [{"raw": "sentinel"}]
+        profile.save(update_fields=["target_locations_normalized"])
+
+        backfill_profiles(Profile)
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.target_locations_normalized, [{"raw": "sentinel"}])
+
+    def test_no_rematch_side_effect(self):
+        from unittest import mock
+
+        with mock.patch("apps.matching.signals.schedule_rematch") as mocked:
+            self._make_profile("carol", ["New York"])
+            mocked.reset_mock()
+            backfill_profiles(Profile)
+            mocked.assert_not_called()
+
+
+class NormalizeTargetLocationsTests(TestCase):
+    def test_dedupes_on_structured_tuple(self):
+        result = normalize_target_locations(["NYC", "New York"])
+        self.assertEqual(len(result), 1)
+
+    def test_empty_list(self):
+        self.assertEqual(normalize_target_locations([]), [])
