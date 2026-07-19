@@ -3,14 +3,21 @@
 - ``ingest_source`` fetches one board and upserts it.
 - ``ingest_all_active_sources`` is the hourly Beat entry point; it isolates
   per-board failures so one bad board never aborts the others.
+- ``discover_boards`` is the daily Beat entry point that grows the
+  ``JobSource`` registry itself; see
+  docs/plans/2026-07-18-004-feat-job-source-discovery-plan.md.
 """
 import logging
 
 from celery import shared_task
+from django.conf import settings
+from django.db import transaction
 
+from .ingestion.board_search import BoardSearchClient
+from .ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
 from .ingestion.greenhouse_client import GreenhouseClient
 from .ingestion.upsert import upsert_jobs
-from .models import JobSource
+from .models import DiscoveredBoard, JobSource
 
 logger = logging.getLogger(__name__)
 
@@ -62,3 +69,78 @@ def ingest_all_active_sources():
             logger.exception("Ingestion failed for source %s", source_id)
             results.append({"source_id": source_id, "error": True})
     return results
+
+
+@shared_task(name="apps.jobs.discover_boards", time_limit=600, soft_time_limit=540)
+def discover_boards():
+    """Daily Beat entry point — search for new Greenhouse boards and queue
+    validated candidates as pending ``DiscoveredBoard`` rows for reviewer
+    approval. Never raises: a failed search step or a failed validation call
+    is logged and reflected in the run's stats instead of aborting the task,
+    matching ``ingest_all_active_sources``'s per-item isolation posture.
+    """
+    search_result = BoardSearchClient().search_greenhouse_boards()
+
+    # A token can only ever have one JobSource or one DiscoveredBoard row
+    # (both enforce a UniqueConstraint on (ats, board_token)) — excluding
+    # every known token, regardless of JobSource.is_active or DiscoveredBoard
+    # .status, is what keeps re-validation and duplicate-create errors out of
+    # this loop, not just the "active"/"pending" cases R3 names informally.
+    known_tokens = set(
+        JobSource.objects.filter(ats=JobSource.ATS.GREENHOUSE).values_list(
+            "board_token", flat=True
+        )
+    ) | set(
+        DiscoveredBoard.objects.filter(ats=JobSource.ATS.GREENHOUSE).values_list(
+            "board_token", flat=True
+        )
+    )
+
+    # The candidate dataset can hand back thousands of tokens at once
+    # (unlike a paginated search engine query); capping how many new ones get
+    # validated and queued per run keeps reviewer throughput -- not
+    # candidate-source volume -- the bottleneck on growth, per R7/success
+    # criteria.
+    new_tokens = [token for token in search_result.tokens if token not in known_tokens]
+    capped_tokens = new_tokens[: settings.DISCOVERY_MAX_NEW_BOARDS_PER_RUN]
+
+    stats = {
+        "found": len(search_result.tokens),
+        "already_known": len(search_result.tokens) - len(new_tokens),
+        "validated": 0,
+        "failed": 0,
+        "search_failed": search_result.failed,
+        "skipped_for_cap": len(new_tokens) - len(capped_tokens),
+    }
+
+    client = GreenhouseClient()
+    for token in capped_tokens:
+        try:
+            jobs = client.fetch_jobs(token)
+        except (GreenhouseUnavailable, GreenhouseParseError):
+            logger.exception("Discovery validation failed for token %s", token)
+            stats["failed"] += 1
+            continue
+
+        try:
+            # A savepoint, not just a try/except: a failed INSERT poisons the
+            # enclosing transaction for every later query until rolled back
+            # (Postgres aborts the whole transaction on a constraint
+            # violation) -- atomic() here means one token's persistence
+            # failure can't take the rest of the run down with it.
+            with transaction.atomic():
+                DiscoveredBoard.objects.create(
+                    ats=JobSource.ATS.GREENHOUSE,
+                    board_token=token,
+                    derived_employer_name=token.replace("-", " ").title(),
+                    discovered_job_count=len(jobs),
+                )
+        except Exception:  # noqa: BLE001 — one token's failure must not abort the rest
+            logger.exception("Discovery persistence failed for token %s", token)
+            stats["failed"] += 1
+            continue
+
+        stats["validated"] += 1
+
+    logger.info("Discovery run: %s", stats)
+    return stats

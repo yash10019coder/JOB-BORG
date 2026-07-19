@@ -3,7 +3,7 @@ from django.db.models import ProtectedError
 from django.test import TestCase
 
 from apps.employers.models import Employer
-from apps.jobs.models import Job, JobSource
+from apps.jobs.models import DiscoveredBoard, Job, JobSource
 
 
 class JobSourceModelTests(TestCase):
@@ -66,3 +66,28 @@ class JobModelTests(TestCase):
     def test_str(self):
         job = self._make_job(title="Data Scientist")
         self.assertEqual(str(job), "Data Scientist @ Acme")
+
+
+class DiscoveredBoardModelTests(TestCase):
+    def test_defaults(self):
+        board = DiscoveredBoard.objects.create(
+            board_token="stripe", derived_employer_name="Stripe"
+        )
+        self.assertEqual(board.status, DiscoveredBoard.Status.PENDING)
+        self.assertEqual(board.ats, JobSource.ATS.GREENHOUSE)
+        self.assertIsNone(board.reviewed_at)
+
+    def test_ats_board_token_unique(self):
+        DiscoveredBoard.objects.create(
+            board_token="stripe", derived_employer_name="Stripe"
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DiscoveredBoard.objects.create(
+                board_token="stripe", derived_employer_name="Stripe"
+            )
+
+    def test_str(self):
+        board = DiscoveredBoard.objects.create(
+            board_token="stripe", derived_employer_name="Stripe"
+        )
+        self.assertEqual(str(board), "Greenhouse:stripe (Pending)")
