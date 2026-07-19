@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     # Local apps
     "apps.accounts",
     "apps.employers",
+    "apps.locations",
     "apps.jobs",
     "apps.classification",
     "apps.matching",
