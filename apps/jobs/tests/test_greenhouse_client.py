@@ -38,16 +38,26 @@ class NormalizerTests(SimpleTestCase):
         self.assertEqual(
             first["source_url"], "https://job-boards.greenhouse.io/acme/jobs/7982460"
         )
+        # Remote marker stripped, remainder ("united states") resolves via
+        # the curated country alias list.
+        self.assertTrue(first["location_resolved"])
+        self.assertEqual(first["location_country"], "US")
+        self.assertEqual(first["location_alias_version"], "v1")
 
     def test_onsite_job_is_not_remote(self):
         designer = normalize_job(_load_fixture()["jobs"][1])
         self.assertFalse(designer["is_remote"])
+        self.assertTrue(designer["location_resolved"])
+        self.assertEqual(designer["location_city"], "New York")
+        self.assertEqual(designer["location_region"], "NY")
+        self.assertEqual(designer["location_country"], "US")
 
     def test_missing_location_and_content_normalize_to_nulls(self):
         analyst = normalize_job(_load_fixture()["jobs"][2])
         self.assertEqual(analyst["location"], "")
         self.assertFalse(analyst["is_remote"])
         self.assertEqual(analyst["description"], "")
+        self.assertFalse(analyst["location_resolved"])
 
     def test_salary_always_null(self):
         job = normalize_job(_load_fixture()["jobs"][0])
