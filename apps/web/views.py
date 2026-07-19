@@ -26,6 +26,16 @@ _ACTION_STATUS = {
 }
 
 
+def _clean_query(raw):
+    """Strip NUL bytes and whitespace from a search query.
+
+    Postgres text columns reject NUL bytes outright (DataError, not a
+    validation error) — strip them so a stray %00 in the query string or
+    posted form field can't 500 the page.
+    """
+    return raw.replace("\x00", "").strip()
+
+
 def signup(request):
     if request.user.is_authenticated:
         return redirect("recommendations")
@@ -69,10 +79,7 @@ def recommendations(request):
     """
     user = request.user
     show_all = request.GET.get("all") == "1"
-    # Postgres text columns reject NUL bytes outright (DataError, not a
-    # validation error) — strip them so a stray %00 in the query string can't
-    # 500 the page.
-    query = request.GET.get("q", "").replace("\x00", "").strip()
+    query = _clean_query(request.GET.get("q", ""))
 
     dismissed_job_ids = JobApplication.objects.filter(
         user=user, status=JobApplication.Status.DISMISSED
@@ -133,7 +140,7 @@ def job_action(request, job_id):
     params = {}
     if request.POST.get("all") == "1":
         params["all"] = "1"
-    query = request.POST.get("q", "").replace("\x00", "").strip()
+    query = _clean_query(request.POST.get("q", ""))
     if query:
         params["q"] = query
     if params:

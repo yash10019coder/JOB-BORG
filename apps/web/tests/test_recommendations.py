@@ -222,6 +222,28 @@ class RecommendationsViewTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp["Location"], reverse("recommendations"))
 
+    def test_job_action_redirect_preserves_toggle_only(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.2, status=MatchStatus.BELOW_THRESHOLD)
+        self.client.force_login(self.alice)
+
+        resp = self.client.post(
+            reverse("job_action", args=[job.id]), {"action": "save", "all": "1"}
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], f"{reverse('recommendations')}?all=1")
+
+    def test_job_action_redirect_preserves_search_only(self):
+        job = self._job("Python Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.post(
+            reverse("job_action", args=[job.id]), {"action": "save", "q": "python"}
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], f"{reverse('recommendations')}?q=python")
+
     def test_search_input_prefilled_with_query(self):
         job = self._job("Python Engineer")
         self._match(self.alice, job, 0.9)
@@ -257,6 +279,17 @@ class RecommendationsViewTests(TestCase):
         resp = self.client.get(reverse("recommendations"), {"q": "nonexistentzzz"})
         self.assertContains(resp, "No matches found for")
         self.assertNotContains(resp, "No recommendations above the threshold yet")
+
+    def test_search_empty_state_omits_show_all_suggestion_when_already_all(self):
+        job = self._job("Backend Engineer")
+        self._match(self.alice, job, 0.9)
+        self.client.force_login(self.alice)
+
+        resp = self.client.get(
+            reverse("recommendations"), {"q": "nonexistentzzz", "all": "1"}
+        )
+        self.assertContains(resp, "No matches found for")
+        self.assertNotContains(resp, "showing all matches")
 
     def test_matched_tags_explanation_rendered(self):
         job = self._job("Tagged")
