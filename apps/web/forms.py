@@ -2,6 +2,8 @@
 from django import forms
 
 from apps.accounts.models import Profile
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
+from apps.locations.services import normalize_target_locations
 
 # Profile JSON list-fields edited as comma-separated text in the form.
 _LIST_FIELDS = ("target_titles", "target_tags", "target_locations", "excluded_employers")
@@ -61,3 +63,13 @@ class ProfileForm(forms.ModelForm):
 
     def clean_excluded_employers(self):
         return self._clean_list("excluded_employers")
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        instance.target_locations_normalized = normalize_target_locations(
+            instance.target_locations
+        )
+        instance.target_locations_alias_version = CURRENT_LOCATION_ALIAS_VERSION
+        if commit:
+            instance.save()
+        return instance

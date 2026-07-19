@@ -1,0 +1,132 @@
+# JobBorg location alias/hierarchy dataset v1.
+#
+# Curated by hand, not sourced from a geocoding API (see U1 in
+# docs/plans/2026-07-19-001-feat-location-matching-plan.md for the
+# free/self-hosted-vs-paid-API rationale). US coverage is deliberately
+# detailed (states + abbreviations + major metros); non-US coverage starts
+# at country level only and grows over time via apps/locations/engine.py's
+# `resolved=False` signal surfacing curation gaps (see the Job admin's
+# location_resolved filter).
+#
+# Bump `version` (and apps/locations/engine.py's CURRENT_LOCATION_ALIAS_VERSION)
+# whenever this file is re-curated, so the sweep task (apps/locations/tasks.py)
+# knows to re-normalize already-processed rows.
+version: v1
+
+countries:
+  - name: US
+    aliases: [us, usa, united states, united states of america, "u.s.", "u.s.a."]
+  - name: UK
+    aliases: [uk, united kingdom, great britain, "u.k."]
+  - name: Germany
+    aliases: [germany, deutschland]
+  - name: India
+    aliases: [india]
+  - name: Canada
+    aliases: [canada]
+
+# US states only in v1 — the detailed-coverage market. `full_aliases` resolve
+# bare (e.g. a profile target of just "California"); `abbrev_aliases` never
+# resolve bare (rule: a 2-letter code alone is too ambiguous — could be a
+# state, a country code, or nothing) and only resolve with surrounding
+# comma-context (e.g. "Atlanta, GA").
+regions:
+  - name: New York
+    code: NY
+    country: US
+    # "new york" bare is deliberately NOT a full_alias here -- it collides
+    # with the city of the same name (New York, NY), which wins the common
+    # usage case. "New York, NY"/"New York, New York" (comma-qualified)
+    # still resolve the region correctly via in-context lookup.
+    full_aliases: [new york state]
+    abbrev_aliases: [ny]
+  - name: California
+    code: CA
+    country: US
+    full_aliases: [california]
+    abbrev_aliases: [ca]
+  - name: Texas
+    code: TX
+    country: US
+    full_aliases: [texas]
+    abbrev_aliases: [tx]
+  - name: Georgia
+    code: GA
+    country: US
+    # "georgia" the full name is NOT listed as a bare-resolvable alias here —
+    # see `ambiguous_bare_tokens` below, it collides with the country.
+    full_aliases: []
+    abbrev_aliases: [ga]
+  - name: Illinois
+    code: IL
+    country: US
+    full_aliases: [illinois]
+    abbrev_aliases: [il]
+  - name: Washington
+    code: WA
+    country: US
+    full_aliases: [washington]
+    abbrev_aliases: [wa]
+
+cities:
+  - name: New York
+    region: NY
+    country: US
+    aliases: [new york, new york city, nyc, manhattan]
+  - name: Albany
+    region: NY
+    country: US
+    aliases: [albany]
+  - name: San Francisco
+    region: CA
+    country: US
+    aliases: [san francisco, sf]
+  - name: Los Angeles
+    region: CA
+    country: US
+    aliases: [los angeles, la]
+  - name: Austin
+    region: TX
+    country: US
+    aliases: [austin]
+  - name: Atlanta
+    region: GA
+    country: US
+    aliases: [atlanta]
+  - name: Chicago
+    region: IL
+    country: US
+    aliases: [chicago]
+  - name: Seattle
+    region: WA
+    country: US
+    aliases: [seattle]
+  - name: London
+    country: UK
+    aliases: [london]
+  - name: Berlin
+    country: Germany
+    aliases: [berlin]
+  - name: Munich
+    country: Germany
+    aliases: [munich, münchen]
+  - name: Bangalore
+    country: India
+    aliases: [bangalore, bengaluru]
+  - name: Toronto
+    country: Canada
+    aliases: [toronto]
+
+# Bare, unqualified tokens that must never resolve on their own because they
+# collide across two or more real meanings, even though each individual
+# meaning is otherwise unambiguous in context. Comma-qualified forms resolve
+# normally via the city/region entries above only when the qualifying region
+# is itself curated (e.g. "Atlanta, GA" resolves because GA is curated) --
+# MA/OR/ME are not curated in v1, so "Cambridge, MA" and "Portland, OR" stay
+# unresolved rather than silently picking a meaning; add those regions and
+# their city entries here once curated, rather than relying on comma-context
+# alone.
+ambiguous_bare_tokens:
+  - cambridge   # Cambridge, UK vs. Cambridge, MA
+  - portland    # Portland, OR vs. Portland, ME
+  - georgia     # country Georgia vs. Georgia, US state

@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     # Local apps
     "apps.accounts",
     "apps.employers",
+    "apps.locations",
     "apps.jobs",
     "apps.classification",
     "apps.matching",
@@ -148,6 +149,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.classification.sweep_unclassified",
         "schedule": crontab(minute="*/5"),  # catch anything the event path missed
     },
+    "location-alias-sweep": {
+        "task": "apps.locations.sweep_stale_locations",
+        "schedule": crontab(minute="*/5"),  # cheap no-op until the alias table version bumps
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -162,6 +167,8 @@ REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
 REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
+# Batch bound for the location backfill/sweep (shared by both).
+LOCATION_BACKFILL_BATCH_SIZE = env.int("LOCATION_BACKFILL_BATCH_SIZE", default=500)
 # Cap on how many not-yet-known boards discover_boards will validate and
 # queue for review in a single run (R1/R7) -- the candidate dataset can
 # return thousands of tokens at once, and reviewer throughput, not

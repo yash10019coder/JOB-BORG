@@ -15,7 +15,9 @@ def make_employer(slug="acme", name=None):
 
 def make_job(employer, source_job_id="1", *, tags=None, is_remote=True,
              status=Job.Status.OPEN, scraped_at=None, title="Backend Engineer",
-             salary_min=None, salary_max=None, location="Remote - US"):
+             salary_min=None, salary_max=None, location="Remote - US",
+             location_city="", location_region="", location_country="",
+             location_resolved=False, location_alias_version=""):
     return Job.objects.create(
         source_ats="greenhouse",
         source_job_id=str(source_job_id),
@@ -28,11 +30,17 @@ def make_job(employer, source_job_id="1", *, tags=None, is_remote=True,
         salary_min=salary_min,
         salary_max=salary_max,
         location=location,
+        location_city=location_city,
+        location_region=location_region,
+        location_country=location_country,
+        location_resolved=location_resolved,
+        location_alias_version=location_alias_version,
         needs_classification=False,
     )
 
 
 def make_profile(username, *, tags=None, titles=None, locations=None,
+                 locations_normalized=None,
                  excluded=None, min_salary=None, remote_pref=None, is_active=True):
     """Create a user (auto-creates a Profile) and set the profile's criteria."""
     user = User.objects.create_user(username=username, password="pw")
@@ -40,6 +48,7 @@ def make_profile(username, *, tags=None, titles=None, locations=None,
     profile.target_tags = tags or []
     profile.target_titles = titles or []
     profile.target_locations = locations or []
+    profile.target_locations_normalized = locations_normalized or []
     profile.excluded_employers = excluded or []
     profile.min_salary = min_salary
     profile.remote_pref = remote_pref or Profile.RemotePref.ANY

@@ -9,17 +9,20 @@ salary fields normalize to None.
 """
 import html
 
+from apps.locations.engine import (
+    CURRENT_LOCATION_ALIAS_VERSION,
+    REMOTE_MARKERS,
+    normalize_location,
+)
+
 from .exceptions import GreenhouseParseError
 
 SOURCE_ATS = "greenhouse"
 
-# Substrings (lowercased) in a location name that mark a posting as remote.
-_REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh")
-
 
 def _derive_is_remote(location_name):
     loc = (location_name or "").lower()
-    return any(marker in loc for marker in _REMOTE_MARKERS)
+    return any(marker in loc for marker in REMOTE_MARKERS)
 
 
 def normalize_job(raw):
@@ -44,6 +47,8 @@ def normalize_job(raw):
     content = raw.get("content") or ""
     description = html.unescape(content)
 
+    structured_location = normalize_location(location_name)
+
     return {
         "source_ats": SOURCE_ATS,
         "source_job_id": str(job_id),
@@ -51,6 +56,11 @@ def normalize_job(raw):
         "description": description,
         "location": location_name,
         "is_remote": _derive_is_remote(location_name),
+        "location_city": structured_location["city"] or "",
+        "location_region": structured_location["region"] or "",
+        "location_country": structured_location["country"] or "",
+        "location_resolved": structured_location["resolved"],
+        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
         "salary_min": None,
         "salary_max": None,
         "source_url": raw.get("absolute_url", ""),

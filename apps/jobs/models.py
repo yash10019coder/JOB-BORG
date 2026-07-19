@@ -140,6 +140,17 @@ class Job(models.Model):
     location = models.CharField(max_length=255, blank=True, default="")
     is_remote = models.BooleanField(default=False)
 
+    # Structured location, derived once at ingestion from ``location`` via
+    # apps.locations.engine.normalize_location (never re-derived downstream —
+    # same posture as is_remote above). location_resolved=False means the
+    # curated alias table couldn't resolve this string; scoring falls back to
+    # substring matching against the raw ``location`` field in that case.
+    location_city = models.CharField(max_length=255, blank=True, default="")
+    location_region = models.CharField(max_length=255, blank=True, default="")
+    location_country = models.CharField(max_length=255, blank=True, default="")
+    location_resolved = models.BooleanField(default=False)
+    location_alias_version = models.CharField(max_length=32, blank=True, default="", db_index=True)
+
     salary_min = models.IntegerField(null=True, blank=True)
     salary_max = models.IntegerField(null=True, blank=True)
 
@@ -180,6 +191,7 @@ class Job(models.Model):
             models.Index(
                 fields=["needs_classification"], name="job_needs_class_idx"
             ),
+            models.Index(fields=["location_resolved"], name="job_location_resolved_idx"),
             # Full-text search over title/description (search bar). config
             # must be a literal string, not the default get_current_ts_config()
             # lookup — Postgres rejects non-IMMUTABLE functions in an index

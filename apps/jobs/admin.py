@@ -137,6 +137,6 @@ class JobAdmin(admin.ModelAdmin):
         "needs_classification",
         "scraped_at",
     )
-    list_filter = ("status", "is_remote", "needs_classification", "source_ats")
+    list_filter = ("status", "is_remote", "needs_classification", "source_ats", "location_resolved")
     search_fields = ("title", "source_job_id", "employer__name")
     readonly_fields = ("content_hash", "created_at", "updated_at")

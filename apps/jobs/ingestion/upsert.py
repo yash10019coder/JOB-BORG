@@ -14,12 +14,21 @@ from apps.jobs.models import Job
 
 from .config import compute_content_hash
 
-# Fields copied from a normalized dict onto the Job row.
+# Fields copied from a normalized dict onto the Job row. Structured location
+# fields are derived purely from `location` (already hashed below via
+# apps/jobs/ingestion/config.py's _HASH_FIELDS) plus a deploy-time-constant
+# alias-table version, so they belong here but deliberately do NOT join
+# _HASH_FIELDS -- see that module's docstring.
 _CONTENT_FIELDS = (
     "title",
     "description",
     "location",
     "is_remote",
+    "location_city",
+    "location_region",
+    "location_country",
+    "location_resolved",
+    "location_alias_version",
     "salary_min",
     "salary_max",
     "source_url",

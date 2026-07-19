@@ -16,6 +16,11 @@ def make_normalized(source_job_id, **overrides):
         "description": "desc",
         "location": "Remote - US",
         "is_remote": True,
+        "location_city": "",
+        "location_region": "",
+        "location_country": "US",
+        "location_resolved": True,
+        "location_alias_version": "v1",
         "salary_min": None,
         "salary_max": None,
         "source_url": f"https://example.com/{source_job_id}",
@@ -38,6 +43,51 @@ class UpsertJobsTests(TestCase):
         self.assertEqual(Job.objects.filter(needs_classification=True).count(), 2)
         # Employer resolved via the JobSource FK, not the payload.
         self.assertTrue(all(j.employer_id == self.employer.id for j in Job.objects.all()))
+
+    def test_structured_location_fields_persisted_on_create(self):
+        upsert_jobs(
+            self.source,
+            [make_normalized(1, location="New York, NY, US", location_city="New York",
+                              location_region="NY", location_country="US",
+                              location_resolved=True, location_alias_version="v1")],
+        )
+        job = Job.objects.get(source_job_id="1")
+        self.assertEqual(job.location_city, "New York")
+        self.assertEqual(job.location_region, "NY")
+        self.assertEqual(job.location_country, "US")
+        self.assertTrue(job.location_resolved)
+        self.assertEqual(job.location_alias_version, "v1")
+
+    def test_structured_location_recomputed_when_location_changes(self):
+        upsert_jobs(self.source, [make_normalized(1, location="Remote - US")])
+        Job.objects.update(needs_classification=False)
+
+        upsert_jobs(
+            self.source,
+            [make_normalized(1, location="Austin, TX, US", location_city="Austin",
+                              location_region="TX", location_country="US",
+                              location_resolved=True)],
+        )
+        job = Job.objects.get(source_job_id="1")
+        self.assertEqual(job.location_city, "Austin")
+        self.assertEqual(job.location_region, "TX")
+
+    def test_structured_location_untouched_when_location_unchanged(self):
+        upsert_jobs(
+            self.source,
+            [make_normalized(1, location_city="New York", location_region="NY")],
+        )
+        Job.objects.update(needs_classification=False)
+
+        # Re-ingest with identical content -- content_hash matches, row takes
+        # the unchanged_ids path, structured fields must not be touched.
+        result = upsert_jobs(
+            self.source,
+            [make_normalized(1, location_city="New York", location_region="NY")],
+        )
+        self.assertEqual(len(result.unchanged_ids), 1)
+        job = Job.objects.get(source_job_id="1")
+        self.assertEqual(job.location_city, "New York")
 
     def test_reingest_identical_is_idempotent(self):
         jobs = [make_normalized(1), make_normalized(2)]

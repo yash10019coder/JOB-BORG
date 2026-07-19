@@ -41,6 +41,34 @@ class MatchJobTests(TestCase):
         self.assertGreater(strong_match.match_score, weak_match.match_score)
         self.assertEqual(strong_match.matched_tags, ["kubernetes", "python"])
 
+    def test_onsite_only_match_reflects_corrected_location_scoring_end_to_end(self):
+        # Integration coverage for the ONSITE_ONLY fix: the corrected
+        # location component must actually flow through match_job into a
+        # persisted UserJobMatch, not just the pure scorer in isolation.
+        us_job = make_job(self.employer, source_job_id="us", tags=["python"],
+                           is_remote=False, location="Austin, TX, US",
+                           location_city="Austin", location_region="TX",
+                           location_country="US", location_resolved=True)
+        uk_job = make_job(self.employer, source_job_id="uk", tags=["python"],
+                           is_remote=False, location="London, UK",
+                           location_city="London", location_country="UK",
+                           location_resolved=True)
+        profile = make_profile(
+            "onsiteonly", tags=["python"],
+            remote_pref=Profile.RemotePref.ONSITE_ONLY,
+            locations=["US"],
+            locations_normalized=[
+                {"raw": "US", "city": None, "region": None, "country": "US", "resolved": True}
+            ],
+        )
+
+        match_job(us_job)
+        match_job(uk_job)
+
+        us_match = UserJobMatch.objects.get(user=profile.user, job=us_job)
+        uk_match = UserJobMatch.objects.get(user=profile.user, job=uk_job)
+        self.assertGreater(us_match.match_score, uk_match.match_score)
+
     def test_idempotent_rerun_updates_not_duplicates(self):
         job = make_job(self.employer, tags=["python"])
         make_profile("p", tags=["python"])

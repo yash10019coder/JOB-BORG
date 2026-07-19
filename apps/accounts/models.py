@@ -29,6 +29,16 @@ class Profile(models.Model):
     # matched_tags — the profile-side counterpart the scorer intersects with.
     target_tags = models.JSONField(default=list, blank=True)
     target_locations = models.JSONField(default=list, blank=True)
+    # Structured mirror of target_locations, one entry per raw string, each
+    # shaped {"raw": str, "city": str|None, "region": str|None,
+    # "country": str|None, "resolved": bool} — computed by ProfileForm via
+    # apps.locations.engine.normalize_location whenever target_locations
+    # changes. target_locations itself stays untouched (raw, user-typed) so
+    # the CSV form field round-trips exactly what the user entered.
+    target_locations_normalized = models.JSONField(default=list, blank=True)
+    target_locations_alias_version = models.CharField(
+        max_length=32, blank=True, default="", db_index=True
+    )
     excluded_employers = models.JSONField(
         default=list,
         blank=True,
