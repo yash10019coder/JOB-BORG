@@ -2,6 +2,7 @@
 from django import forms
 
 from apps.accounts.models import Profile
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION, normalize_location
 
 # Profile JSON list-fields edited as comma-separated text in the form.
 _LIST_FIELDS = ("target_titles", "target_tags", "target_locations", "excluded_employers")
@@ -9,6 +10,28 @@ _LIST_FIELDS = ("target_titles", "target_tags", "target_locations", "excluded_em
 
 def _split_csv(value):
     return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def _normalize_target_locations(raw_locations):
+    """Structured mirror of a raw target_locations list.
+
+    One entry per raw string (order preserved, 1:1 with the raw list), deduped
+    on the normalized (city, region, country) tuple so typing "NYC" and
+    "New York" together doesn't double-count in hierarchy matching. Unresolved
+    entries are kept (not dropped) -- scoring treats them as inert, and their
+    presence is what would let a future UI flag "location not recognized".
+    """
+    seen_keys = set()
+    normalized = []
+    for raw in raw_locations:
+        structured = normalize_location(raw)
+        key = (structured["city"], structured["region"], structured["country"])
+        if structured["resolved"] and key in seen_keys:
+            continue
+        if structured["resolved"]:
+            seen_keys.add(key)
+        normalized.append({"raw": raw, **structured})
+    return normalized
 
 
 class ProfileForm(forms.ModelForm):
@@ -61,3 +84,13 @@ class ProfileForm(forms.ModelForm):
 
     def clean_excluded_employers(self):
         return self._clean_list("excluded_employers")
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        instance.target_locations_normalized = _normalize_target_locations(
+            instance.target_locations
+        )
+        instance.target_locations_alias_version = CURRENT_LOCATION_ALIAS_VERSION
+        if commit:
+            instance.save()
+        return instance

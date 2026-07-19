@@ -34,7 +34,11 @@ regions:
   - name: New York
     code: NY
     country: US
-    full_aliases: [new york]
+    # "new york" bare is deliberately NOT a full_alias here -- it collides
+    # with the city of the same name (New York, NY), which wins the common
+    # usage case. "New York, NY"/"New York, New York" (comma-qualified)
+    # still resolve the region correctly via in-context lookup.
+    full_aliases: [new york state]
     abbrev_aliases: [ny]
   - name: California
     code: CA

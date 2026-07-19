@@ -59,6 +59,83 @@ class AuthProfileTests(TestCase):
         self.assertEqual(profile.min_salary, 120000)
         self.assertEqual(profile.remote_pref, Profile.RemotePref.REMOTE_ONLY)
 
+    def test_target_locations_normalized_on_save(self):
+        user = User.objects.create_user(username="carol", password="pw")
+        self.client.force_login(user)
+        self.client.post(
+            reverse("profile"),
+            {
+                "full_name": "", "headline": "",
+                "target_titles": "", "target_tags": "",
+                "target_locations": "New York, London",
+                "excluded_employers": "",
+                "remote_pref": Profile.RemotePref.ANY,
+                "is_active": "on",
+            },
+        )
+        profile = User.objects.get(username="carol").profile
+        self.assertEqual(len(profile.target_locations_normalized), 2)
+        resolved_countries = {e["country"] for e in profile.target_locations_normalized}
+        self.assertEqual(resolved_countries, {"US", "UK"})
+        self.assertTrue(all(e["resolved"] for e in profile.target_locations_normalized))
+        self.assertEqual(profile.target_locations_alias_version, "v1")
+
+    def test_target_locations_normalized_empty_when_no_locations(self):
+        user = User.objects.create_user(username="dave", password="pw")
+        self.client.force_login(user)
+        self.client.post(
+            reverse("profile"),
+            {
+                "full_name": "", "headline": "",
+                "target_titles": "", "target_tags": "",
+                "target_locations": "",
+                "excluded_employers": "",
+                "remote_pref": Profile.RemotePref.ANY,
+                "is_active": "on",
+            },
+        )
+        profile = User.objects.get(username="dave").profile
+        self.assertEqual(profile.target_locations_normalized, [])
+
+    def test_target_locations_normalized_keeps_unresolved_entries(self):
+        user = User.objects.create_user(username="erin", password="pw")
+        self.client.force_login(user)
+        self.client.post(
+            reverse("profile"),
+            {
+                "full_name": "", "headline": "",
+                "target_titles": "", "target_tags": "",
+                "target_locations": "New York, Xyzzyville",
+                "excluded_employers": "",
+                "remote_pref": Profile.RemotePref.ANY,
+                "is_active": "on",
+            },
+        )
+        profile = User.objects.get(username="erin").profile
+        self.assertEqual(len(profile.target_locations_normalized), 2)
+        resolved_flags = sorted(e["resolved"] for e in profile.target_locations_normalized)
+        self.assertEqual(resolved_flags, [False, True])
+
+    def test_target_locations_normalized_dedupes_on_structured_tuple(self):
+        user = User.objects.create_user(username="frank", password="pw")
+        self.client.force_login(user)
+        self.client.post(
+            reverse("profile"),
+            {
+                "full_name": "", "headline": "",
+                "target_titles": "", "target_tags": "",
+                "target_locations": "NYC, New York",
+                "excluded_employers": "",
+                "remote_pref": Profile.RemotePref.ANY,
+                "is_active": "on",
+            },
+        )
+        profile = User.objects.get(username="frank").profile
+        # Raw list preserves both user-typed entries (CSV round-trip)...
+        self.assertEqual(profile.target_locations, ["NYC", "New York"])
+        # ...but the structured mirror collapses them to one location.
+        self.assertEqual(len(profile.target_locations_normalized), 1)
+
     def test_saving_profile_enqueues_rematch(self):
         user = User.objects.create_user(username="bob", password="pw")
         self.client.force_login(user)
