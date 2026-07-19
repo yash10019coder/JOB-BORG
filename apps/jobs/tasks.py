@@ -71,7 +71,7 @@ def ingest_all_active_sources():
     return results
 
 
-@shared_task(name="apps.jobs.discover_boards")
+@shared_task(name="apps.jobs.discover_boards", time_limit=600, soft_time_limit=540)
 def discover_boards():
     """Daily Beat entry point — search for new Greenhouse boards and queue
     validated candidates as pending ``DiscoveredBoard`` rows for reviewer

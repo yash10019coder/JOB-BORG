@@ -106,7 +106,7 @@ class BoardSearchClient:
         # greenhouse.io` hosts.
         reader = csv.DictReader(io.StringIO(csv_text))
         return {
-            row["slug"].strip()
+            (row.get("slug") or "").strip()
             for row in reader
-            if row.get("slug", "").strip()
+            if (row.get("slug") or "").strip()
         }

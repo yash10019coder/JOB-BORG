@@ -1,7 +1,7 @@
 """Tests for the ``discover_boards`` daily Celery task."""
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from apps.employers.models import Employer
 from apps.jobs.ingestion.board_search import SearchResult
@@ -145,6 +145,60 @@ class DiscoverBoardsTaskTests(TestCase):
 
         self.assertEqual(stats["already_known"], 1)
         self.assertEqual(DiscoveredBoard.objects.filter(board_token="notion").count(), 1)
+
+    def test_already_approved_or_rejected_discovered_board_is_skipped_without_a_new_validation_call(
+        self,
+    ):
+        # R9: known_tokens excludes every DiscoveredBoard regardless of
+        # status, not just PENDING -- an approved or rejected token must
+        # not be re-discovered/re-validated either.
+        DiscoveredBoard.objects.create(
+            board_token="figma",
+            derived_employer_name="Figma",
+            status=DiscoveredBoard.Status.APPROVED,
+        )
+        DiscoveredBoard.objects.create(
+            board_token="notion",
+            derived_employer_name="Notion",
+            status=DiscoveredBoard.Status.REJECTED,
+        )
+
+        stats = _run_discover_boards(
+            SearchResult(tokens=["figma", "notion"], pages_fetched=1, failed=False),
+            by_board={},  # a validation call would KeyError and fail the test
+        )
+
+        self.assertEqual(stats["already_known"], 2)
+        self.assertEqual(stats["validated"], 0)
+        self.assertEqual(DiscoveredBoard.objects.filter(board_token="figma").count(), 1)
+        self.assertEqual(DiscoveredBoard.objects.filter(board_token="notion").count(), 1)
+
+    def test_new_tokens_beyond_the_per_run_cap_are_skipped_and_counted(self):
+        with override_settings(DISCOVERY_MAX_NEW_BOARDS_PER_RUN=2):
+            stats = _run_discover_boards(
+                SearchResult(
+                    tokens=["figma", "notion", "airbnb", "stripe"],
+                    pages_fetched=1,
+                    failed=False,
+                ),
+                by_board={
+                    "figma": [{"title": "Engineer"}],
+                    "notion": [{"title": "Engineer"}],
+                    # "airbnb"/"stripe" absent -- a validation call for either
+                    # would KeyError and fail the test, proving the cap kept
+                    # them from ever being validated.
+                },
+            )
+
+        self.assertEqual(stats["found"], 4)
+        self.assertEqual(stats["already_known"], 0)
+        self.assertEqual(stats["validated"], 2)
+        self.assertEqual(stats["skipped_for_cap"], 2)
+        self.assertEqual(DiscoveredBoard.objects.count(), 2)
+        self.assertTrue(DiscoveredBoard.objects.filter(board_token="figma").exists())
+        self.assertTrue(DiscoveredBoard.objects.filter(board_token="notion").exists())
+        self.assertFalse(DiscoveredBoard.objects.filter(board_token="airbnb").exists())
+        self.assertFalse(DiscoveredBoard.objects.filter(board_token="stripe").exists())
 
     def test_mixed_run_produces_correct_stats_and_exactly_one_new_row(self):
         employer = Employer.objects.create(name="Airbnb", slug="airbnb")

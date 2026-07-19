@@ -1,5 +1,6 @@
 """Tests for the DiscoveredBoard admin approve/reject actions."""
 from pathlib import Path
+from unittest import mock
 
 import responses
 from django.contrib.admin.sites import AdminSite
@@ -105,6 +106,54 @@ class DiscoveredBoardAdminTests(TestCase):
         self.assertEqual(board.status, DiscoveredBoard.Status.PENDING)
         self.assertIsNone(board.reviewed_at)
         self.assertFalse(JobSource.objects.filter(board_token="gone").exists())
+
+    @responses.activate
+    def test_approve_integrity_error_on_one_row_does_not_abort_the_rest_of_the_batch(self):
+        # Simulates the race where a concurrent request registers the same
+        # token between our check-then-create's read and write: force
+        # register_job_source's "already registered?" lookup to miss (as if
+        # it ran just before the concurrent create()) so its own
+        # JobSource.objects.create() collides with the real unique
+        # constraint and raises IntegrityError.
+        _mock_board("racey-co")
+        _mock_board("clean-co")
+        racey = DiscoveredBoard.objects.create(
+            board_token="racey-co", derived_employer_name="Racey Co"
+        )
+        clean = DiscoveredBoard.objects.create(
+            board_token="clean-co", derived_employer_name="Clean Co"
+        )
+        # A JobSource for "racey-co" already exists (the concurrent winner),
+        # but register_job_source's own lookup is mocked to miss it so its
+        # create() call hits the real UniqueConstraint below.
+        Employer.objects.create(name="Racey Co", slug="racey-co")
+        existing_employer = Employer.objects.get(slug="racey-co")
+        JobSource.objects.create(
+            ats=JobSource.ATS.GREENHOUSE,
+            board_token="racey-co",
+            employer=existing_employer,
+        )
+        qs = DiscoveredBoard.objects.filter(pk__in=[racey.pk, clean.pk])
+
+        real_filter = JobSource.objects.filter
+
+        def fake_filter(*args, **kwargs):
+            if kwargs.get("board_token") == "racey-co":
+                return JobSource.objects.none()
+            return real_filter(*args, **kwargs)
+
+        with mock.patch(
+            "apps.jobs.ingestion.register.JobSource.objects.filter",
+            side_effect=fake_filter,
+        ):
+            self.admin.approve(self._request(), qs)
+
+        racey.refresh_from_db()
+        clean.refresh_from_db()
+        self.assertEqual(racey.status, DiscoveredBoard.Status.PENDING)
+        self.assertEqual(clean.status, DiscoveredBoard.Status.APPROVED)
+        self.assertTrue(JobSource.objects.filter(board_token="clean-co").exists())
+        self.assertEqual(JobSource.objects.filter(board_token="racey-co").count(), 1)
 
     def test_similar_employer_hint_present_when_name_matches_an_existing_employer(self):
         Employer.objects.create(name="Stripe", slug="stripe")

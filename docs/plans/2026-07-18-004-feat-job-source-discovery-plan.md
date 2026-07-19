@@ -8,6 +8,17 @@ origin: docs/brainstorms/2026-07-18-job-source-discovery-requirements.md
 
 # Automated Job Source Discovery
 
+> **Post-implementation note (superseded search mechanism):** the sections
+> below describe the originally-planned Bing-scraping approach to finding
+> candidate boards, kept here as the historical record of what was planned
+> and why. What actually shipped is different: `BoardSearchClient`
+> (`apps/jobs/ingestion/board_search.py`) downloads a static CSV dataset of
+> known ATS boards (`kalil0321/ats-scrapers` on GitHub) rather than scraping
+> Bing. See that module's docstring for the full rationale on why the
+> CSV-dataset approach superseded Bing scraping (and two other earlier
+> approaches). If you're trying to understand what's actually running in
+> production, start there, not here.
+
 ## Summary
 
 Add a `DiscoveredBoard` model and a daily Celery task that queries Bing for `boards.greenhouse.io` URLs, extracts candidate board tokens, validates each against the live Greenhouse API (reusing `GreenhouseClient.fetch_jobs`), and stores validated candidates as pending review rows. A new Django admin `approve`/`reject` action on `DiscoveredBoard` promotes an approved candidate into a `JobSource` through a shared registration helper extracted from `add_job_source`, so the manual and automated paths create employers and sources identically.

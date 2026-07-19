@@ -7,6 +7,7 @@ action so the manual and automated registration paths can never drift.
 from dataclasses import dataclass
 
 from apps.employers.models import Employer
+from apps.jobs.models import JobSource
 
 from .greenhouse_client import GreenhouseClient
 
@@ -15,7 +16,7 @@ from .greenhouse_client import GreenhouseClient
 class RegistrationOutcome:
     status: str  # "registered" or "already_registered"
     employer: Employer
-    job_source: "JobSource"  # noqa: F821 -- avoid circular import at module load
+    job_source: JobSource
     job_count: int
 
 
@@ -26,8 +27,6 @@ def register_job_source(token, employer_name=None, *, client=None):
         GreenhouseUnavailable / GreenhouseParseError: propagated as-is from
         the client — callers decide how to surface a failed validation.
     """
-    from apps.jobs.models import JobSource  # local import: avoid app-loading cycle
-
     client = client or GreenhouseClient()
     jobs = client.fetch_jobs(token)
 

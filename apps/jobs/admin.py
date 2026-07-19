@@ -1,4 +1,5 @@
 from django.contrib import admin, messages
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.employers.models import Employer
@@ -53,13 +54,29 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
         approved = 0
         for board in queryset.filter(status=DiscoveredBoard.Status.PENDING):
             try:
-                outcome = register_job_source(
-                    board.board_token, employer_name=board.derived_employer_name
-                )
+                # A savepoint, not just a try/except: a failed INSERT (e.g. a
+                # concurrent approval of the same token racing us to
+                # uniq_jobsource_ats_board_token) poisons the enclosing
+                # transaction for every later query until rolled back --
+                # atomic() here means one row's registration failure can't
+                # take the rest of this bulk action down with it, mirroring
+                # apps.jobs.tasks.discover_boards's own per-token savepoint.
+                with transaction.atomic():
+                    outcome = register_job_source(
+                        board.board_token, employer_name=board.derived_employer_name
+                    )
             except (GreenhouseUnavailable, GreenhouseParseError) as exc:
                 self.message_user(
                     request,
                     f"{board.board_token}: could not approve, re-fetch failed ({exc})",
+                    level=messages.ERROR,
+                )
+                continue
+            except IntegrityError as exc:
+                self.message_user(
+                    request,
+                    f"{board.board_token}: could not approve, registration "
+                    f"conflicted with an existing JobSource ({exc})",
                     level=messages.ERROR,
                 )
                 continue
@@ -73,10 +90,26 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
                     level=messages.WARNING,
                 )
 
-            board.status = DiscoveredBoard.Status.APPROVED
-            board.reviewed_at = timezone.now()
-            board.save(update_fields=["status", "reviewed_at", "updated_at"])
-            approved += 1
+            # Conditional on the row still being PENDING at write time (not
+            # just at the queryset filter above) so a concurrent reject() (or
+            # a second concurrent approve()) that mutated this row in the
+            # window since we read it can't be silently clobbered.
+            updated_rows = DiscoveredBoard.objects.filter(
+                pk=board.pk, status=DiscoveredBoard.Status.PENDING
+            ).update(
+                status=DiscoveredBoard.Status.APPROVED,
+                reviewed_at=timezone.now(),
+                updated_at=timezone.now(),
+            )
+            if updated_rows:
+                approved += 1
+            else:
+                self.message_user(
+                    request,
+                    f"{board.board_token}: already actioned by another request "
+                    "concurrently -- skipped.",
+                    level=messages.WARNING,
+                )
 
         if approved:
             self.message_user(request, f"Approved {approved} board(s).")
@@ -84,7 +117,9 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
     @admin.action(description="Reject selected discovered boards")
     def reject(self, request, queryset):
         updated = queryset.filter(status=DiscoveredBoard.Status.PENDING).update(
-            status=DiscoveredBoard.Status.REJECTED, reviewed_at=timezone.now()
+            status=DiscoveredBoard.Status.REJECTED,
+            reviewed_at=timezone.now(),
+            updated_at=timezone.now(),
         )
         if updated:
             self.message_user(request, f"Rejected {updated} board(s).")
