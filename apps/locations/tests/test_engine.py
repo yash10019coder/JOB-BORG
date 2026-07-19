@@ -1,7 +1,10 @@
 """Engine tests — pure, deterministic, no DB (SimpleTestCase)."""
+from unittest import mock
+
 from django.test import SimpleTestCase
 
-from apps.locations.engine import normalize_location
+from apps.locations import engine
+from apps.locations.engine import LocationDataError, normalize_location
 
 
 class NormalizeLocationTests(SimpleTestCase):
@@ -101,3 +104,38 @@ class NormalizeLocationTests(SimpleTestCase):
             normalize_location("Austin, TX, US"),
             normalize_location("Austin, TX, US"),
         )
+
+    def test_unrecognized_tail_does_not_fall_back_to_unconstrained_city(self):
+        # Adversarial-review regression: an unrecognized tail segment must
+        # not be silently discarded in favor of a confident head-only city
+        # match -- that reintroduces a "confidently wrong" version of the
+        # exact bug class this dataset exists to prevent.
+        result = normalize_location("Austin, Georgia")
+        self.assertFalse(result["resolved"])
+
+    def test_unrecognized_tail_stays_unresolved_for_other_cities_too(self):
+        for raw in ("Chicago, Timbuktu", "Seattle, Antarctica"):
+            with self.subTest(raw=raw):
+                self.assertFalse(normalize_location(raw)["resolved"])
+
+
+class LoadIndexTests(SimpleTestCase):
+    def test_missing_version_raises_location_data_error(self):
+        with self.assertRaises(LocationDataError):
+            engine._load_index("does-not-exist")
+
+
+class NormalizeLocationNeverRaisesTests(SimpleTestCase):
+    def test_missing_dataset_file_does_not_raise(self):
+        with mock.patch.object(engine, "_load_index", side_effect=LocationDataError("missing")):
+            result = normalize_location("New York, NY, US")
+        self.assertEqual(
+            result,
+            {"city": None, "region": None, "country": None, "resolved": False},
+        )
+
+    def test_non_string_input_does_not_raise(self):
+        for bad in (12345, ["New York"], {"city": "New York"}):
+            with self.subTest(bad=bad):
+                result = normalize_location(bad)
+                self.assertFalse(result["resolved"])

@@ -37,7 +37,7 @@ class Profile(models.Model):
     # the CSV form field round-trips exactly what the user entered.
     target_locations_normalized = models.JSONField(default=list, blank=True)
     target_locations_alias_version = models.CharField(
-        max_length=32, blank=True, default=""
+        max_length=32, blank=True, default="", db_index=True
     )
     excluded_employers = models.JSONField(
         default=list,

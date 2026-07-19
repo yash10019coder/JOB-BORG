@@ -23,7 +23,7 @@ def forwards(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("jobs", "0005_job_location_alias_version_job_location_city_and_more"),
+        ("jobs", "0006_job_location_alias_version_index"),
     ]
 
     operations = [

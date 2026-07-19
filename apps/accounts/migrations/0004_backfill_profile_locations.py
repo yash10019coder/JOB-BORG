@@ -1,6 +1,6 @@
 """Backfill structured target-location fields on existing Profile rows.
 
-See apps/jobs/migrations/0006_backfill_job_locations.py for the full
+See apps/jobs/migrations/0007_backfill_job_locations.py for the full
 rationale (historical-model resolution, idempotency, race safety) --
 this is the Profile-side counterpart.
 """
@@ -16,7 +16,7 @@ def forwards(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("accounts", "0002_profile_target_locations_alias_version_and_more"),
+        ("accounts", "0003_profile_target_locations_alias_version_index"),
     ]
 
     operations = [

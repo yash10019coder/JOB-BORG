@@ -9,12 +9,15 @@ This app is a dependency-free leaf: it is imported by ``apps/jobs/ingestion``
 and ``apps/web/forms.py``, never the reverse, so it must not import from
 ``apps.jobs``, ``apps.accounts``, or ``apps.matching``.
 """
+import logging
 import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 GEODATA_DIR = Path(__file__).resolve().parent / "geodata"
 
@@ -25,11 +28,12 @@ GEODATA_DIR = Path(__file__).resolve().parent / "geodata"
 # leaves existing rows silently stale.
 CURRENT_LOCATION_ALIAS_VERSION = "v1"
 
-# Substrings (lowercased) that mark a posting as remote. Deliberately a
-# separate copy from apps/jobs/ingestion/normalizers._REMOTE_MARKERS rather
-# than an import — this app must not depend on apps.jobs. Keep the two lists
-# in sync by hand if remote-marker vocabulary changes.
-_REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh")
+# Substrings (lowercased) that mark a posting as remote. Public so
+# apps/jobs/ingestion/normalizers.py's is_remote derivation can reuse the
+# exact same vocabulary instead of hand-maintaining a duplicate copy --
+# apps.jobs already depends on apps.locations (the reverse would violate the
+# leaf-app rule), so this direction of reuse is safe.
+REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh")
 
 _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
@@ -89,7 +93,7 @@ def _load_index(version=CURRENT_LOCATION_ALIAS_VERSION):
 
 
 def _clean(raw):
-    if not raw:
+    if not raw or not isinstance(raw, str):
         return ""
     s = unicodedata.normalize("NFKC", raw)
     s = s.strip().casefold()
@@ -107,7 +111,7 @@ def _first_multi_location_segment(cleaned):
 
 def _strip_remote_markers(cleaned):
     result = cleaned
-    for marker in _REMOTE_MARKERS:
+    for marker in REMOTE_MARKERS:
         result = result.replace(marker, " ")
     result = re.sub(r"[\s\-–—]+", " ", result).strip(" -–—,.")
     return result
@@ -149,7 +153,17 @@ def _resolve_segments(segments, index):
         if region_match:
             region, country = region_match
 
-    if country and region is None and head:
+    if country is None and region is None:
+        # The tail segment is always present here (len(segments) >= 2), but it
+        # didn't resolve to anything curated. Falling through to an
+        # unconstrained head-only city match would silently discard the tail
+        # and confidently resolve garbage like "Austin, Georgia" to Austin,
+        # TX, US -- the exact class of confidently-wrong match this dataset
+        # exists to prevent. An unrecognized tail means the whole entry stays
+        # unresolved, not "trust the city alone."
+        return dict(_UNRESOLVED)
+
+    if region is None and head:
         candidate = head[-1]
         scoped = index.region_scoped_by_country_alias.get((country, candidate))
         if scoped:
@@ -162,21 +176,12 @@ def _resolve_segments(segments, index):
         if matches:
             narrowed = [
                 m for m in matches
-                if (country is None or m["country"] == country)
+                if m["country"] == country
                 and (region is None or m["region"] == region)
             ]
-            chosen = None
             if len(narrowed) == 1:
-                chosen = narrowed[0]
-            elif len(matches) == 1 and country is None and region is None:
-                chosen = matches[0]
-            if chosen:
-                city = chosen
-                country = country or chosen["country"]
-                region = region or chosen["region"]
+                city = narrowed[0]
 
-    if country is None and region is None and city is None:
-        return dict(_UNRESOLVED)
     return {
         "city": city["name"] if city else None,
         "region": region,
@@ -204,5 +209,13 @@ def normalize_location(raw):
         return dict(_UNRESOLVED)
 
     segments = _split_segments(remainder)
-    index = _load_index()
+    try:
+        index = _load_index()
+    except LocationDataError:
+        # Honor the never-raise contract even when the curated dataset itself
+        # is missing or malformed -- every call site (ingestion, profile
+        # save, the backfill/sweep loop) calls this unconditionally and does
+        # not expect an exception.
+        logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
+        return dict(_UNRESOLVED)
     return _resolve_segments(segments, index)

@@ -149,7 +149,7 @@ class Job(models.Model):
     location_region = models.CharField(max_length=255, blank=True, default="")
     location_country = models.CharField(max_length=255, blank=True, default="")
     location_resolved = models.BooleanField(default=False)
-    location_alias_version = models.CharField(max_length=32, blank=True, default="")
+    location_alias_version = models.CharField(max_length=32, blank=True, default="", db_index=True)
 
     salary_min = models.IntegerField(null=True, blank=True)
     salary_max = models.IntegerField(null=True, blank=True)

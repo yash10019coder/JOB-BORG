@@ -119,8 +119,13 @@ cities:
 
 # Bare, unqualified tokens that must never resolve on their own because they
 # collide across two or more real meanings, even though each individual
-# meaning is otherwise unambiguous in context. Comma-qualified forms (e.g.
-# "Cambridge, MA") still resolve normally via the city/region entries above.
+# meaning is otherwise unambiguous in context. Comma-qualified forms resolve
+# normally via the city/region entries above only when the qualifying region
+# is itself curated (e.g. "Atlanta, GA" resolves because GA is curated) --
+# MA/OR/ME are not curated in v1, so "Cambridge, MA" and "Portland, OR" stay
+# unresolved rather than silently picking a meaning; add those regions and
+# their city entries here once curated, rather than relying on comma-context
+# alone.
 ambiguous_bare_tokens:
   - cambridge   # Cambridge, UK vs. Cambridge, MA
   - portland    # Portland, OR vs. Portland, ME
