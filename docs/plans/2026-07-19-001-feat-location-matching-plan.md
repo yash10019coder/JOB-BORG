@@ -1,7 +1,7 @@
 ---
 title: Structured Location Matching
 type: feat
-status: active
+status: completed
 date: 2026-07-19
 ---
 
