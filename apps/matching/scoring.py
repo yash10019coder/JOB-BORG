@@ -5,8 +5,9 @@ in [0, 1], the matched tags (the score's explanation), and the threshold-derived
 status. No DB access — fully unit-testable and deterministic.
 
 profile snapshot keys: target_titles, target_tags, target_locations,
-    excluded_employers, min_salary, remote_pref
-job snapshot keys: title, classification_tags, location, is_remote,
+    target_locations_normalized, excluded_employers, min_salary, remote_pref
+job snapshot keys: title, classification_tags, location, location_city,
+    location_region, location_country, location_resolved, is_remote,
     salary_min, salary_max, employer_slug
 """
 from dataclasses import dataclass
@@ -62,6 +63,50 @@ def _title_component(profile, job):
     return 0.0
 
 
+def _hierarchy_match(target, job):
+    """Does a resolved profile target hierarchy-match a resolved job location?
+
+    Unset levels on the target are wildcards — only compare levels the user
+    actually specified. A target with only ``region`` set (e.g. "California")
+    matches any job in that region regardless of city.
+    """
+    if target["city"] and target["city"] != job.get("location_city"):
+        return False
+    if target["region"] and target["region"] != job.get("location_region"):
+        return False
+    if target["country"] and target["country"] != job.get("location_country"):
+        return False
+    return True
+
+
+def _substring_fallback(raw_targets, raw_location):
+    targets = [loc.lower() for loc in (raw_targets or []) if loc]
+    location = (raw_location or "").lower()
+    return 1.0 if any(t in location for t in targets) else 0.0
+
+
+def _match_targets(profile, job):
+    targets = profile.get("target_locations_normalized") or []
+    if not targets:
+        return 1.0  # no location constraint stated — unchanged semantic
+
+    if any(_hierarchy_match(t, job) for t in targets if t["resolved"]):
+        return 1.0
+
+    if job.get("location_resolved"):
+        # Job is structured; an unresolved/ambiguous target (e.g. bare "NY")
+        # must NOT fall back to raw substring against a resolved job — that
+        # reintroduces the exact false-positive this scorer exists to fix
+        # ("ny" as a substring of "albany"). No hierarchy match on a
+        # structured job means no match, full stop.
+        return 0.0
+
+    # Job itself isn't in the curated alias table yet (thin coverage) — fall
+    # back to the pre-structured substring behavior rather than penalizing
+    # users for a curation gap outside their control.
+    return _substring_fallback(profile.get("target_locations"), job.get("location"))
+
+
 def _location_component(profile, job):
     remote_pref = profile.get("remote_pref", Profile.RemotePref.ANY)
     is_remote = bool(job.get("is_remote"))
@@ -69,16 +114,14 @@ def _location_component(profile, job):
     if remote_pref == Profile.RemotePref.REMOTE_ONLY:
         return 1.0 if is_remote else 0.0
     if remote_pref == Profile.RemotePref.ONSITE_ONLY:
-        return 0.0 if is_remote else 1.0
+        if is_remote:
+            return 0.0
+        return _match_targets(profile, job)
 
     # ANY: remote satisfies location wholesale; otherwise check target locations.
     if is_remote:
         return 1.0
-    targets = [loc.lower() for loc in (profile.get("target_locations") or [])]
-    if not targets:
-        return 1.0  # no location constraint stated
-    location = (job.get("location") or "").lower()
-    return 1.0 if any(t and t in location for t in targets) else 0.0
+    return _match_targets(profile, job)
 
 
 def _salary_component(profile, job):
