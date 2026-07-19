@@ -24,6 +24,8 @@
         {% if match.user_status %}<span class="muted">Status: {{ match.user_status }}</span>{% endif %}
         <form class="actions" method="post" action="{% url 'job_action' job.id %}">
             {% csrf_token %}
+            {% if show_all %}<input type="hidden" name="all" value="1">{% endif %}
+            {% if query %}<input type="hidden" name="q" value="{{ query }}">{% endif %}
             <button type="submit" name="action" value="save">Save</button>
             <button type="submit" name="action" value="apply">Mark applied</button>
             <button type="submit" name="action" value="dismiss">Dismiss</button>

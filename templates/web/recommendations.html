@@ -4,27 +4,48 @@
 <div style="display:flex; align-items:baseline; gap:1rem;">
     <h1 style="flex:1;">{% if show_all %}All matches{% else %}Your recommendations{% endif %}</h1>
     {% if show_all %}
-        <a class="btn" href="{% url 'recommendations' %}">Show recommended only</a>
+        <a class="btn" href="{% querystring all=None %}">Show recommended only</a>
     {% else %}
-        <a class="btn" href="{% url 'recommendations' %}?all=1">Show all matches</a>
+        <a class="btn" href="{% querystring all=1 %}">Show all matches</a>
     {% endif %}
 </div>
 {% if show_all %}
 <p class="muted">Showing every scored job for you, including those below the recommendation threshold.</p>
 {% endif %}
 
+<form method="get" style="margin:0.5rem 0;">
+    {% if show_all %}<input type="hidden" name="all" value="1">{% endif %}
+    <label for="job-search-q" class="muted">Search</label>
+    <input type="search" id="job-search-q" name="q" value="{{ query }}"
+           placeholder="Search by title or keyword" aria-label="Search by title or keyword">
+    <button type="submit">Search</button>
+</form>
+
+{% if query and page_obj and page_obj.object_list %}
+<p class="muted">
+    Showing results for &quot;{{ query }}&quot;.
+    <a href="{% querystring q=None page=None %}">Clear search</a>
+</p>
+{% endif %}
+
 {% if page_obj and page_obj.object_list %}
     {% for match in page_obj %}
-        {% include "web/_job_card.html" with match=match show_all=show_all %}
+        {% include "web/_job_card.html" with match=match show_all=show_all query=query %}
     {% endfor %}
 
     {% if page_obj.has_other_pages %}
     <nav class="muted">
-        {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}{% if show_all %}&all=1{% endif %}">&larr; Prev</a>{% endif %}
+        {% if page_obj.has_previous %}<a href="{% querystring page=page_obj.previous_page_number %}">&larr; Prev</a>{% endif %}
         <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
-        {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}{% if show_all %}&all=1{% endif %}">Next &rarr;</a>{% endif %}
+        {% if page_obj.has_next %}<a href="{% querystring page=page_obj.next_page_number %}">Next &rarr;</a>{% endif %}
     </nav>
     {% endif %}
+{% elif query %}
+    <p class="muted">
+        No matches found for &quot;{{ query }}&quot;.
+        {% if not show_all %}Try <a href="{% querystring all=1 %}">showing all matches</a> with this search, or{% endif %}
+        <a href="{% querystring q=None page=None %}">clear the search</a>.
+    </p>
 {% else %}
     <p class="muted">
         {% if show_all %}
