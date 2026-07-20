@@ -1,7 +1,7 @@
 ---
 title: ATS Platform Expansion (Lever, Ashby, Workday)
 type: feat
-status: active
+status: completed
 date: 2026-07-21
 origin: docs/brainstorms/2026-07-21-ats-platform-expansion-requirements.md
 deepened: 2026-07-21
