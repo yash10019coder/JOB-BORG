@@ -12,6 +12,7 @@ from apps.employers.models import Employer
 from apps.jobs.models import JobSource
 
 from .dispatch import get_client
+from .vendor.workday.scraper import URL_PATTERN as _WORKDAY_URL_PATTERN
 
 
 @dataclass
@@ -20,6 +21,23 @@ class RegistrationOutcome:
     employer: Employer
     job_source: JobSource
     job_count: int
+
+
+def derive_employer_name(ats, token):
+    """Best-effort display name derived from a board token.
+
+    Every other platform's board_token is already a short, readable slug
+    (title-casing it is enough). Workday's token is a full careers URL --
+    title-casing that verbatim would produce something like
+    "Https://Acme.Wd3.Myworkdayjobs.Com/Careers" instead of "Acme", so this
+    extracts the company segment from the URL first.
+    """
+    if ats == JobSource.ATS.WORKDAY:
+        match = _WORKDAY_URL_PATTERN.match(token.rstrip("/"))
+        name_source = match.group("company") if match else token
+    else:
+        name_source = token
+    return name_source.replace("-", " ").replace("_", " ").title()
 
 
 def register_job_source(token, employer_name=None, *, ats=JobSource.ATS.GREENHOUSE, client=None):
@@ -42,7 +60,7 @@ def register_job_source(token, employer_name=None, *, ats=JobSource.ATS.GREENHOU
             job_count=len(jobs),
         )
 
-    name = employer_name or token.replace("-", " ").title()
+    name = employer_name or derive_employer_name(ats, token)
     # Slug is derived from the employer name, not the raw token: board_token
     # isn't always slug-safe (Workday's is a full URL), and keying Employer
     # identity on an ATS-specific token risks two different companies on

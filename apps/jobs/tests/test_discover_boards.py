@@ -297,6 +297,29 @@ class DiscoverBoardsTaskTests(TestCase):
             DiscoveredBoard.objects.filter(ats=JobSource.ATS.ASHBY, board_token="acme").exists()
         )
 
+    def test_workday_candidate_is_discovered_with_a_readable_employer_name(self):
+        # Covers AE2/AE3, generalized to Workday. Workday's board_token is a
+        # full URL (unlike the other platforms' short slugs) -- the derived
+        # employer name must still be readable ("Acme", not the raw URL).
+        stats = _run_discover_boards(
+            SearchResult(
+                tokens=["https://acme.wd3.myworkdayjobs.com/careers"],
+                pages_fetched=1,
+                failed=False,
+            ),
+            by_board={
+                "https://acme.wd3.myworkdayjobs.com/careers": [{"title": "Engineer"}]
+            },
+            ats=JobSource.ATS.WORKDAY,
+        )
+
+        self.assertEqual(stats["validated"], 1)
+        board = DiscoveredBoard.objects.get(
+            board_token="https://acme.wd3.myworkdayjobs.com/careers"
+        )
+        self.assertEqual(board.ats, JobSource.ATS.WORKDAY)
+        self.assertEqual(board.derived_employer_name, "Acme")
+
     def test_unrelated_platform_search_failure_does_not_abort_the_other_platforms(self):
         # If one platform's dataset fetch fails, the others still run.
         from apps.jobs import tasks

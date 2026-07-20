@@ -11,11 +11,13 @@ from apps.jobs.models import JobSource
 from .ashby_client import AshbyClient
 from .greenhouse_client import GreenhouseClient
 from .lever_client import LeverClient
+from .workday_client import WorkdayClient
 
 CLIENT_REGISTRY = {
     JobSource.ATS.GREENHOUSE: GreenhouseClient,
     JobSource.ATS.LEVER: LeverClient,
     JobSource.ATS.ASHBY: AshbyClient,
+    JobSource.ATS.WORKDAY: WorkdayClient,
 }
 
 

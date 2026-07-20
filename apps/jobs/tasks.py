@@ -16,18 +16,18 @@ from django.db import transaction
 from .ingestion.board_search import BoardSearchClient
 from .ingestion.dispatch import get_client
 from .ingestion.exceptions import IngestionParseError, IngestionUnavailable
+from .ingestion.register import derive_employer_name
 from .ingestion.upsert import upsert_jobs
 from .models import DiscoveredBoard, JobSource
 
 logger = logging.getLogger(__name__)
 
-# Platforms discover_boards searches, in order. Workday joins this once its
-# vendored client lands (see docs/plans/2026-07-21-001-feat-ats-platform-
-# expansion-plan.md U9).
+# Platforms discover_boards searches, in order.
 _DISCOVERY_ATS_PLATFORMS = (
     JobSource.ATS.GREENHOUSE,
     JobSource.ATS.LEVER,
     JobSource.ATS.ASHBY,
+    JobSource.ATS.WORKDAY,
 )
 
 
@@ -159,7 +159,7 @@ def _discover_boards_for_ats(ats):
                 DiscoveredBoard.objects.create(
                     ats=ats,
                     board_token=token,
-                    derived_employer_name=token.replace("-", " ").title(),
+                    derived_employer_name=derive_employer_name(ats, token),
                     discovered_job_count=len(jobs),
                 )
         except Exception:  # noqa: BLE001 — one token's failure must not abort the rest

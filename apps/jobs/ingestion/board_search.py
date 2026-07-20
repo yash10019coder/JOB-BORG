@@ -37,12 +37,26 @@ _DATASET_BASE_URL = (
     "https://raw.githubusercontent.com/kalil0321/ats-scrapers/main/ats-companies"
 )
 
-# Per-ats CSV filename in the upstream dataset. All three files share the
+# Per-ats CSV filename in the upstream dataset. All four files share the
 # same `name,slug,url` shape (confirmed against a live fetch of each).
 _DATASET_FILENAME = {
     JobSource.ATS.GREENHOUSE: "greenhouse.csv",
     JobSource.ATS.LEVER: "lever.csv",
     JobSource.ATS.ASHBY: "ashby.csv",
+    JobSource.ATS.WORKDAY: "workday.csv",
+}
+
+# Which CSV column is the board_token for this ats. Greenhouse/Lever/Ashby
+# use the short `slug` column directly. Workday is the odd one out: its
+# board_token is the full careers URL (see WorkdayClient), and the dataset's
+# `slug` column for Workday is a `company/site` shorthand that doesn't match
+# that shape -- confirmed by a live fetch of workday.csv, whose `url` column
+# holds the real `https://{company}.{instance}.myworkdayjobs.com/{site}` URL.
+_TOKEN_COLUMN = {
+    JobSource.ATS.GREENHOUSE: "slug",
+    JobSource.ATS.LEVER: "slug",
+    JobSource.ATS.ASHBY: "slug",
+    JobSource.ATS.WORKDAY: "url",
 }
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -96,7 +110,7 @@ class BoardSearchClient:
         if response is None:
             return SearchResult(tokens=[], pages_fetched=0, failed=True)
 
-        tokens = self._extract_tokens(response.text)
+        tokens = self._extract_tokens(response.text, column=_TOKEN_COLUMN[ats])
         return SearchResult(tokens=sorted(tokens), pages_fetched=1, failed=False)
 
     # -- internals ---------------------------------------------------------
@@ -120,16 +134,10 @@ class BoardSearchClient:
         return None
 
     @staticmethod
-    def _extract_tokens(csv_text):
-        # The dataset's `slug` column is the exact board token (what the
-        # live client's fetch_jobs(board_token) expects) -- using it
-        # directly avoids re-deriving it from the `url` column, which mixes
-        # hosting-domain variants across and even within a single platform
-        # (e.g. Greenhouse's `boards.greenhouse.io` vs newer
-        # `job-boards.greenhouse.io`).
+    def _extract_tokens(csv_text, *, column):
         reader = csv.DictReader(io.StringIO(csv_text))
         return {
-            (row.get("slug") or "").strip()
+            (row.get(column) or "").strip()
             for row in reader
-            if (row.get("slug") or "").strip()
+            if (row.get(column) or "").strip()
         }

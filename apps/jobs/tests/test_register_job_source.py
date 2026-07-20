@@ -84,6 +84,16 @@ class RegisterJobSourceTests(TestCase):
         self.assertEqual(outcome.employer.slug, "acme-corp")
         self.assertNotEqual(outcome.employer.slug, token)
 
+    def test_workday_default_employer_name_derived_from_url_company_segment(self):
+        # No employer_name override: register_job_source's own fallback must
+        # not title-case the raw URL verbatim.
+        outcome = register_job_source(
+            "https://acme.wd3.myworkdayjobs.com/careers",
+            ats=JobSource.ATS.WORKDAY,
+            client=_FakeClient(),
+        )
+        self.assertEqual(outcome.employer.name, "Acme")
+
     def test_same_short_token_on_different_platforms_resolves_to_distinct_employers(self):
         register_job_source(
             "careers", employer_name="Acme Corp", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()

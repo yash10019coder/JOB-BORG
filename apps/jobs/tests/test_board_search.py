@@ -12,6 +12,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "greenhouse_companies.c
 GREENHOUSE_URL = f"{_DATASET_BASE_URL}/greenhouse.csv"
 LEVER_URL = f"{_DATASET_BASE_URL}/lever.csv"
 ASHBY_URL = f"{_DATASET_BASE_URL}/ashby.csv"
+WORKDAY_URL = f"{_DATASET_BASE_URL}/workday.csv"
 
 
 class BoardSearchClientTests(SimpleTestCase):
@@ -48,7 +49,23 @@ class BoardSearchClientTests(SimpleTestCase):
 
     def test_unregistered_ats_raises_value_error(self):
         with self.assertRaises(ValueError):
-            self._client().search_boards("workday")
+            self._client().search_boards("indeed")
+
+    @responses.activate
+    def test_workday_dataset_uses_the_url_column_not_slug(self):
+        # Workday's `slug` column is a `company/site` shorthand that doesn't
+        # match the full-URL board_token WorkdayClient requires -- the `url`
+        # column has the real careers URL. Confirmed against a live fetch of
+        # workday.csv.
+        csn_text = (
+            "name,slug,url\n"
+            "Acme,acme/careers,https://acme.wd3.myworkdayjobs.com/careers\n"
+        )
+        responses.add(responses.GET, WORKDAY_URL, body=csn_text, status=200)
+
+        result = self._client().search_boards(JobSource.ATS.WORKDAY)
+
+        self.assertEqual(result.tokens, ["https://acme.wd3.myworkdayjobs.com/careers"])
 
     @responses.activate
     def test_rows_missing_a_slug_are_skipped(self):
