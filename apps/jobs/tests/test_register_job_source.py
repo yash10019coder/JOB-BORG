@@ -21,6 +21,16 @@ def _mock_board(token, status=200, body=None):
     )
 
 
+class _FakeClient:
+    """A minimal client stand-in — returns a fixed job count without HTTP."""
+
+    def __init__(self, job_count=1):
+        self._job_count = job_count
+
+    def fetch_jobs(self, board_token):
+        return [{}] * self._job_count
+
+
 class RegisterJobSourceTests(TestCase):
     @responses.activate
     def test_registers_employer_and_job_source(self):
@@ -63,3 +73,24 @@ class RegisterJobSourceTests(TestCase):
         with self.assertRaises(GreenhouseParseError):
             register_job_source("bad-shape")
         self.assertFalse(JobSource.objects.filter(board_token="bad-shape").exists())
+
+    def test_employer_slug_derived_from_name_not_raw_token(self):
+        # A non-slug-safe token (e.g. Workday's board_token is a full URL)
+        # must not end up as the Employer's slug.
+        token = "https://acme.wd3.myworkdayjobs.com/en-US/careers"
+        outcome = register_job_source(
+            token, employer_name="Acme Corp", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()
+        )
+        self.assertEqual(outcome.employer.slug, "acme-corp")
+        self.assertNotEqual(outcome.employer.slug, token)
+
+    def test_same_short_token_on_different_platforms_resolves_to_distinct_employers(self):
+        register_job_source(
+            "careers", employer_name="Acme Corp", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()
+        )
+        outcome = register_job_source(
+            "careers", employer_name="Widget Co", ats=JobSource.ATS.LEVER, client=_FakeClient()
+        )
+        self.assertEqual(Employer.objects.count(), 2)
+        self.assertNotEqual(outcome.employer.slug, "careers")
+        self.assertEqual(outcome.employer.name, "Widget Co")

@@ -14,6 +14,7 @@ from django.conf import settings
 from django.db import transaction
 
 from .ingestion.board_search import BoardSearchClient
+from .ingestion.dispatch import get_client
 from .ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
 from .ingestion.greenhouse_client import GreenhouseClient
 from .ingestion.upsert import upsert_jobs
@@ -40,7 +41,7 @@ def enqueue_classification(job_ids):
 def ingest_source(source_id):
     """Fetch + upsert a single JobSource. Returns a stats dict."""
     source = JobSource.objects.select_related("employer").get(pk=source_id)
-    client = GreenhouseClient()
+    client = get_client(source.ats)
     normalized = client.fetch_jobs(source.board_token)
     result = upsert_jobs(source, normalized)
     enqueue_classification(result.needs_classification_ids)

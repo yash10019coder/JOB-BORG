@@ -4,7 +4,7 @@ from django.utils import timezone
 
 from apps.employers.models import Employer
 
-from .ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
+from .ingestion.exceptions import IngestionParseError, IngestionUnavailable
 from .ingestion.register import register_job_source
 from .models import DiscoveredBoard, Job, JobSource
 
@@ -42,11 +42,7 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
         name_fragment = obj.derived_employer_name.strip()
         if not name_fragment:
             return ""
-        match = (
-            Employer.objects.filter(name__icontains=name_fragment)
-            .exclude(slug=obj.board_token)
-            .first()
-        )
+        match = Employer.objects.filter(name__icontains=name_fragment).first()
         return f"⚠ {match.name}" if match else ""
 
     @admin.action(description="Approve selected discovered boards")
@@ -63,9 +59,11 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
                 # apps.jobs.tasks.discover_boards's own per-token savepoint.
                 with transaction.atomic():
                     outcome = register_job_source(
-                        board.board_token, employer_name=board.derived_employer_name
+                        board.board_token,
+                        employer_name=board.derived_employer_name,
+                        ats=board.ats,
                     )
-            except (GreenhouseUnavailable, GreenhouseParseError) as exc:
+            except (IngestionUnavailable, IngestionParseError) as exc:
                 self.message_user(
                     request,
                     f"{board.board_token}: could not approve, re-fetch failed ({exc})",
