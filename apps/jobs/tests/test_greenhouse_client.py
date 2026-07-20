@@ -5,7 +5,12 @@ from pathlib import Path
 import responses
 from django.test import SimpleTestCase
 
-from apps.jobs.ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
+from apps.jobs.ingestion.exceptions import (
+    GreenhouseParseError,
+    GreenhouseUnavailable,
+    IngestionParseError,
+    IngestionUnavailable,
+)
 from apps.jobs.ingestion.greenhouse_client import BASE_URL, GreenhouseClient
 from apps.jobs.ingestion.normalizers import normalize_job
 
@@ -144,3 +149,11 @@ class GreenhouseClientTests(SimpleTestCase):
         responses.add(responses.GET, JOBS_URL, body=ConnectTimeout("timed out"))
         with self.assertRaises(GreenhouseUnavailable):
             _client().fetch_jobs(BOARD)
+
+
+class SharedIngestionExceptionHierarchyTests(SimpleTestCase):
+    def test_greenhouse_unavailable_is_also_ingestion_unavailable(self):
+        self.assertIsInstance(GreenhouseUnavailable(), IngestionUnavailable)
+
+    def test_greenhouse_parse_error_is_also_ingestion_parse_error(self):
+        self.assertIsInstance(GreenhouseParseError(), IngestionParseError)
