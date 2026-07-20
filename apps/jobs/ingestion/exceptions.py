@@ -23,3 +23,15 @@ class GreenhouseUnavailable(GreenhouseError, IngestionUnavailable):
 
 class GreenhouseParseError(GreenhouseError, IngestionParseError):
     """The response was reached but its body was malformed / unexpected shape."""
+
+
+class LeverError(IngestionError):
+    """Base class for all Lever client failures."""
+
+
+class LeverUnavailable(LeverError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class LeverParseError(LeverError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""

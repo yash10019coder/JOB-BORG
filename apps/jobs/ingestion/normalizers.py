@@ -15,9 +15,10 @@ from apps.locations.engine import (
     normalize_location,
 )
 
-from .exceptions import GreenhouseParseError
+from .exceptions import GreenhouseParseError, LeverParseError
 
-SOURCE_ATS = "greenhouse"
+GREENHOUSE_SOURCE_ATS = "greenhouse"
+LEVER_SOURCE_ATS = "lever"
 
 
 def _derive_is_remote(location_name):
@@ -25,7 +26,7 @@ def _derive_is_remote(location_name):
     return any(marker in loc for marker in REMOTE_MARKERS)
 
 
-def normalize_job(raw):
+def normalize_greenhouse_job(raw):
     """Return a normalized job dict. Raises GreenhouseParseError on bad shape."""
     if not isinstance(raw, dict):
         raise GreenhouseParseError(
@@ -50,7 +51,7 @@ def normalize_job(raw):
     structured_location = normalize_location(location_name)
 
     return {
-        "source_ats": SOURCE_ATS,
+        "source_ats": GREENHOUSE_SOURCE_ATS,
         "source_job_id": str(job_id),
         "title": title,
         "description": description,
@@ -64,4 +65,57 @@ def normalize_job(raw):
         "salary_min": None,
         "salary_max": None,
         "source_url": raw.get("absolute_url", ""),
+    }
+
+
+def normalize_lever_job(raw):
+    """Return a normalized job dict. Raises LeverParseError on bad shape.
+
+    Field shape confirmed against a live fetch of
+    ``https://api.lever.co/v0/postings/palantir?mode=json`` during
+    implementation (see docs/plans/2026-07-21-001-feat-ats-platform-expansion-plan.md).
+    Lever exposes no structured salary; those fields normalize to None like
+    Greenhouse. Unlike Greenhouse, Lever's ``workplaceType`` is a direct
+    remote/hybrid/onsite flag — used as the primary remote signal, with the
+    location-text fallback kept for postings where it's absent.
+    """
+    if not isinstance(raw, dict):
+        raise LeverParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("id")
+    title = raw.get("text")
+    if not job_id or not title:
+        raise LeverParseError(
+            "Job is missing a required field (id or text)"
+        )
+
+    categories = raw.get("categories") or {}
+    location_name = categories.get("location") or ""
+
+    # descriptionPlain is already unescaped/plain-text (no double-encoding
+    # like Greenhouse's content field), so no html.unescape needed here.
+    description = raw.get("descriptionPlain") or ""
+
+    structured_location = normalize_location(location_name)
+
+    workplace_type = raw.get("workplaceType")
+    is_remote = workplace_type == "remote" or _derive_is_remote(location_name)
+
+    return {
+        "source_ats": LEVER_SOURCE_ATS,
+        "source_job_id": str(job_id),
+        "title": title,
+        "description": description,
+        "location": location_name,
+        "is_remote": is_remote,
+        "location_city": structured_location["city"] or "",
+        "location_region": structured_location["region"] or "",
+        "location_country": structured_location["country"] or "",
+        "location_resolved": structured_location["resolved"],
+        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
+        "salary_min": None,
+        "salary_max": None,
+        "source_url": raw.get("hostedUrl", ""),
     }
