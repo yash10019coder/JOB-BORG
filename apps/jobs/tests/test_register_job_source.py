@@ -94,6 +94,30 @@ class RegisterJobSourceTests(TestCase):
         )
         self.assertEqual(outcome.employer.name, "Acme")
 
+    def test_different_companies_whose_names_slugify_identically_get_distinct_employers(self):
+        # "Acme Inc" and "Acme, Inc." both slugify to "acme-inc" -- naively
+        # keying Employer identity on slugify(name) alone would silently
+        # merge these two unrelated companies onto one Employer row.
+        first = register_job_source(
+            "acme-token", employer_name="Acme Inc", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()
+        )
+        second = register_job_source(
+            "acme-inc-token", employer_name="Acme, Inc.", ats=JobSource.ATS.LEVER, client=_FakeClient()
+        )
+        self.assertNotEqual(first.employer.pk, second.employer.pk)
+        self.assertEqual(Employer.objects.filter(slug__startswith="acme-inc").count(), 2)
+
+    def test_same_company_name_reused_across_platforms_resolves_to_the_same_employer(self):
+        # The exact-match case must still collapse onto one Employer --
+        # only a genuine name mismatch on a slug collision should fork.
+        first = register_job_source(
+            "acme-token", employer_name="Acme Inc", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()
+        )
+        second = register_job_source(
+            "acme-token-2", employer_name="Acme Inc", ats=JobSource.ATS.LEVER, client=_FakeClient()
+        )
+        self.assertEqual(first.employer.pk, second.employer.pk)
+
     def test_same_short_token_on_different_platforms_resolves_to_distinct_employers(self):
         register_job_source(
             "careers", employer_name="Acme Corp", ats=JobSource.ATS.GREENHOUSE, client=_FakeClient()

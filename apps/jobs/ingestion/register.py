@@ -67,10 +67,31 @@ def register_job_source(token, employer_name=None, *, ats=JobSource.ATS.GREENHOU
     # different platforms colliding onto one Employer row if they happen to
     # pick the same short token. slugify(name) matches Employer.save()'s own
     # fallback for employers created outside this path.
-    employer, _ = Employer.objects.get_or_create(
-        slug=slugify(name), defaults={"name": name}
-    )
+    employer = _get_or_create_employer(name)
     job_source = JobSource.objects.create(ats=ats, board_token=token, employer=employer)
     return RegistrationOutcome(
         status="registered", employer=employer, job_source=job_source, job_count=len(jobs)
     )
+
+
+def _get_or_create_employer(name):
+    """Get-or-create an Employer by slugify(name), guarding against silently
+    merging two different companies whose names happen to slugify identically
+    (e.g. "Acme Inc" and "Acme, Inc." both -> "acme-inc").
+
+    A slug collision where the existing row's name doesn't match is treated
+    as a different company, not the same one -- get_or_create's normal
+    behavior would silently attach the new JobSource to the wrong Employer,
+    misattributing jobs. Disambiguate with a numeric suffix instead.
+    """
+    slug = slugify(name)
+    existing = Employer.objects.filter(slug=slug).first()
+    if existing is None:
+        return Employer.objects.create(slug=slug, name=name)
+    if existing.name.strip().casefold() == name.strip().casefold():
+        return existing
+
+    suffix = 2
+    while Employer.objects.filter(slug=f"{slug}-{suffix}").exists():
+        suffix += 1
+    return Employer.objects.create(slug=f"{slug}-{suffix}", name=name)

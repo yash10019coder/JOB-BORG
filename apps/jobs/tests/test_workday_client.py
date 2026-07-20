@@ -66,6 +66,15 @@ class NormalizerTests(SimpleTestCase):
         self.assertFalse(normalized["is_remote"])
         self.assertEqual(normalized["location_city"], "New York")
 
+    def test_salary_passes_through_when_present(self):
+        # Unlike Greenhouse/Lever/Ashby, Workday's Job model can carry real
+        # salary_min/salary_max -- this must pass through unchanged, not get
+        # hardcoded to None like the other three normalizers.
+        job = _make_job(salary_min=120000.0, salary_max=160000.0)
+        normalized = normalize_workday_job(job)
+        self.assertEqual(normalized["salary_min"], 120000.0)
+        self.assertEqual(normalized["salary_max"], 160000.0)
+
     def test_missing_location_and_description_normalize_to_empty_strings(self):
         job = _make_job(location=None, description=None, is_remote=None)
         normalized = normalize_workday_job(job)
@@ -86,6 +95,23 @@ class WorkdayClientTests(SimpleTestCase):
                 WorkdayClient().fetch_jobs("https://evil.example.com/jobs")
             scraper_cls.assert_not_called()
 
+    def test_slash_in_company_segment_is_rejected_before_any_request(self):
+        # Security (SSRF): URL_PATTERN's company group ([^.]+) matches "/"
+        # too, so a naive regex-only check lets a token like
+        # "https://internal-host/evil.wd3.myworkdayjobs.com/site" through --
+        # the request actually built from that (company="internal-host/evil")
+        # resolves to host "internal-host", not myworkdayjobs.com at all
+        # (confirmed via httpx's own URL parser). The safe-label check must
+        # reject this before any request is made.
+        with mock.patch(
+            "apps.jobs.ingestion.workday_client.WorkdayScraper"
+        ) as scraper_cls:
+            with self.assertRaises(WorkdayParseError):
+                WorkdayClient().fetch_jobs(
+                    "https://internal-host/evil.wd3.myworkdayjobs.com/site"
+                )
+            scraper_cls.assert_not_called()
+
     def test_fetch_returns_normalized_jobs(self):
         fake_jobs = [_make_job(ats_id="1"), _make_job(ats_id="2")]
         with mock.patch(
@@ -97,7 +123,9 @@ class WorkdayClientTests(SimpleTestCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual({j["source_job_id"] for j in jobs}, {"1", "2"})
         scraper_cls.assert_called_once_with(
-            VALID_BOARD_TOKEN, timeout=30.0, max_fetch_seconds=None
+            VALID_BOARD_TOKEN,
+            timeout=30.0,
+            max_fetch_seconds=WorkdayClient.DEFAULT_MAX_FETCH_SECONDS,
         )
 
     def test_company_not_found_raises_workday_unavailable(self):

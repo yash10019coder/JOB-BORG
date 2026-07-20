@@ -14,14 +14,41 @@ interface every other client in this package exposes.
 ``https://acme.wd3.myworkdayjobs.com/en-US/careers``), not a short slug like
 the other three platforms -- see the plan's board_token convention note.
 """
+import re
+
 from .exceptions import WorkdayParseError, WorkdayUnavailable
 from .normalizers import normalize_workday_job
 from .vendor.workday.exceptions import ScraperError
 from .vendor.workday.scraper import URL_PATTERN, WorkdayScraper
 
+# URL_PATTERN's `company`/`instance`/`site` groups are permissive about which
+# characters they accept ([^.]+ / [^/?#]+) -- a company segment containing a
+# "/" still matches, e.g. "https://internal-host/evil.wd3.myworkdayjobs.com/
+# site" parses as company="internal-host/evil". WorkdayScraper.fetch() then
+# rebuilds the request URL via plain f-string interpolation
+# (f"https://{company}.{instance}.myworkdayjobs.com/..."), and a "/" in
+# `company` there splits the string's authority component early --
+# confirmed with httpx.Request(...).url.host, the resulting request's real
+# destination host becomes "internal-host", not myworkdayjobs.com at all.
+# This is a live SSRF: discover_boards calls WorkdayClient.fetch_jobs on
+# every new candidate token from an externally-maintained dataset, unattended
+# and before any human review. Restricting company/site to a safe hostname/
+# path-segment character set closes it -- reject before ever constructing a
+# WorkdayScraper, so the vendored (unmodified) code never sees the crafted
+# input.
+_SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 class WorkdayClient:
-    def __init__(self, *, timeout=30.0, max_fetch_seconds=None):
+    # Bounds a single tenant's fetch (pagination + facet subdivision +
+    # description enrichment can mean many sequential/concurrent requests).
+    # Not None by default: nothing in dispatch.py or the callers in tasks.py
+    # passes this explicitly, and discover_boards' Celery soft_time_limit=540
+    # is shared across every platform in one run -- an unbounded Workday
+    # fetch could otherwise consume the entire run's budget by itself.
+    DEFAULT_MAX_FETCH_SECONDS = 120.0
+
+    def __init__(self, *, timeout=30.0, max_fetch_seconds=DEFAULT_MAX_FETCH_SECONDS):
         self.timeout = timeout
         self.max_fetch_seconds = max_fetch_seconds
 
@@ -44,10 +71,15 @@ class WorkdayClient:
         # host construction to the raw input), so this pre-check exists to
         # fail fast with a clearly-typed error rather than as the only line
         # of defense.
-        if not URL_PATTERN.match(board_token.rstrip("/")):
+        match = URL_PATTERN.match(board_token.rstrip("/"))
+        if not match or not (
+            _SAFE_LABEL_RE.match(match.group("company"))
+            and _SAFE_LABEL_RE.match(match.group("site"))
+        ):
             raise WorkdayParseError(
                 f"board_token must be a Workday careers URL matching "
                 f"https://{{company}}.{{instance}}.myworkdayjobs.com/{{site}} "
+                f"(company/site limited to letters, digits, '_', '-') "
                 f"— got {board_token!r}"
             )
 

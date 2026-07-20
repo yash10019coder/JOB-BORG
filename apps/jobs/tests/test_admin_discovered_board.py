@@ -11,9 +11,11 @@ from django.test import RequestFactory, TestCase
 from apps.employers.models import Employer
 from apps.jobs.admin import DiscoveredBoardAdmin
 from apps.jobs.ingestion.greenhouse_client import BASE_URL
+from apps.jobs.ingestion.lever_client import BASE_URL as LEVER_BASE_URL
 from apps.jobs.models import DiscoveredBoard, JobSource
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "greenhouse_board.json"
+LEVER_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "lever_board.json"
 
 
 def _mock_board(token, status=200, job_count=None):
@@ -23,6 +25,14 @@ def _mock_board(token, status=200, job_count=None):
         body = "not found"
     responses.add(
         responses.GET, f"{BASE_URL}/{token}/jobs", body=body, status=status,
+        content_type="application/json",
+    )
+
+
+def _mock_lever_board(token, status=200):
+    body = LEVER_FIXTURE.read_text() if status == 200 else "not found"
+    responses.add(
+        responses.GET, f"{LEVER_BASE_URL}/{token}", body=body, status=status,
         content_type="application/json",
     )
 
@@ -57,6 +67,26 @@ class DiscoveredBoardAdminTests(TestCase):
         self.assertEqual(board.status, DiscoveredBoard.Status.APPROVED)
         self.assertIsNotNone(board.reviewed_at)
         self.assertTrue(JobSource.objects.filter(board_token="figma").exists())
+
+    @responses.activate
+    def test_approve_dispatches_by_the_boards_own_ats_not_greenhouse(self):
+        # A Lever candidate must be validated via LeverClient and registered
+        # with ats=LEVER, not silently treated as Greenhouse.
+        _mock_lever_board("widget-co")
+        board = DiscoveredBoard.objects.create(
+            ats=JobSource.ATS.LEVER,
+            board_token="widget-co",
+            derived_employer_name="Widget Co",
+            discovered_job_count=3,
+        )
+        qs = DiscoveredBoard.objects.filter(pk=board.pk)
+
+        self.admin.approve(self._request(), qs)
+
+        board.refresh_from_db()
+        self.assertEqual(board.status, DiscoveredBoard.Status.APPROVED)
+        job_source = JobSource.objects.get(board_token="widget-co")
+        self.assertEqual(job_source.ats, JobSource.ATS.LEVER)
 
     def test_reject_sets_status_and_creates_no_job_source(self):
         # Covers AE4.

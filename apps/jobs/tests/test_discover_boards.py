@@ -234,6 +234,40 @@ class DiscoverBoardsTaskTests(TestCase):
         self.assertEqual(DiscoveredBoard.objects.count(), 1)
         self.assertTrue(DiscoveredBoard.objects.filter(board_token="figma").exists())
 
+    def test_each_platform_is_validated_with_its_own_client_not_a_shared_default(self):
+        # The other discover_boards tests mock get_client with a fixed
+        # return_value regardless of the `ats` argument, so a bug that
+        # always dispatched to e.g. Greenhouse's client for every platform
+        # wouldn't be caught by them. This test asserts get_client is called
+        # with the matching ats for each platform searched.
+        from apps.jobs import tasks
+
+        requested_ats = []
+
+        def fake_get_client(ats):
+            requested_ats.append(ats)
+            return _FakeIngestionClient(by_board={"widget-co": [{"title": "Job"}]})
+
+        with mock.patch(
+            "apps.jobs.tasks.BoardSearchClient",
+            return_value=_FakeSearchClient(
+                {
+                    JobSource.ATS.LEVER: SearchResult(
+                        tokens=["widget-co"], pages_fetched=1, failed=False
+                    )
+                }
+            ),
+        ), mock.patch(
+            "apps.jobs.tasks.get_client", side_effect=fake_get_client
+        ):
+            tasks.discover_boards()
+
+        # get_client is called once per platform in _DISCOVERY_ATS_PLATFORMS
+        # (even those with zero candidate tokens don't call get_client, since
+        # there's nothing to validate) -- Lever had one token, so it must be
+        # in the requested list with the correct ats.
+        self.assertIn(JobSource.ATS.LEVER, requested_ats)
+
     def test_lever_candidate_is_discovered_and_queued_for_review(self):
         # Covers AE2, generalized to Lever.
         stats = _run_discover_boards(
