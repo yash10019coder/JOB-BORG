@@ -1,15 +1,18 @@
-"""Shared validate-then-persist sequence for turning a Greenhouse board token
-into an Employer + JobSource.
+"""Shared validate-then-persist sequence for turning an ATS board token into
+an Employer + JobSource.
 
 Used by both the ``add_job_source`` command and the discovery admin's approve
 action so the manual and automated registration paths can never drift.
 """
 from dataclasses import dataclass
 
+from django.utils.text import slugify
+
 from apps.employers.models import Employer
 from apps.jobs.models import JobSource
 
-from .greenhouse_client import GreenhouseClient
+from .dispatch import get_client
+from .vendor.workday.scraper import URL_PATTERN as _WORKDAY_URL_PATTERN
 
 
 @dataclass
@@ -20,19 +23,35 @@ class RegistrationOutcome:
     job_count: int
 
 
-def register_job_source(token, employer_name=None, *, client=None):
-    """Validate ``token`` against the live Greenhouse API and register it.
+def derive_employer_name(ats, token):
+    """Best-effort display name derived from a board token.
+
+    Every other platform's board_token is already a short, readable slug
+    (title-casing it is enough). Workday's token is a full careers URL --
+    title-casing that verbatim would produce something like
+    "Https://Acme.Wd3.Myworkdayjobs.Com/Careers" instead of "Acme", so this
+    extracts the company segment from the URL first.
+    """
+    if ats == JobSource.ATS.WORKDAY:
+        match = _WORKDAY_URL_PATTERN.match(token.rstrip("/"))
+        name_source = match.group("company") if match else token
+    else:
+        name_source = token
+    return name_source.replace("-", " ").replace("_", " ").title()
+
+
+def register_job_source(token, employer_name=None, *, ats=JobSource.ATS.GREENHOUSE, client=None):
+    """Validate ``token`` against the live ATS API and register it.
 
     Raises:
-        GreenhouseUnavailable / GreenhouseParseError: propagated as-is from
-        the client — callers decide how to surface a failed validation.
+        IngestionUnavailable / IngestionParseError (or an ATS-specific
+        subclass): propagated as-is from the client — callers decide how to
+        surface a failed validation.
     """
-    client = client or GreenhouseClient()
+    client = client or get_client(ats)
     jobs = client.fetch_jobs(token)
 
-    existing = JobSource.objects.filter(
-        ats=JobSource.ATS.GREENHOUSE, board_token=token
-    ).first()
+    existing = JobSource.objects.filter(ats=ats, board_token=token).first()
     if existing is not None:
         return RegistrationOutcome(
             status="already_registered",
@@ -41,11 +60,38 @@ def register_job_source(token, employer_name=None, *, client=None):
             job_count=len(jobs),
         )
 
-    name = employer_name or token.replace("-", " ").title()
-    employer, _ = Employer.objects.get_or_create(slug=token, defaults={"name": name})
-    job_source = JobSource.objects.create(
-        ats=JobSource.ATS.GREENHOUSE, board_token=token, employer=employer
-    )
+    name = employer_name or derive_employer_name(ats, token)
+    # Slug is derived from the employer name, not the raw token: board_token
+    # isn't always slug-safe (Workday's is a full URL), and keying Employer
+    # identity on an ATS-specific token risks two different companies on
+    # different platforms colliding onto one Employer row if they happen to
+    # pick the same short token. slugify(name) matches Employer.save()'s own
+    # fallback for employers created outside this path.
+    employer = _get_or_create_employer(name)
+    job_source = JobSource.objects.create(ats=ats, board_token=token, employer=employer)
     return RegistrationOutcome(
         status="registered", employer=employer, job_source=job_source, job_count=len(jobs)
     )
+
+
+def _get_or_create_employer(name):
+    """Get-or-create an Employer by slugify(name), guarding against silently
+    merging two different companies whose names happen to slugify identically
+    (e.g. "Acme Inc" and "Acme, Inc." both -> "acme-inc").
+
+    A slug collision where the existing row's name doesn't match is treated
+    as a different company, not the same one -- get_or_create's normal
+    behavior would silently attach the new JobSource to the wrong Employer,
+    misattributing jobs. Disambiguate with a numeric suffix instead.
+    """
+    slug = slugify(name)
+    existing = Employer.objects.filter(slug=slug).first()
+    if existing is None:
+        return Employer.objects.create(slug=slug, name=name)
+    if existing.name.strip().casefold() == name.strip().casefold():
+        return existing
+
+    suffix = 2
+    while Employer.objects.filter(slug=f"{slug}-{suffix}").exists():
+        suffix += 1
+    return Employer.objects.create(slug=f"{slug}-{suffix}", name=name)

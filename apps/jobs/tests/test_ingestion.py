@@ -194,7 +194,7 @@ class IngestTaskTests(TestCase):
         from apps.jobs import tasks
 
         fake = _FakeClient({"acme": [make_normalized(1), make_normalized(2)]})
-        with mock.patch("apps.jobs.tasks.GreenhouseClient", return_value=fake), \
+        with mock.patch("apps.jobs.tasks.get_client", return_value=fake), \
              mock.patch("apps.jobs.tasks.enqueue_classification") as enq:
             stats = tasks.ingest_source(self.source.id)
         self.assertEqual(stats["created"], 2)
@@ -216,10 +216,32 @@ class IngestTaskTests(TestCase):
         )
         from apps.jobs import tasks
 
-        with mock.patch("apps.jobs.tasks.GreenhouseClient", return_value=fake), \
+        with mock.patch("apps.jobs.tasks.get_client", return_value=fake), \
              mock.patch("apps.jobs.tasks.enqueue_classification"):
             results = tasks.ingest_all_active_sources()
 
         # The failing board is reported as an error; the healthy one still ran.
         self.assertTrue(any(r.get("error") for r in results))
         self.assertEqual(Job.objects.filter(source_job_id="50").count(), 1)
+
+    def test_ingest_source_dispatches_by_ats(self):
+        # Covers AE1: a non-Greenhouse JobSource is fetched via the client
+        # its own `ats` value resolves to, not a hardcoded GreenhouseClient.
+        lever_employer = Employer.objects.create(name="Widget Co", slug="widget-co")
+        lever_source = JobSource.objects.create(
+            ats=JobSource.ATS.LEVER, board_token="widget-co", employer=lever_employer
+        )
+        fake_lever_client = _FakeClient({"widget-co": [make_normalized(99)]})
+
+        from apps.jobs import tasks
+
+        def fake_get_client(ats):
+            self.assertEqual(ats, JobSource.ATS.LEVER)
+            return fake_lever_client
+
+        with mock.patch("apps.jobs.tasks.get_client", side_effect=fake_get_client), \
+             mock.patch("apps.jobs.tasks.enqueue_classification"):
+            stats = tasks.ingest_source(lever_source.id)
+
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(Job.objects.get(source_job_id="99").employer, lever_employer)
