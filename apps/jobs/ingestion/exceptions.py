@@ -35,3 +35,15 @@ class LeverUnavailable(LeverError, IngestionUnavailable):
 
 class LeverParseError(LeverError, IngestionParseError):
     """The response was reached but its body was malformed / unexpected shape."""
+
+
+class AshbyError(IngestionError):
+    """Base class for all Ashby client failures."""
+
+
+class AshbyUnavailable(AshbyError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class AshbyParseError(AshbyError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""

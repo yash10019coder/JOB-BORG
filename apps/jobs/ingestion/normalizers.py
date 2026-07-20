@@ -15,10 +15,11 @@ from apps.locations.engine import (
     normalize_location,
 )
 
-from .exceptions import GreenhouseParseError, LeverParseError
+from .exceptions import AshbyParseError, GreenhouseParseError, LeverParseError
 
 GREENHOUSE_SOURCE_ATS = "greenhouse"
 LEVER_SOURCE_ATS = "lever"
+ASHBY_SOURCE_ATS = "ashby"
 
 
 def _derive_is_remote(location_name):
@@ -118,4 +119,53 @@ def normalize_lever_job(raw):
         "salary_min": None,
         "salary_max": None,
         "source_url": raw.get("hostedUrl", ""),
+    }
+
+
+def normalize_ashby_job(raw):
+    """Return a normalized job dict. Raises AshbyParseError on bad shape.
+
+    Field shape confirmed against a live fetch of
+    ``https://api.ashbyhq.com/posting-api/job-board/ramp`` during
+    implementation (see docs/plans/2026-07-21-001-feat-ats-platform-expansion-plan.md).
+    Ashby exposes no structured salary in the public job-board API; those
+    fields normalize to None like Greenhouse and Lever. ``isRemote`` is a
+    direct boolean on the payload — used as the primary remote signal, with
+    the location-text fallback kept for consistency with the other
+    normalizers.
+    """
+    if not isinstance(raw, dict):
+        raise AshbyParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("id")
+    title = raw.get("title")
+    if not job_id or not title:
+        raise AshbyParseError(
+            "Job is missing a required field (id or title)"
+        )
+
+    location_name = raw.get("location") or ""
+    description = raw.get("descriptionPlain") or ""
+
+    structured_location = normalize_location(location_name)
+
+    is_remote = bool(raw.get("isRemote")) or _derive_is_remote(location_name)
+
+    return {
+        "source_ats": ASHBY_SOURCE_ATS,
+        "source_job_id": str(job_id),
+        "title": title,
+        "description": description,
+        "location": location_name,
+        "is_remote": is_remote,
+        "location_city": structured_location["city"] or "",
+        "location_region": structured_location["region"] or "",
+        "location_country": structured_location["country"] or "",
+        "location_resolved": structured_location["resolved"],
+        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
+        "salary_min": None,
+        "salary_max": None,
+        "source_url": raw.get("jobUrl", ""),
     }
