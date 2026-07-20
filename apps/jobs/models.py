@@ -22,6 +22,7 @@ class JobSource(models.Model):
         GREENHOUSE = "greenhouse", "Greenhouse"
         LEVER = "lever", "Lever"
         ASHBY = "ashby", "Ashby"
+        WORKDAY = "workday", "Workday"
 
     ats = models.CharField(max_length=32, choices=ATS.choices, default=ATS.GREENHOUSE)
     board_token = models.CharField(

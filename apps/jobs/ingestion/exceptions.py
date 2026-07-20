@@ -47,3 +47,16 @@ class AshbyUnavailable(AshbyError, IngestionUnavailable):
 
 class AshbyParseError(AshbyError, IngestionParseError):
     """The response was reached but its body was malformed / unexpected shape."""
+
+
+class WorkdayError(IngestionError):
+    """Base class for all Workday client failures."""
+
+
+class WorkdayUnavailable(WorkdayError, IngestionUnavailable):
+    """The board could not be fetched (network error, retries exhausted,
+    company not found, or a board_token that fails the hostname check)."""
+
+
+class WorkdayParseError(WorkdayError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""

@@ -20,6 +20,7 @@ from .exceptions import AshbyParseError, GreenhouseParseError, LeverParseError
 GREENHOUSE_SOURCE_ATS = "greenhouse"
 LEVER_SOURCE_ATS = "lever"
 ASHBY_SOURCE_ATS = "ashby"
+WORKDAY_SOURCE_ATS = "workday"
 
 
 def _derive_is_remote(location_name):
@@ -168,4 +169,40 @@ def normalize_ashby_job(raw):
         "salary_min": None,
         "salary_max": None,
         "source_url": raw.get("jobUrl", ""),
+    }
+
+
+def normalize_workday_job(job):
+    """Return a normalized job dict from a vendored ``Job`` pydantic instance.
+
+    Unlike the other normalizers, the input here is already a validated
+    pydantic model (``apps.jobs.ingestion.vendor.workday.models.Job``)
+    returned by the vendored ``WorkdayScraper.fetch()``, not a raw dict --
+    the scraper itself guarantees required fields (``title``, ``ats_id``)
+    are always populated (with placeholder fallbacks), so there's no
+    dict-shape validation to do here. Workday's public search API exposes no
+    structured salary; those fields normalize to None like every other
+    platform. ``is_remote`` combines the scraper's own remoteType-derived
+    signal with the location-text fallback, same as the other normalizers.
+    """
+    location_name = job.location or ""
+    structured_location = normalize_location(location_name)
+
+    is_remote = bool(job.is_remote) or _derive_is_remote(location_name)
+
+    return {
+        "source_ats": WORKDAY_SOURCE_ATS,
+        "source_job_id": str(job.ats_id) if job.ats_id else "",
+        "title": job.title,
+        "description": job.description or "",
+        "location": location_name,
+        "is_remote": is_remote,
+        "location_city": structured_location["city"] or "",
+        "location_region": structured_location["region"] or "",
+        "location_country": structured_location["country"] or "",
+        "location_resolved": structured_location["resolved"],
+        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
+        "salary_min": job.salary_min,
+        "salary_max": job.salary_max,
+        "source_url": str(job.url) if job.url else "",
     }
