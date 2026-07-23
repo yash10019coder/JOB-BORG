@@ -6,6 +6,68 @@ from django.test import SimpleTestCase
 from apps.locations import engine
 from apps.locations.engine import LocationDataError, normalize_location
 
+# A small dataset with a same-type city collision ("Springfield" in two
+# states) and a cross-type collision ("Georgia" country vs. region), used to
+# test the same-type tiebreak in isolation from whichever real dataset
+# version (v1 or v2) happens to be CURRENT_LOCATION_ALIAS_VERSION -- v1.yaml
+# has no city collisions to exercise this against.
+_TIEBREAK_DATA = {
+    "countries": [
+        {"name": "US", "aliases": ["us"]},
+        {"name": "Georgia", "aliases": ["georgia"]},
+    ],
+    "regions": [
+        {
+            "name": "Illinois",
+            "code": "IL",
+            "country": "US",
+            "full_aliases": ["illinois"],
+            "abbrev_aliases": ["il"],
+        },
+        {
+            "name": "Massachusetts",
+            "code": "MA",
+            "country": "US",
+            "full_aliases": ["massachusetts"],
+            "abbrev_aliases": ["ma"],
+        },
+        {
+            "name": "Pennsylvania",
+            "code": "PA",
+            "country": "US",
+            "full_aliases": ["pennsylvania"],
+            "abbrev_aliases": ["pa"],
+        },
+    ],
+    "cities": [
+        {
+            "name": "Springfield",
+            "region": "IL",
+            "country": "US",
+            "population": 114394,
+            "feature_code": "PPLA",
+            "aliases": ["springfield"],
+        },
+        {
+            "name": "Springfield",
+            "region": "MA",
+            "country": "US",
+            "population": 155929,
+            "feature_code": "PPL",
+            "aliases": ["springfield"],
+        },
+        {
+            "name": "Springfield",
+            "region": "PA",
+            "country": "US",
+            "population": 23363,
+            "feature_code": "PPL",
+            "aliases": ["springfield"],
+        },
+    ],
+    "ambiguous_bare_tokens": ["georgia"],
+}
+
 
 class NormalizeLocationTests(SimpleTestCase):
     def test_full_city_region_country(self):
@@ -139,3 +201,66 @@ class NormalizeLocationNeverRaisesTests(SimpleTestCase):
             with self.subTest(bad=bad):
                 result = normalize_location(bad)
                 self.assertFalse(result["resolved"])
+
+
+class SameTypeCityTiebreakTests(SimpleTestCase):
+    """Covers AE2 -- exercised against a fixture _GeoIndex, not v1/v2.yaml,
+    since v1.yaml has no city-name collisions to test the tiebreak against."""
+
+    def setUp(self):
+        self.index = engine._GeoIndex(_TIEBREAK_DATA)
+
+    def test_bare_same_type_collision_resolves_to_highest_feature_code_tier(self):
+        # Illinois (PPLA, tier 1) beats Massachusetts (PPL, tier 9) even
+        # though Massachusetts has a larger population.
+        result = engine._resolve_bare("springfield", self.index)
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["region"], "IL")
+
+    def test_same_tier_falls_through_to_population(self):
+        # Massachusetts (PPL, 155929) and Pennsylvania (PPL, 23363) share a
+        # tier; population breaks the tie.
+        data = {
+            **_TIEBREAK_DATA,
+            "cities": [c for c in _TIEBREAK_DATA["cities"] if c["region"] != "IL"],
+        }
+        index = engine._GeoIndex(data)
+        result = engine._resolve_bare("springfield", index)
+        self.assertEqual(result["region"], "MA")
+
+    def test_comma_qualified_resolves_specific_candidate_regardless_of_tiebreak(self):
+        result = engine._resolve_segments(["springfield", "ma"], self.index)
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Springfield")
+        self.assertEqual(result["region"], "MA")
+
+    def test_cross_type_collision_stays_unresolved_not_tiebroken(self):
+        # "georgia" is in ambiguous_bare_tokens (country vs. region
+        # homograph) -- must never reach the city tiebreak logic.
+        result = engine._resolve_bare("georgia", self.index)
+        self.assertFalse(result["resolved"])
+
+    def test_narrowed_segments_path_keeps_existing_partial_match_unscoped(self):
+        # _resolve_segments' narrowed-candidate path is deliberately NOT
+        # extended with the tiebreak (see plan Key Technical Decisions) --
+        # a same-name-same-region collision it can't disambiguate stays a
+        # partial match (city=None), not a guess.
+        data = {
+            **_TIEBREAK_DATA,
+            "cities": [
+                {**c, "region": "IL"} for c in _TIEBREAK_DATA["cities"]
+            ],
+        }
+        index = engine._GeoIndex(data)
+        result = engine._resolve_segments(["springfield", "illinois"], index)
+        self.assertTrue(result["resolved"])
+        self.assertIsNone(result["city"])
+        self.assertEqual(result["region"], "IL")
+
+
+class FeatureCodeTierTests(SimpleTestCase):
+    def test_capital_beats_admin_seat(self):
+        self.assertLess(engine.feature_code_tier("PPLC"), engine.feature_code_tier("PPLA"))
+
+    def test_missing_code_sorts_last(self):
+        self.assertGreater(engine.feature_code_tier(None), engine.feature_code_tier("PPLA5"))

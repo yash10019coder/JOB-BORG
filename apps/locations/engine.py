@@ -39,6 +39,33 @@ _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
 _UNRESOLVED = {"city": None, "region": None, "country": None, "resolved": False}
 
+# GeoNames' `feature code` column, tiered by administrative significance --
+# more stable than population alone for same-type city disambiguation
+# (population has documented staleness/duplicate-row issues across GeoNames
+# refreshes; feature code does not drift the same way). Lower tier wins.
+_FEATURE_CODE_TIER = {
+    "PPLC": 0,  # capital of a political entity
+    "PPLA": 1,  # seat of a first-order admin division
+    "PPLA2": 2,
+    "PPLA3": 3,
+    "PPLA4": 4,
+    "PPLA5": 5,
+}
+_DEFAULT_FEATURE_CODE_TIER = 9
+
+
+def feature_code_tier(feature_code):
+    """Lower is more significant. Unknown/plain/missing codes sort last."""
+    return _FEATURE_CODE_TIER.get(feature_code, _DEFAULT_FEATURE_CODE_TIER)
+
+
+def _best_city_candidate(matches):
+    """Same-type tiebreak: highest feature-code tier, then highest population."""
+    return min(
+        matches,
+        key=lambda m: (feature_code_tier(m.get("feature_code")), -(m.get("population") or 0)),
+    )
+
 
 class LocationDataError(Exception):
     """Raised when the curated dataset file is missing or malformed."""
@@ -76,6 +103,8 @@ class _GeoIndex:
                 "name": city["name"],
                 "region": city.get("region"),
                 "country": city["country"],
+                "population": city.get("population"),
+                "feature_code": city.get("feature_code"),
             }
             for alias in city.get("aliases") or []:
                 self.city_by_alias.setdefault(alias, []).append(entry)
@@ -133,8 +162,13 @@ def _resolve_bare(token, index):
         code, country = region
         return {"city": None, "region": code, "country": country, "resolved": True}
     matches = index.city_by_alias.get(token)
-    if matches and len(matches) == 1:
-        m = matches[0]
+    if matches:
+        # Same-type collision (e.g. multiple cities named "Springfield"):
+        # resolve via feature-code tier then population rather than staying
+        # unresolved -- the one city type with a reliable secondary signal.
+        # Cross-type collisions never reach here; they're caught by the
+        # ambiguous_bare_tokens check above (see geodata_generation.py).
+        m = _best_city_candidate(matches)
         return {"city": m["name"], "region": m["region"], "country": m["country"], "resolved": True}
     return dict(_UNRESOLVED)
 
