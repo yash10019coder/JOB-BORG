@@ -75,6 +75,100 @@ def backfill_jobs(job_model, batch_size=None):
     return {"updated": updated}
 
 
+def _iter_stale_by_pk_cursor(model, version_field, only_fields, size):
+    """Yield every row not at CURRENT_LOCATION_ALIAS_VERSION, paginated by
+    an explicit pk cursor rather than backfill_jobs/backfill_profiles'
+    repeatedly-re-query-the-top-N-stale-rows style -- those rely on each
+    write advancing a row out of the staleness filter; a read-only scan has
+    no such write to rely on, so it must track its own cursor instead.
+    """
+    last_pk = 0
+    while True:
+        batch = list(
+            model.objects.exclude(**{version_field: CURRENT_LOCATION_ALIAS_VERSION})
+            .filter(pk__gt=last_pk)
+            .only("id", *only_fields)
+            .order_by("pk")[:size]
+        )
+        if not batch:
+            return
+        yield from batch
+        last_pk = batch[-1].pk
+
+
+def diff_stale_locations(job_model, profile_model, batch_size=None):
+    """Read-only preview of what backfill_jobs/backfill_profiles would
+    change, restricted to rows whose resolved value would actually *change*
+    (or regress to unresolved) -- not rows that would merely newly-resolve,
+    which is the desired, expected outcome of a dataset swap and would
+    otherwise dominate the report with noise.
+
+    This is the safety check for the one path a dataset-version cutover can
+    land wrong silently: a same-type ambiguity tiebreak (see U2) picking a
+    different candidate for a bare alias that the previous dataset version
+    resolved uniquely (it never had a same-type collision to disambiguate).
+    Intended to run against production data *before* CURRENT_LOCATION_ALIAS_VERSION
+    is bumped, so a bad pick is caught as a diff to review, not a silent
+    write.
+    """
+    size = _batch_size(batch_size)
+
+    job_changes = []
+    job_fields = ["location", "location_city", "location_region", "location_country", "location_resolved"]
+    for row in _iter_stale_by_pk_cursor(job_model, "location_alias_version", job_fields, size):
+        if not row.location_resolved:
+            continue
+        structured = normalize_location(row.location)
+        old = (row.location_city, row.location_region, row.location_country)
+        new = (structured["city"] or "", structured["region"] or "", structured["country"] or "")
+        if old != new or not structured["resolved"]:
+            job_changes.append(
+                {
+                    "pk": row.pk,
+                    "location": row.location,
+                    "old": {
+                        "city": row.location_city,
+                        "region": row.location_region,
+                        "country": row.location_country,
+                        "resolved": row.location_resolved,
+                    },
+                    "new": structured,
+                }
+            )
+
+    profile_changes = []
+    profile_fields = ["target_locations", "target_locations_normalized"]
+    for row in _iter_stale_by_pk_cursor(
+        profile_model, "target_locations_alias_version", profile_fields, size
+    ):
+        old_resolved = [e for e in row.target_locations_normalized if e.get("resolved")]
+        if not old_resolved:
+            continue
+        new_normalized = normalize_target_locations(row.target_locations)
+        old_keys = {(e["city"], e["region"], e["country"]) for e in old_resolved}
+        new_keys = {
+            (e["city"], e["region"], e["country"]) for e in new_normalized if e["resolved"]
+        }
+        # Subset check, not equality: a profile with an unrelated SECOND
+        # target_locations entry that newly resolves under v2 must not be
+        # flagged just because new_keys gained an entry old_keys didn't
+        # have -- that's the desired, expected outcome of the dataset
+        # swap, not a value change to review. Only flag when a previously
+        # resolved key is missing or changed (old_keys not a subset of
+        # new_keys).
+        if not old_keys.issubset(new_keys):
+            profile_changes.append(
+                {
+                    "pk": row.pk,
+                    "target_locations": row.target_locations,
+                    "old": row.target_locations_normalized,
+                    "new": new_normalized,
+                }
+            )
+
+    return {"job_changes": job_changes, "profile_changes": profile_changes}
+
+
 def backfill_profiles(profile_model, batch_size=None):
     """Normalize every Profile row not yet at CURRENT_LOCATION_ALIAS_VERSION.
 

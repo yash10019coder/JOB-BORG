@@ -86,7 +86,21 @@ def _substring_fallback(raw_targets, raw_location):
 
 
 def _match_targets(profile, job):
-    targets = profile.get("target_locations_normalized") or []
+    raw_targets = profile.get("target_locations_normalized") or []
+
+    # A target can be "resolved" with every field unset -- apps/locations'
+    # defined "no place info" state for a bare remote/hybrid target string
+    # (e.g. a user typing "Remote" as one of their target_locations
+    # entries). Treat these as if the user hadn't specified them at all:
+    # not a hierarchy-match wildcard (every level unset would otherwise
+    # vacuously match any job, silently defeating the user's *other* real
+    # target locations in the same list) and not a real-but-unresolved
+    # target either (which must still force 0.0 against a resolved job,
+    # per the bare-abbreviation regression this scorer exists to prevent).
+    targets = [
+        t for t in raw_targets
+        if not (t["resolved"] and not (t["city"] or t["region"] or t["country"]))
+    ]
     if not targets:
         return 1.0  # no location constraint stated — unchanged semantic
 

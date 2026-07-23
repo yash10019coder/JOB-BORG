@@ -26,18 +26,79 @@ GEODATA_DIR = Path(__file__).resolve().parent / "geodata"
 # output — the version stamp is the only signal the sweep task uses to find
 # rows that need re-normalizing, so a logic-only fix with no version bump
 # leaves existing rows silently stale.
-CURRENT_LOCATION_ALIAS_VERSION = "v1"
+CURRENT_LOCATION_ALIAS_VERSION = "v2"
 
 # Substrings (lowercased) that mark a posting as remote. Public so
 # apps/jobs/ingestion/normalizers.py's is_remote derivation can reuse the
 # exact same vocabulary instead of hand-maintaining a duplicate copy --
 # apps.jobs already depends on apps.locations (the reverse would violate the
 # leaf-app rule), so this direction of reuse is safe.
-REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh")
+REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh", "world wide")
 
 _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
 _UNRESOLVED = {"city": None, "region": None, "country": None, "resolved": False}
+
+# A defined "no place information, and that's fine" state -- distinct from
+# _UNRESOLVED, which means "there's a place here the dataset hasn't curated
+# yet." A bare remote/hybrid string with nothing left after marker-stripping
+# has nothing a curator could add, so it shouldn't count as a coverage gap
+# (see apps/jobs/admin.py's location_resolved filter).
+_NO_PLACE_INFO = {"city": None, "region": None, "country": None, "resolved": True}
+
+# R7: a trailing "<City> Area" suffix (LinkedIn-style), stripped before place
+# matching. Anchored at the end so it can't interfere with R8's start-anchored
+# prefix stripping.
+_AREA_SUFFIX_RE = re.compile(r"\s+area$")
+
+# R8: a leading two-letter country-code prefix + separator (e.g.
+# "SG - Singapore", "UK - London"). Anchored at the start. Matched against
+# the loaded index's actual country aliases (not blindly any two letters) so
+# it doesn't fire on non-country two-letter tokens -- though a code that's
+# also a common US state abbreviation (e.g. ISO "IN" = India vs. Indiana) is
+# a known, deferred edge case (see plan Open Questions), not evidenced in
+# real data as of this dataset.
+_TWO_LETTER_PREFIX_RE = re.compile(r"^([a-z]{2})\s*-\s*(.+)$")
+
+# GeoNames' `feature code` column, tiered by administrative significance.
+# Used as the *secondary* same-type tiebreak, after population -- see
+# _best_city_candidate for why. Lower tier wins.
+_FEATURE_CODE_TIER = {
+    "PPLC": 0,  # capital of a political entity
+    "PPLA": 1,  # seat of a first-order admin division
+    "PPLA2": 2,
+    "PPLA3": 3,
+    "PPLA4": 4,
+    "PPLA5": 5,
+}
+_DEFAULT_FEATURE_CODE_TIER = 9
+
+
+def feature_code_tier(feature_code):
+    """Lower is more significant. Unknown/plain/missing codes sort last."""
+    return _FEATURE_CODE_TIER.get(feature_code, _DEFAULT_FEATURE_CODE_TIER)
+
+
+def _best_city_candidate(matches):
+    """Same-type tiebreak: highest population, then highest feature-code tier.
+
+    Population leads (reversed from the plan's original feature-code-first
+    design) based on real spot-check evidence against the generated v2
+    dataset: a bare "San Francisco" lookup has 8 same-type candidates
+    worldwide, and feature-code-first picked San Francisco, El Salvador
+    (population 16,152, admin tier 1 -- a department seat) over San
+    Francisco, California (population 827,526, admin tier 2 -- not its
+    state capital). Feature-code tier reflects within-country administrative
+    rank, not global prominence, so it can rank a small foreign admin seat
+    above a much larger, far more likely-intended city. Population is the
+    more direct proxy for "which real place would a job poster most likely
+    mean by writing just the bare name" -- feature-code tier remains the
+    secondary tiebreak for the genuine population-tie case.
+    """
+    return max(
+        matches,
+        key=lambda m: (m.get("population") or 0, -feature_code_tier(m.get("feature_code"))),
+    )
 
 
 class LocationDataError(Exception):
@@ -49,7 +110,15 @@ class _GeoIndex:
 
     def __init__(self, data):
         self.country_by_alias = {}
+        self.country_population = {}
         self.region_full_by_alias = {}
+        # List-valued (unlike region_full_by_alias): same-abbrev collisions
+        # across countries are common in real GeoNames admin1 data (e.g.
+        # "CA" is both California's postal code and Luxembourg's Capellen
+        # district code) and are resolved at lookup time by a
+        # country-population tiebreak (see _resolve_segments), not excluded
+        # at generation time -- unlike region_full_by_alias, whose bare
+        # resolution has no comparable tiebreak signal and fails closed.
         self.region_any_by_alias = {}
         self.region_scoped_by_country_alias = {}
         self.city_by_alias = {}
@@ -57,28 +126,44 @@ class _GeoIndex:
 
         for country in data.get("countries") or []:
             name = country["name"]
+            self.country_population[name] = country.get("population")
             for alias in country.get("aliases") or []:
                 self.country_by_alias[alias] = name
 
         for region in data.get("regions") or []:
             code = region["code"]
             country = region["country"]
+            # full_aliases also register in region_full_by_alias (bare
+            # resolution); comma_context_full_aliases and abbrev_aliases
+            # never do -- comma_context_full_aliases exists specifically
+            # because a region-vs-city same-name collision (e.g.
+            # "Washington" the state vs. Washington, D.C.) demoted the bare
+            # claim so the city wins there, while the comma-qualified
+            # pattern ("Seattle, Washington") has no such collision and
+            # must keep resolving via region_any_by_alias.
             for alias in region.get("full_aliases") or []:
-                self.region_full_by_alias[alias] = (code, country)
-                self.region_any_by_alias[alias] = (code, country)
-                self.region_scoped_by_country_alias[(country, alias)] = code
+                self._register_region_alias(alias, code, country, bare_resolvable=True)
+            for alias in region.get("comma_context_full_aliases") or []:
+                self._register_region_alias(alias, code, country)
             for alias in region.get("abbrev_aliases") or []:
-                self.region_any_by_alias[alias] = (code, country)
-                self.region_scoped_by_country_alias[(country, alias)] = code
+                self._register_region_alias(alias, code, country)
 
         for city in data.get("cities") or []:
             entry = {
                 "name": city["name"],
                 "region": city.get("region"),
                 "country": city["country"],
+                "population": city.get("population"),
+                "feature_code": city.get("feature_code"),
             }
             for alias in city.get("aliases") or []:
                 self.city_by_alias.setdefault(alias, []).append(entry)
+
+    def _register_region_alias(self, alias, code, country, *, bare_resolvable=False):
+        if bare_resolvable:
+            self.region_full_by_alias[alias] = (code, country)
+        self.region_any_by_alias.setdefault(alias, []).append((code, country))
+        self.region_scoped_by_country_alias[(country, alias)] = code
 
 
 @lru_cache(maxsize=None)
@@ -90,6 +175,19 @@ def _load_index(version=CURRENT_LOCATION_ALIAS_VERSION):
     if not isinstance(data, dict):
         raise LocationDataError(f"Location dataset {version!r} is malformed")
     return _GeoIndex(data)
+
+
+def _try_load_index():
+    """``_load_index()``, honoring normalize_location's never-raise contract.
+
+    Returns ``None`` (and logs) on a missing/malformed dataset rather than
+    raising -- every call site treats that the same way (unresolved).
+    """
+    try:
+        return _load_index()
+    except LocationDataError:
+        logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
+        return None
 
 
 def _clean(raw):
@@ -107,6 +205,10 @@ def _first_multi_location_segment(cleaned):
         if delim in cleaned:
             return cleaned.split(delim, 1)[0].strip(" .,-")
     return cleaned
+
+
+def _strip_area_suffix(segment):
+    return _AREA_SUFFIX_RE.sub("", segment)
 
 
 def _strip_remote_markers(cleaned):
@@ -133,8 +235,13 @@ def _resolve_bare(token, index):
         code, country = region
         return {"city": None, "region": code, "country": country, "resolved": True}
     matches = index.city_by_alias.get(token)
-    if matches and len(matches) == 1:
-        m = matches[0]
+    if matches:
+        # Same-type collision (e.g. multiple cities named "Springfield"):
+        # resolve via feature-code tier then population rather than staying
+        # unresolved -- the one city type with a reliable secondary signal.
+        # Cross-type collisions never reach here; they're caught by the
+        # ambiguous_bare_tokens check above (see geodata_generation.py).
+        m = _best_city_candidate(matches)
         return {"city": m["name"], "region": m["region"], "country": m["country"], "resolved": True}
     return dict(_UNRESOLVED)
 
@@ -149,9 +256,16 @@ def _resolve_segments(segments, index):
     country = index.country_by_alias.get(tail)
     region = None
     if country is None:
-        region_match = index.region_any_by_alias.get(tail)
-        if region_match:
-            region, country = region_match
+        region_matches = index.region_any_by_alias.get(tail)
+        if region_matches:
+            # Same-abbrev collisions across countries are common (e.g. "CA"
+            # is both California's postal code and Luxembourg's Capellen
+            # district code) -- prefer the region belonging to the more
+            # populous country, the same "which one did they likely mean"
+            # signal used for the same-type city tiebreak.
+            region, country = max(
+                region_matches, key=lambda m: index.country_population.get(m[1]) or 0
+            )
 
     if country is None and region is None:
         # The tail segment is always present here (len(segments) >= 2), but it
@@ -204,18 +318,41 @@ def normalize_location(raw):
         return dict(_UNRESOLVED)
 
     first_segment = _first_multi_location_segment(cleaned)
-    remainder = _strip_remote_markers(first_segment)
+    # R7/R8 run before R9's dash-collapsing _strip_remote_markers, on the
+    # not-yet-dash-collapsed segment -- both are anchored (end/start) and
+    # don't interact with each other, but _strip_remote_markers' `[\s\-–—]+`
+    # collapse would otherwise destroy the " - " delimiter R8 needs to
+    # recognize a prefix at all (see plan Key Technical Decisions).
+    without_suffix = _strip_area_suffix(first_segment)
+
+    # The dataset is only needed to validate an actual prefix match or to
+    # resolve a real place segment -- a bare remote/hybrid string (a large
+    # fraction of real job postings) never reaches either, so it shouldn't
+    # have to pay for a dataset load at all.
+    index = None
+    prefix_match = _TWO_LETTER_PREFIX_RE.match(without_suffix)
+    if prefix_match:
+        index = _try_load_index()
+        if index is None:
+            return dict(_UNRESOLVED)
+        code, remainder_after_prefix = prefix_match.groups()
+        without_prefix = (
+            remainder_after_prefix.strip() if code in index.country_by_alias else without_suffix
+        )
+    else:
+        without_prefix = without_suffix
+
+    remainder = _strip_remote_markers(without_prefix)
     if not remainder:
-        return dict(_UNRESOLVED)
+        # R9: nothing left after remote-marker stripping means the input was
+        # remote/hybrid noise with no place information -- a defined
+        # "resolved, no location" state, not a coverage gap to flag.
+        return dict(_NO_PLACE_INFO)
+
+    if index is None:
+        index = _try_load_index()
+        if index is None:
+            return dict(_UNRESOLVED)
 
     segments = _split_segments(remainder)
-    try:
-        index = _load_index()
-    except LocationDataError:
-        # Honor the never-raise contract even when the curated dataset itself
-        # is missing or malformed -- every call site (ingestion, profile
-        # save, the backfill/sweep loop) calls this unconditionally and does
-        # not expect an exception.
-        logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
-        return dict(_UNRESOLVED)
     return _resolve_segments(segments, index)
