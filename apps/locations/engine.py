@@ -26,7 +26,7 @@ GEODATA_DIR = Path(__file__).resolve().parent / "geodata"
 # output — the version stamp is the only signal the sweep task uses to find
 # rows that need re-normalizing, so a logic-only fix with no version bump
 # leaves existing rows silently stale.
-CURRENT_LOCATION_ALIAS_VERSION = "v1"
+CURRENT_LOCATION_ALIAS_VERSION = "v2"
 
 # Substrings (lowercased) that mark a posting as remote. Public so
 # apps/jobs/ingestion/normalizers.py's is_remote derivation can reuse the
@@ -60,10 +60,9 @@ _AREA_SUFFIX_RE = re.compile(r"\s+area$")
 # real data as of this dataset.
 _TWO_LETTER_PREFIX_RE = re.compile(r"^([a-z]{2})\s*-\s*(.+)$")
 
-# GeoNames' `feature code` column, tiered by administrative significance --
-# more stable than population alone for same-type city disambiguation
-# (population has documented staleness/duplicate-row issues across GeoNames
-# refreshes; feature code does not drift the same way). Lower tier wins.
+# GeoNames' `feature code` column, tiered by administrative significance.
+# Used as the *secondary* same-type tiebreak, after population -- see
+# _best_city_candidate for why. Lower tier wins.
 _FEATURE_CODE_TIER = {
     "PPLC": 0,  # capital of a political entity
     "PPLA": 1,  # seat of a first-order admin division
@@ -81,10 +80,24 @@ def feature_code_tier(feature_code):
 
 
 def _best_city_candidate(matches):
-    """Same-type tiebreak: highest feature-code tier, then highest population."""
-    return min(
+    """Same-type tiebreak: highest population, then highest feature-code tier.
+
+    Population leads (reversed from the plan's original feature-code-first
+    design) based on real spot-check evidence against the generated v2
+    dataset: a bare "San Francisco" lookup has 8 same-type candidates
+    worldwide, and feature-code-first picked San Francisco, El Salvador
+    (population 16,152, admin tier 1 -- a department seat) over San
+    Francisco, California (population 827,526, admin tier 2 -- not its
+    state capital). Feature-code tier reflects within-country administrative
+    rank, not global prominence, so it can rank a small foreign admin seat
+    above a much larger, far more likely-intended city. Population is the
+    more direct proxy for "which real place would a job poster most likely
+    mean by writing just the bare name" -- feature-code tier remains the
+    secondary tiebreak for the genuine population-tie case.
+    """
+    return max(
         matches,
-        key=lambda m: (feature_code_tier(m.get("feature_code")), -(m.get("population") or 0)),
+        key=lambda m: (m.get("population") or 0, -feature_code_tier(m.get("feature_code"))),
     )
 
 
@@ -97,7 +110,15 @@ class _GeoIndex:
 
     def __init__(self, data):
         self.country_by_alias = {}
+        self.country_population = {}
         self.region_full_by_alias = {}
+        # List-valued (unlike region_full_by_alias): same-abbrev collisions
+        # across countries are common in real GeoNames admin1 data (e.g.
+        # "CA" is both California's postal code and Luxembourg's Capellen
+        # district code) and are resolved at lookup time by a
+        # country-population tiebreak (see _resolve_segments), not excluded
+        # at generation time -- unlike region_full_by_alias, whose bare
+        # resolution has no comparable tiebreak signal and fails closed.
         self.region_any_by_alias = {}
         self.region_scoped_by_country_alias = {}
         self.city_by_alias = {}
@@ -105,6 +126,7 @@ class _GeoIndex:
 
         for country in data.get("countries") or []:
             name = country["name"]
+            self.country_population[name] = country.get("population")
             for alias in country.get("aliases") or []:
                 self.country_by_alias[alias] = name
 
@@ -113,10 +135,19 @@ class _GeoIndex:
             country = region["country"]
             for alias in region.get("full_aliases") or []:
                 self.region_full_by_alias[alias] = (code, country)
-                self.region_any_by_alias[alias] = (code, country)
+                self.region_any_by_alias.setdefault(alias, []).append((code, country))
+                self.region_scoped_by_country_alias[(country, alias)] = code
+            # comma_context_full_aliases: a region-vs-city same-name
+            # collision (e.g. "Washington" the state vs. Washington, D.C.)
+            # demoted the bare/full claim so the city wins there, but the
+            # comma-qualified pattern ("Seattle, Washington") has no such
+            # collision -- populate region_any_by_alias/
+            # region_scoped_by_country_alias only, never region_full_by_alias.
+            for alias in region.get("comma_context_full_aliases") or []:
+                self.region_any_by_alias.setdefault(alias, []).append((code, country))
                 self.region_scoped_by_country_alias[(country, alias)] = code
             for alias in region.get("abbrev_aliases") or []:
-                self.region_any_by_alias[alias] = (code, country)
+                self.region_any_by_alias.setdefault(alias, []).append((code, country))
                 self.region_scoped_by_country_alias[(country, alias)] = code
 
         for city in data.get("cities") or []:
@@ -218,9 +249,16 @@ def _resolve_segments(segments, index):
     country = index.country_by_alias.get(tail)
     region = None
     if country is None:
-        region_match = index.region_any_by_alias.get(tail)
-        if region_match:
-            region, country = region_match
+        region_matches = index.region_any_by_alias.get(tail)
+        if region_matches:
+            # Same-abbrev collisions across countries are common (e.g. "CA"
+            # is both California's postal code and Luxembourg's Capellen
+            # district code) -- prefer the region belonging to the more
+            # populous country, the same "which one did they likely mean"
+            # signal used for the same-type city tiebreak.
+            region, country = max(
+                region_matches, key=lambda m: index.country_population.get(m[1]) or 0
+            )
 
     if country is None and region is None:
         # The tail segment is always present here (len(segments) >= 2), but it

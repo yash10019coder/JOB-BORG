@@ -121,6 +121,26 @@ class BuildGeodataTests(SimpleTestCase):
         london = next(c for c in data["cities"] if c["name"] == "London")
         self.assertIsNone(london["region"])
 
+    def test_alternatename_colliding_with_a_country_alias_is_filtered(self):
+        # Real GeoNames data quality issue: the Serbian town "Inđija" lists
+        # "India" among its alternatenames, which would otherwise mark the
+        # colliding country alias cross-type ambiguous and break resolution
+        # for the whole country. A city's PRIMARY name/asciiname is never
+        # filtered this way -- only alternatenames-sourced aliases are held
+        # to the stricter bar (see geodata_generation._build_cities
+        # docstring). Uses "usa" (already in the fixture's COUNTRIES_TEXT)
+        # as the colliding alias, standing in for the real "india" case.
+        parts = LONDON_ROW.split("\t")
+        parts[1] = "Indjija"
+        parts[2] = "Indjija"
+        parts[3] = "usa,Indjija"
+        fake_city_row = "\t".join(parts)
+        data = self._build(fake_city_row)
+        self.assertNotIn("usa", data["ambiguous_bare_tokens"])
+        indjija = next(c for c in data["cities"] if c["name"] == "Indjija")
+        self.assertNotIn("usa", indjija["aliases"])
+        self.assertIn("indjija", indjija["aliases"])
+
     def test_airport_code_looking_alternatename_is_filtered(self):
         data = self._build(LONDON_ROW)
         london = next(c for c in data["cities"] if c["name"] == "London")
@@ -134,13 +154,17 @@ class BuildGeodataTests(SimpleTestCase):
         springfields = [c for c in data["cities"] if c["name"] == "Springfield"]
         self.assertEqual(len(springfields), 2)
 
-    def test_cross_type_country_vs_city_collision_marked_ambiguous(self):
-        # A city literally named "UK" would collide with the UK country alias.
-        parts = LONDON_ROW.split("\t")
-        parts[1] = "UK"
-        parts[2] = "UK"
-        fake_city_row = "\t".join(parts)
-        data = self._build(fake_city_row)
+    def test_cross_type_country_vs_region_collision_marked_ambiguous(self):
+        # Country vs. region (no city involved) has no "which one is
+        # overwhelmingly more common" precedent the way country-vs-city or
+        # region-vs-city do -- and the origin brainstorm's success criteria
+        # requires this exact homograph to stay unresolved -- so it's the
+        # one case that still fails closed.
+        admin1_text = ADMIN1_TEXT + "US.UK\tUK\tUK\t9999999\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
         self.assertIn("uk", data["ambiguous_bare_tokens"])
         country_aliases = next(c for c in data["countries"] if c["name"] == "UK")["aliases"]
         self.assertNotIn("uk", country_aliases)
@@ -163,6 +187,73 @@ class BuildGeodataTests(SimpleTestCase):
         self.assertNotIn("england", data["ambiguous_bare_tokens"])
         england = next(r for r in data["regions"] if r["name"] == "England")
         self.assertIn("england", england["full_aliases"])
+
+    def test_region_vs_city_same_name_no_country_involved_prefers_city(self):
+        # Real, high-impact GeoNames pattern: "New York" the state and New
+        # York City share a bare name, as do "Washington" the state and
+        # Washington, D.C. v1.yaml's own curation deliberately dropped the
+        # region's claim so the city (the overwhelmingly common real-world
+        # meaning) wins, rather than failing the token closed entirely.
+        admin1_text = ADMIN1_TEXT + "US.NY\tNew York\tNew York\t5128638\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        # Contrive a city literally named "New York" to collide with the
+        # "New York" region full_alias.
+        fake_city_rows = [{**city_rows[0], "name": "New York", "asciiname": "New York"}]
+        data = build_geodata(fake_city_rows, admin1_map, country_rows, min_population=1)
+
+        self.assertNotIn("new york", data["ambiguous_bare_tokens"])
+        ny_region = next(r for r in data["regions"] if r["name"] == "New York")
+        self.assertNotIn("new york", ny_region["full_aliases"])
+        ny_city = next(c for c in data["cities"] if c["name"] == "New York")
+        self.assertIn("new york", ny_city["aliases"])
+        # Comma-context ("Some City, New York") has no collision at all --
+        # demoting the bare claim must not also break this extremely common
+        # pattern (confirmed as a real regression on production data during
+        # implementation: dropping the alias outright broke 250+ real
+        # "City, Washington" rows).
+        self.assertIn("new york", ny_region["comma_context_full_aliases"])
+
+    def test_country_vs_city_same_name_no_region_involved_prefers_country(self):
+        # Real GeoNames pattern: city-states like Singapore are both a
+        # country and their own city entry. _resolve_bare already checks
+        # country before city, so this case needs no exclusion at all --
+        # only the region-vs-city case (above) needs active intervention.
+        countries_text = COUNTRIES_TEXT + "SG\tSGP\t702\tSG\tSingapore\tSingapore\t710\t5638676\tAS\t.sg\tSGD\tDollar\t65\t\t\ten-SG,ms-SG\t1880251\t\t\n"
+        parts = LONDON_ROW.split("\t")
+        parts[1] = "Singapore"
+        parts[2] = "Singapore"
+        parts[8] = "SG"
+        parts[10] = ""
+        fake_city_row = "\t".join(parts)
+        city_rows = parse_cities_file(fake_city_row, min_population=1)
+        admin1_map = parse_admin1_file(ADMIN1_TEXT)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+        self.assertNotIn("singapore", data["ambiguous_bare_tokens"])
+        singapore = next(c for c in data["countries"] if c["name"] == "SG")
+        self.assertIn("singapore", singapore["aliases"])
+
+    def test_country_iso_code_colliding_with_region_abbrev_dropped_from_country(self):
+        # Real GeoNames collision: "GA" is both Gabon's ISO alpha-2 code and
+        # a US state's abbreviation. Without this exclusion,
+        # _resolve_segments' tail lookup ("Atlanta, GA") would confidently
+        # resolve country=Gabon instead of country=US/region=GA, since
+        # country_by_alias is checked before region_any_by_alias.
+        countries_text = COUNTRIES_TEXT + "GA\tGAB\t266\tGB\tGabon\tLibreville\t267668\t2119275\tAF\t.ga\tXAF\tFranc\t241\t\t\tfr-GA,fang,myene\t2400001\tCG,CM,GQ\t\n"
+        admin1_text = ADMIN1_TEXT + "US.GA\tGeorgia\tGeorgia\t4197000\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+        gabon = next(c for c in data["countries"] if c["name"] == "GA")
+        self.assertNotIn("ga", gabon["aliases"])
+
+        georgia = next(r for r in data["regions"] if r["name"] == "Georgia")
+        self.assertIn("ga", georgia["abbrev_aliases"])
 
 
 class RenderYamlTests(SimpleTestCase):

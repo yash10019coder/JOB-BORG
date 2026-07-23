@@ -59,7 +59,8 @@ def _clean_alias(raw):
 
 
 def parse_countries_file(text):
-    """Parse countryInfo.txt -> list of {"iso": str, "iso3": str, "name": str}.
+    """Parse countryInfo.txt -> list of
+    {"iso": str, "iso3": str, "name": str, "population": int}.
 
     Commented header lines (starting with '#') are skipped, matching
     GeoNames' own documented format.
@@ -69,12 +70,18 @@ def parse_countries_file(text):
     for row in reader:
         if not row or row[0].startswith("#"):
             continue
-        if len(row) < 5:
+        if len(row) < 8:
             continue
         iso, iso3, _iso_numeric, _fips, name = row[:5]
         if not iso:
             continue
-        rows.append({"iso": iso.strip(), "iso3": iso3.strip(), "name": name.strip()})
+        try:
+            population = int(row[7]) if row[7] else 0
+        except ValueError:
+            population = 0
+        rows.append(
+            {"iso": iso.strip(), "iso3": iso3.strip(), "name": name.strip(), "population": population}
+        )
     return rows
 
 
@@ -148,7 +155,14 @@ def _build_countries(country_rows):
             if alias:
                 aliases.add(alias)
 
-        countries_list.append({"name": display, "aliases": sorted(aliases), "_iso": iso})
+        countries_list.append(
+            {
+                "name": display,
+                "aliases": sorted(aliases),
+                "population": row["population"],
+                "_iso": iso,
+            }
+        )
         for alias in aliases:
             candidates[alias].add(iso)
 
@@ -194,7 +208,18 @@ def _build_regions(admin1_map):
     return regions_list, full_candidates, abbrev_candidates
 
 
-def _build_cities(city_rows, admin1_map):
+def _build_cities(city_rows, admin1_map, *, country_alias_vocabulary=frozenset()):
+    """``country_alias_vocabulary`` is the set of already-established country
+    aliases. GeoNames' ``alternatenames`` column is a known-messy, uncurated
+    dump (see plan Context & Research / External References) -- a low-value
+    alternate transliteration for one obscure town can coincidentally match
+    a real country's name (confirmed on real data: the Serbian town
+    "Inđija" lists "India" among its ~30 alternatenames, which would
+    otherwise mark "india" cross-type ambiguous and break resolution for
+    the entire country). A city's *primary* name/asciiname is never
+    filtered this way -- only entries sourced from the noisier
+    alternatenames column are held to the stricter bar.
+    """
     cities_list = []
     for row in city_rows:
         country_iso = row["country_code"]
@@ -212,7 +237,7 @@ def _build_cities(city_rows, admin1_map):
             if not raw or _looks_like_airport_code(raw):
                 continue
             alias = _clean_alias(raw)
-            if alias:
+            if alias and alias not in country_alias_vocabulary:
                 aliases.add(alias)
 
         cities_list.append(
@@ -239,9 +264,12 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
 
     countries_list, country_candidates = _build_countries(country_rows)
     regions_list, full_candidates, abbrev_candidates = _build_regions(admin1_map)
-    cities_list = _build_cities(city_rows, admin1_map)
+    cities_list = _build_cities(
+        city_rows, admin1_map, country_alias_vocabulary=frozenset(country_candidates)
+    )
 
     ambiguous = set()
+    region_full_aliases_to_drop = set()
 
     # Cross-type: a bare alias resolving to more than one of {country, region, city}.
     city_alias_index = defaultdict(list)
@@ -249,18 +277,39 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
         for alias in city["aliases"]:
             city_alias_index[alias].append(city)
 
-    all_country_aliases = set(country_candidates)
-    all_region_full_aliases = set(full_candidates)
-
     for alias in set(country_candidates) | set(full_candidates) | set(city_alias_index):
-        types_hit = 0
-        if alias in country_candidates:
-            types_hit += 1
-        if alias in full_candidates:
-            types_hit += 1
-        if alias in city_alias_index:
-            types_hit += 1
-        if types_hit > 1:
+        hits_country = alias in country_candidates
+        hits_region = alias in full_candidates
+        hits_city = alias in city_alias_index
+        types_hit = sum((hits_country, hits_region, hits_city))
+        if types_hit <= 1:
+            continue
+
+        if hits_region and hits_city and not hits_country:
+            # Region-vs-city, same country, no country involved (e.g. "New
+            # York" the state vs. New York City; "Washington" the state vs.
+            # Washington, D.C.) -- v1.yaml's own curation deliberately
+            # dropped the region's claim so the city (the overwhelmingly
+            # more common real-world meaning for a job-board bare location)
+            # wins, rather than failing closed. Confirmed as high-impact on
+            # real production data: bare "New York" and "Washington" are
+            # both extremely common job-posting location strings, and
+            # blanket-failing them closed regressed thousands of rows
+            # during implementation spot-checks.
+            region_full_aliases_to_drop.add(alias)
+        elif hits_country and hits_city and not hits_region:
+            # Country-vs-city, no region involved (e.g. city-states like
+            # "Singapore", which are both a country and their own city
+            # entry in GeoNames). _resolve_bare already checks country
+            # before city, so simply not marking this ambiguous lets the
+            # existing precedence resolve it -- no exclusion needed.
+            pass
+        else:
+            # Country-vs-region (e.g. "Georgia"), or all three types at
+            # once: no comparable "which one is overwhelmingly more common"
+            # precedent exists, and the origin brainstorm's own success
+            # criteria requires the country/region homograph case to stay
+            # unresolved -- fail closed.
             ambiguous.add(alias)
 
     # Same-type: a bare country alias claimed by more than one distinct ISO code.
@@ -274,31 +323,59 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
         if len(pairs) > 1:
             ambiguous.add(alias)
 
-    # Same-type: an abbrev alias claimed by more than one distinct
-    # (country, region_code) pair. Abbrev aliases feed `region_any_by_alias`
-    # (a plain single-valued dict, same last-write-wins risk as
-    # `region_full_by_alias`) via `apps/locations/engine.py`'s `_GeoIndex`
-    # construction, which loops both `full_aliases` and `abbrev_aliases`
-    # into it together -- so an ambiguous abbrev is dropped from
-    # `abbrev_aliases` entirely (not just the bare-lookup path), which also
-    # gives up the country-scoped resolution for that rare cross-country
-    # collision case. That's the cheap, safe choice here: a fully-dropped
-    # alias fails closed to unresolved, consistent with every other
-    # ambiguity decision in this generator, rather than a more complex
-    # split that would require changing `_GeoIndex`'s construction itself.
-    ambiguous_abbrevs = {alias for alias, pairs in abbrev_candidates.items() if len(pairs) > 1}
+    # Same-type abbrev collisions (e.g. "CA" = California's postal code
+    # *and* Luxembourg's Capellen district's admin1 code) are deliberately
+    # NOT excluded here, unlike full-alias/country/city collisions. Real
+    # data shows this class of collision is common (e.g. many 2-letter
+    # admin1 codes are reused across small countries) and one-sided in
+    # practice: dropping "CA" entirely to be safe against the Luxembourg
+    # case would break the extremely common, high-value "City, ST" pattern
+    # for real US states. `apps/locations/engine.py`'s `_GeoIndex` keeps
+    # `region_any_by_alias` list-valued for exactly this reason and
+    # resolves same-abbrev collisions with a country-population tiebreak
+    # at lookup time (mirroring the same-type city tiebreak), rather than
+    # excluding the alias at generation time.
+
+    # Cross-type: an ISO country code that's ALSO some region's abbrev code
+    # (e.g. "GA" = Gabon's ISO alpha-2 *and* Georgia, US's postal
+    # abbreviation -- confirmed on real GeoNames data: 45 such collisions).
+    # `_resolve_segments`' tail lookup checks `country_by_alias` before
+    # `region_any_by_alias`, so an unresolved collision here doesn't fail
+    # closed -- it confidently resolves the wrong thing (e.g. "Atlanta, GA"
+    # -> country=Gabon instead of country=US/region=GA). The country alias
+    # is the one dropped, not the region abbrev: abbrev aliases are the
+    # well-established "City, ST" pattern this dataset exists to serve,
+    # while a bare 2-letter country code is one of several aliases that
+    # country still has (its ISO3 and full name survive untouched).
+    country_abbrev_collisions = set(country_candidates) & set(abbrev_candidates)
 
     # Build final resolvable dicts, excluding ambiguous aliases entirely.
     for country in countries_list:
-        country["aliases"] = [a for a in country["aliases"] if a not in ambiguous]
+        country["aliases"] = [
+            a for a in country["aliases"] if a not in ambiguous and a not in country_abbrev_collisions
+        ]
     for region in regions_list:
         if region["_full_alias"] in ambiguous:
             region["_full_alias"] = None
-        if region["_abbrev_alias"] in ambiguous_abbrevs:
-            region["_abbrev_alias"] = None
+        elif region["_full_alias"] in region_full_aliases_to_drop:
+            # Region-vs-city same-name collision (e.g. "Washington" the
+            # state vs. Washington, D.C.): the alias must stop resolving
+            # BARE (so the city wins there, per the fix above), but must
+            # keep working in comma-context ("Seattle, Washington") --
+            # that pattern has no collision at all, since a comma-qualified
+            # tail is never confused with a bare lookup. Demoting to
+            # `comma_context_full_alias` (populates region_any_by_alias /
+            # region_scoped_by_country_alias only, not region_full_by_alias)
+            # instead of dropping it outright preserves that extremely
+            # common pattern (confirmed on real data: dropping it outright
+            # broke "Seattle, Washington" and 250+ similar rows).
+            region["_comma_context_full_alias"] = region["_full_alias"]
+            region["_full_alias"] = None
 
     countries_yaml = [
-        {"name": c["name"], "aliases": c["aliases"]} for c in countries_list if c["aliases"]
+        {"name": c["name"], "aliases": c["aliases"], "population": c["population"]}
+        for c in countries_list
+        if c["aliases"]
     ]
     regions_yaml = [
         {
@@ -306,6 +383,9 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
             "code": r["code"],
             "country": r["country"],
             "full_aliases": [r["_full_alias"]] if r["_full_alias"] else [],
+            "comma_context_full_aliases": (
+                [r["_comma_context_full_alias"]] if r.get("_comma_context_full_alias") else []
+            ),
             "abbrev_aliases": [r["_abbrev_alias"]] if r["_abbrev_alias"] else [],
         }
         for r in regions_list
