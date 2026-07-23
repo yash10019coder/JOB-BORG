@@ -33,11 +33,32 @@ CURRENT_LOCATION_ALIAS_VERSION = "v1"
 # exact same vocabulary instead of hand-maintaining a duplicate copy --
 # apps.jobs already depends on apps.locations (the reverse would violate the
 # leaf-app rule), so this direction of reuse is safe.
-REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh")
+REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh", "world wide")
 
 _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
 _UNRESOLVED = {"city": None, "region": None, "country": None, "resolved": False}
+
+# A defined "no place information, and that's fine" state -- distinct from
+# _UNRESOLVED, which means "there's a place here the dataset hasn't curated
+# yet." A bare remote/hybrid string with nothing left after marker-stripping
+# has nothing a curator could add, so it shouldn't count as a coverage gap
+# (see apps/jobs/admin.py's location_resolved filter).
+_NO_PLACE_INFO = {"city": None, "region": None, "country": None, "resolved": True}
+
+# R7: a trailing "<City> Area" suffix (LinkedIn-style), stripped before place
+# matching. Anchored at the end so it can't interfere with R8's start-anchored
+# prefix stripping.
+_AREA_SUFFIX_RE = re.compile(r"\s+area$")
+
+# R8: a leading two-letter country-code prefix + separator (e.g.
+# "SG - Singapore", "UK - London"). Anchored at the start. Matched against
+# the loaded index's actual country aliases (not blindly any two letters) so
+# it doesn't fire on non-country two-letter tokens -- though a code that's
+# also a common US state abbreviation (e.g. ISO "IN" = India vs. Indiana) is
+# a known, deferred edge case (see plan Open Questions), not evidenced in
+# real data as of this dataset.
+_TWO_LETTER_PREFIX_RE = re.compile(r"^([a-z]{2})\s*-\s*(.+)$")
 
 # GeoNames' `feature code` column, tiered by administrative significance --
 # more stable than population alone for same-type city disambiguation
@@ -136,6 +157,20 @@ def _first_multi_location_segment(cleaned):
         if delim in cleaned:
             return cleaned.split(delim, 1)[0].strip(" .,-")
     return cleaned
+
+
+def _strip_area_suffix(segment):
+    return _AREA_SUFFIX_RE.sub("", segment)
+
+
+def _strip_country_prefix(segment, index):
+    match = _TWO_LETTER_PREFIX_RE.match(segment)
+    if not match:
+        return segment
+    code, remainder = match.groups()
+    if code not in index.country_by_alias:
+        return segment
+    return remainder.strip()
 
 
 def _strip_remote_markers(cleaned):
@@ -237,12 +272,6 @@ def normalize_location(raw):
     if not cleaned:
         return dict(_UNRESOLVED)
 
-    first_segment = _first_multi_location_segment(cleaned)
-    remainder = _strip_remote_markers(first_segment)
-    if not remainder:
-        return dict(_UNRESOLVED)
-
-    segments = _split_segments(remainder)
     try:
         index = _load_index()
     except LocationDataError:
@@ -252,4 +281,21 @@ def normalize_location(raw):
         # not expect an exception.
         logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
         return dict(_UNRESOLVED)
+
+    first_segment = _first_multi_location_segment(cleaned)
+    # R7/R8 run before R9's dash-collapsing _strip_remote_markers, on the
+    # not-yet-dash-collapsed segment -- both are anchored (end/start) and
+    # don't interact with each other, but _strip_remote_markers' `[\s\-–—]+`
+    # collapse would otherwise destroy the " - " delimiter R8 needs to
+    # recognize a prefix at all (see plan Key Technical Decisions).
+    without_suffix = _strip_area_suffix(first_segment)
+    without_prefix = _strip_country_prefix(without_suffix, index)
+    remainder = _strip_remote_markers(without_prefix)
+    if not remainder:
+        # R9: nothing left after remote-marker stripping means the input was
+        # remote/hybrid noise with no place information -- a defined
+        # "resolved, no location" state, not a coverage gap to flag.
+        return dict(_NO_PLACE_INFO)
+
+    segments = _split_segments(remainder)
     return _resolve_segments(segments, index)

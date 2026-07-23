@@ -112,9 +112,15 @@ class NormalizeLocationTests(SimpleTestCase):
         self.assertEqual(result["country"], "US")
         self.assertIsNone(result["city"])
 
-    def test_bare_remote_with_nothing_else_is_unresolved(self):
+    def test_bare_remote_with_nothing_else_is_no_place_info_not_unresolved(self):
+        # R9: distinct from _UNRESOLVED -- there's nothing a curator could
+        # add for a bare "Remote" string, so it shouldn't count as a
+        # coverage gap (see apps/jobs/admin.py's location_resolved filter).
         result = normalize_location("Remote")
-        self.assertFalse(result["resolved"])
+        self.assertEqual(
+            result,
+            {"city": None, "region": None, "country": None, "resolved": True},
+        )
 
     def test_bare_ambiguous_city_unresolved(self):
         result = normalize_location("Cambridge")
@@ -264,3 +270,67 @@ class FeatureCodeTierTests(SimpleTestCase):
 
     def test_missing_code_sorts_last(self):
         self.assertGreater(engine.feature_code_tier(None), engine.feature_code_tier("PPLA5"))
+
+
+class StringFormatFixesTests(SimpleTestCase):
+    """Covers AE3, AE4 -- exercised against the real, currently-loaded
+    dataset (v1.yaml until U4 bumps CURRENT_LOCATION_ALIAS_VERSION), so
+    these use place names already curated there."""
+
+    def test_area_suffix_stripped(self):
+        result = normalize_location("Bangalore Area")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Bangalore")
+
+    def test_country_code_prefix_stripped(self):
+        # "us" is a curated v1.yaml country alias; "in" is not (v1 only
+        # curates "india" as a full name, no ISO code) -- this test targets
+        # whichever dataset is CURRENT_LOCATION_ALIAS_VERSION.
+        result = normalize_location("US - Chicago")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Chicago")
+        self.assertEqual(result["country"], "US")
+
+    def test_world_wide_remote_is_no_place_info(self):
+        result = normalize_location("World Wide - Remote")
+        self.assertEqual(
+            result,
+            {"city": None, "region": None, "country": None, "resolved": True},
+        )
+
+    def test_hybrid_alone_is_unresolved_not_no_place_info(self):
+        # "hybrid" is not in REMOTE_MARKERS (only "remote"/"anywhere"/
+        # "work from home"/"wfh"/"world wide") -- this documents current
+        # scope rather than asserting a requirement; a bare "Hybrid" string
+        # stays a genuine coverage gap unless a future pass adds the marker.
+        result = normalize_location("Hybrid")
+        self.assertFalse(result["resolved"])
+
+    def test_suffix_and_prefix_combined(self):
+        # Real-data-shaped: both fixes apply, suffix strip runs first so it
+        # doesn't interfere with the prefix's start-anchored match.
+        result = normalize_location("US - Seattle Area")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Seattle")
+
+    def test_prefix_before_existing_comma_logic(self):
+        result = normalize_location("US - Austin, TX")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Austin")
+        self.assertEqual(result["region"], "TX")
+
+    def test_uk_prefix_resolves_via_uk_alias_on_gb_style_country(self):
+        result = normalize_location("UK - London")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "London")
+
+    def test_prefix_with_unrecognized_place_stays_unresolved_not_raising(self):
+        result = normalize_location("US - Nowhereville")
+        self.assertFalse(result["resolved"])
+
+    def test_non_country_two_letter_token_is_not_stripped(self):
+        # "xx" isn't a curated country alias -- the prefix regex matches
+        # syntactically but the index lookup rejects it, so the string is
+        # left untouched and resolves (or not) on its own merits.
+        result = normalize_location("xx - nowhereville")
+        self.assertFalse(result["resolved"])
