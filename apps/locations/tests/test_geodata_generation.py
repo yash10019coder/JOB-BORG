@@ -141,6 +141,30 @@ class BuildGeodataTests(SimpleTestCase):
         self.assertNotIn("usa", indjija["aliases"])
         self.assertIn("indjija", indjija["aliases"])
 
+    def test_alternatename_colliding_with_a_region_alias_is_not_filtered(self):
+        # Deliberately asymmetric with the country case above: country-vs-city
+        # collisions resolve in the COUNTRY's favor (existing precedence), so
+        # a noisy alternatename there must be filtered before it can win.
+        # Region-vs-city collisions resolve the OPPOSITE way (city wins, via
+        # demotion to comma_context_full_aliases) -- filtering a region-name
+        # alternatename here would strip exactly the alias that resolution
+        # is designed to let the city keep. Confirmed as a real regression
+        # during implementation: an earlier version of this filter also
+        # covered region names and broke New York City's own "New York"
+        # alias, since that string is also the New York region's name.
+        parts = LONDON_ROW.split("\t")
+        parts[1] = "Indjija"
+        parts[2] = "Indjija"
+        parts[3] = "england,Indjija"
+        fake_city_row = "\t".join(parts)
+        data = self._build(fake_city_row)
+        self.assertNotIn("england", data["ambiguous_bare_tokens"])
+        indjija = next(c for c in data["cities"] if c["name"] == "Indjija")
+        self.assertIn("england", indjija["aliases"])
+        england = next(r for r in data["regions"] if r["name"] == "England")
+        self.assertNotIn("england", england["full_aliases"])
+        self.assertIn("england", england["comma_context_full_aliases"])
+
     def test_airport_code_looking_alternatename_is_filtered(self):
         data = self._build(LONDON_ROW)
         london = next(c for c in data["cities"] if c["name"] == "London")

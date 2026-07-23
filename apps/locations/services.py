@@ -75,6 +75,27 @@ def backfill_jobs(job_model, batch_size=None):
     return {"updated": updated}
 
 
+def _iter_stale_by_pk_cursor(model, version_field, only_fields, size):
+    """Yield every row not at CURRENT_LOCATION_ALIAS_VERSION, paginated by
+    an explicit pk cursor rather than backfill_jobs/backfill_profiles'
+    repeatedly-re-query-the-top-N-stale-rows style -- those rely on each
+    write advancing a row out of the staleness filter; a read-only scan has
+    no such write to rely on, so it must track its own cursor instead.
+    """
+    last_pk = 0
+    while True:
+        batch = list(
+            model.objects.exclude(**{version_field: CURRENT_LOCATION_ALIAS_VERSION})
+            .filter(pk__gt=last_pk)
+            .only("id", *only_fields)
+            .order_by("pk")[:size]
+        )
+        if not batch:
+            return
+        yield from batch
+        last_pk = batch[-1].pk
+
+
 def diff_stale_locations(job_model, profile_model, batch_size=None):
     """Read-only preview of what backfill_jobs/backfill_profiles would
     change, restricted to rows whose resolved value would actually *change*
@@ -89,81 +110,54 @@ def diff_stale_locations(job_model, profile_model, batch_size=None):
     Intended to run against production data *before* CURRENT_LOCATION_ALIAS_VERSION
     is bumped, so a bad pick is caught as a diff to review, not a silent
     write.
-
-    Unlike backfill_jobs/backfill_profiles, this never writes, so nothing
-    advances rows out of the staleness filter between batches -- pagination
-    is by explicit pk cursor rather than repeatedly re-querying the same
-    top-N stale rows.
     """
     size = _batch_size(batch_size)
+
     job_changes = []
-    last_pk = 0
-    while True:
-        batch = list(
-            job_model.objects.exclude(location_alias_version=CURRENT_LOCATION_ALIAS_VERSION)
-            .filter(pk__gt=last_pk)
-            .only(
-                "id", "location", "location_city", "location_region",
-                "location_country", "location_resolved",
+    job_fields = ["location", "location_city", "location_region", "location_country", "location_resolved"]
+    for row in _iter_stale_by_pk_cursor(job_model, "location_alias_version", job_fields, size):
+        if not row.location_resolved:
+            continue
+        structured = normalize_location(row.location)
+        old = (row.location_city, row.location_region, row.location_country)
+        new = (structured["city"] or "", structured["region"] or "", structured["country"] or "")
+        if old != new or not structured["resolved"]:
+            job_changes.append(
+                {
+                    "pk": row.pk,
+                    "location": row.location,
+                    "old": {
+                        "city": row.location_city,
+                        "region": row.location_region,
+                        "country": row.location_country,
+                        "resolved": row.location_resolved,
+                    },
+                    "new": structured,
+                }
             )
-            .order_by("pk")[:size]
-        )
-        if not batch:
-            break
-        for row in batch:
-            last_pk = row.pk
-            if not row.location_resolved:
-                continue
-            structured = normalize_location(row.location)
-            old = (row.location_city, row.location_region, row.location_country)
-            new = (structured["city"] or "", structured["region"] or "", structured["country"] or "")
-            if old != new or not structured["resolved"]:
-                job_changes.append(
-                    {
-                        "pk": row.pk,
-                        "location": row.location,
-                        "old": {
-                            "city": row.location_city,
-                            "region": row.location_region,
-                            "country": row.location_country,
-                            "resolved": row.location_resolved,
-                        },
-                        "new": structured,
-                    }
-                )
 
     profile_changes = []
-    last_pk = 0
-    while True:
-        batch = list(
-            profile_model.objects.exclude(
-                target_locations_alias_version=CURRENT_LOCATION_ALIAS_VERSION
+    profile_fields = ["target_locations", "target_locations_normalized"]
+    for row in _iter_stale_by_pk_cursor(
+        profile_model, "target_locations_alias_version", profile_fields, size
+    ):
+        old_resolved = [e for e in row.target_locations_normalized if e.get("resolved")]
+        if not old_resolved:
+            continue
+        new_normalized = normalize_target_locations(row.target_locations)
+        old_keys = {(e["city"], e["region"], e["country"]) for e in old_resolved}
+        new_keys = {
+            (e["city"], e["region"], e["country"]) for e in new_normalized if e["resolved"]
+        }
+        if old_keys != new_keys:
+            profile_changes.append(
+                {
+                    "pk": row.pk,
+                    "target_locations": row.target_locations,
+                    "old": row.target_locations_normalized,
+                    "new": new_normalized,
+                }
             )
-            .filter(pk__gt=last_pk)
-            .only("id", "target_locations", "target_locations_normalized")
-            .order_by("pk")[:size]
-        )
-        if not batch:
-            break
-        for row in batch:
-            last_pk = row.pk
-            old_resolved = [e for e in row.target_locations_normalized if e.get("resolved")]
-            if not old_resolved:
-                continue
-            new_normalized = normalize_target_locations(row.target_locations)
-            old_keys = {(e["city"], e["region"], e["country"]) for e in old_resolved}
-            new_keys = {
-                (e["city"], e["region"], e["country"]) for e in new_normalized if e["resolved"]
-            }
-            if old_keys != new_keys:
-                profile_changes.append(
-                    {
-                        "pk": row.pk,
-                        "target_locations": row.target_locations,
-                        "old": row.target_locations_normalized,
-                        "new": new_normalized,
-                    }
-                )
 
     return {"job_changes": job_changes, "profile_changes": profile_changes}
 

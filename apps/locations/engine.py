@@ -133,22 +133,20 @@ class _GeoIndex:
         for region in data.get("regions") or []:
             code = region["code"]
             country = region["country"]
+            # full_aliases also register in region_full_by_alias (bare
+            # resolution); comma_context_full_aliases and abbrev_aliases
+            # never do -- comma_context_full_aliases exists specifically
+            # because a region-vs-city same-name collision (e.g.
+            # "Washington" the state vs. Washington, D.C.) demoted the bare
+            # claim so the city wins there, while the comma-qualified
+            # pattern ("Seattle, Washington") has no such collision and
+            # must keep resolving via region_any_by_alias.
             for alias in region.get("full_aliases") or []:
-                self.region_full_by_alias[alias] = (code, country)
-                self.region_any_by_alias.setdefault(alias, []).append((code, country))
-                self.region_scoped_by_country_alias[(country, alias)] = code
-            # comma_context_full_aliases: a region-vs-city same-name
-            # collision (e.g. "Washington" the state vs. Washington, D.C.)
-            # demoted the bare/full claim so the city wins there, but the
-            # comma-qualified pattern ("Seattle, Washington") has no such
-            # collision -- populate region_any_by_alias/
-            # region_scoped_by_country_alias only, never region_full_by_alias.
+                self._register_region_alias(alias, code, country, bare_resolvable=True)
             for alias in region.get("comma_context_full_aliases") or []:
-                self.region_any_by_alias.setdefault(alias, []).append((code, country))
-                self.region_scoped_by_country_alias[(country, alias)] = code
+                self._register_region_alias(alias, code, country)
             for alias in region.get("abbrev_aliases") or []:
-                self.region_any_by_alias.setdefault(alias, []).append((code, country))
-                self.region_scoped_by_country_alias[(country, alias)] = code
+                self._register_region_alias(alias, code, country)
 
         for city in data.get("cities") or []:
             entry = {
@@ -161,6 +159,12 @@ class _GeoIndex:
             for alias in city.get("aliases") or []:
                 self.city_by_alias.setdefault(alias, []).append(entry)
 
+    def _register_region_alias(self, alias, code, country, *, bare_resolvable=False):
+        if bare_resolvable:
+            self.region_full_by_alias[alias] = (code, country)
+        self.region_any_by_alias.setdefault(alias, []).append((code, country))
+        self.region_scoped_by_country_alias[(country, alias)] = code
+
 
 @lru_cache(maxsize=None)
 def _load_index(version=CURRENT_LOCATION_ALIAS_VERSION):
@@ -171,6 +175,19 @@ def _load_index(version=CURRENT_LOCATION_ALIAS_VERSION):
     if not isinstance(data, dict):
         raise LocationDataError(f"Location dataset {version!r} is malformed")
     return _GeoIndex(data)
+
+
+def _try_load_index():
+    """``_load_index()``, honoring normalize_location's never-raise contract.
+
+    Returns ``None`` (and logs) on a missing/malformed dataset rather than
+    raising -- every call site treats that the same way (unresolved).
+    """
+    try:
+        return _load_index()
+    except LocationDataError:
+        logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
+        return None
 
 
 def _clean(raw):
@@ -192,16 +209,6 @@ def _first_multi_location_segment(cleaned):
 
 def _strip_area_suffix(segment):
     return _AREA_SUFFIX_RE.sub("", segment)
-
-
-def _strip_country_prefix(segment, index):
-    match = _TWO_LETTER_PREFIX_RE.match(segment)
-    if not match:
-        return segment
-    code, remainder = match.groups()
-    if code not in index.country_by_alias:
-        return segment
-    return remainder.strip()
 
 
 def _strip_remote_markers(cleaned):
@@ -310,16 +317,6 @@ def normalize_location(raw):
     if not cleaned:
         return dict(_UNRESOLVED)
 
-    try:
-        index = _load_index()
-    except LocationDataError:
-        # Honor the never-raise contract even when the curated dataset itself
-        # is missing or malformed -- every call site (ingestion, profile
-        # save, the backfill/sweep loop) calls this unconditionally and does
-        # not expect an exception.
-        logger.error("Location dataset failed to load; treating input as unresolved", exc_info=True)
-        return dict(_UNRESOLVED)
-
     first_segment = _first_multi_location_segment(cleaned)
     # R7/R8 run before R9's dash-collapsing _strip_remote_markers, on the
     # not-yet-dash-collapsed segment -- both are anchored (end/start) and
@@ -327,13 +324,35 @@ def normalize_location(raw):
     # collapse would otherwise destroy the " - " delimiter R8 needs to
     # recognize a prefix at all (see plan Key Technical Decisions).
     without_suffix = _strip_area_suffix(first_segment)
-    without_prefix = _strip_country_prefix(without_suffix, index)
+
+    # The dataset is only needed to validate an actual prefix match or to
+    # resolve a real place segment -- a bare remote/hybrid string (a large
+    # fraction of real job postings) never reaches either, so it shouldn't
+    # have to pay for a dataset load at all.
+    index = None
+    prefix_match = _TWO_LETTER_PREFIX_RE.match(without_suffix)
+    if prefix_match:
+        index = _try_load_index()
+        if index is None:
+            return dict(_UNRESOLVED)
+        code, remainder_after_prefix = prefix_match.groups()
+        without_prefix = (
+            remainder_after_prefix.strip() if code in index.country_by_alias else without_suffix
+        )
+    else:
+        without_prefix = without_suffix
+
     remainder = _strip_remote_markers(without_prefix)
     if not remainder:
         # R9: nothing left after remote-marker stripping means the input was
         # remote/hybrid noise with no place information -- a defined
         # "resolved, no location" state, not a coverage gap to flag.
         return dict(_NO_PLACE_INFO)
+
+    if index is None:
+        index = _try_load_index()
+        if index is None:
+            return dict(_UNRESOLVED)
 
     segments = _split_segments(remainder)
     return _resolve_segments(segments, index)

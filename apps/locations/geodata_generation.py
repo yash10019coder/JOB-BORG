@@ -160,7 +160,6 @@ def _build_countries(country_rows):
                 "name": display,
                 "aliases": sorted(aliases),
                 "population": row["population"],
-                "_iso": iso,
             }
         )
         for alias in aliases:
@@ -195,7 +194,6 @@ def _build_regions(admin1_map):
                 "name": name,
                 "code": region_code,
                 "country": country_display,
-                "_country_iso": country_iso,
                 "_full_alias": full_alias,
                 "_abbrev_alias": abbrev_alias,
             }
@@ -208,17 +206,19 @@ def _build_regions(admin1_map):
     return regions_list, full_candidates, abbrev_candidates
 
 
-def _build_cities(city_rows, admin1_map, *, country_alias_vocabulary=frozenset()):
-    """``country_alias_vocabulary`` is the set of already-established country
-    aliases. GeoNames' ``alternatenames`` column is a known-messy, uncurated
-    dump (see plan Context & Research / External References) -- a low-value
-    alternate transliteration for one obscure town can coincidentally match
-    a real country's name (confirmed on real data: the Serbian town
-    "Inđija" lists "India" among its ~30 alternatenames, which would
-    otherwise mark "india" cross-type ambiguous and break resolution for
-    the entire country). A city's *primary* name/asciiname is never
-    filtered this way -- only entries sourced from the noisier
-    alternatenames column are held to the stricter bar.
+def _build_cities(
+    city_rows, admin1_map, *, established_alias_vocabulary=frozenset()
+):
+    """``established_alias_vocabulary`` is the set of already-claimed
+    country and region aliases. GeoNames' ``alternatenames`` column is a
+    known-messy, uncurated dump (see plan Context & Research / External
+    References) -- a low-value alternate transliteration for one obscure
+    place can coincidentally match a real country or region name (confirmed
+    on real data: the Serbian town "Inđija" lists "India" among its ~30
+    alternatenames, which would otherwise mark "india" cross-type ambiguous
+    and break resolution for the entire country). A city's *primary*
+    name/asciiname is never filtered this way -- only entries sourced from
+    the noisier alternatenames column are held to the stricter bar.
     """
     cities_list = []
     for row in city_rows:
@@ -237,7 +237,7 @@ def _build_cities(city_rows, admin1_map, *, country_alias_vocabulary=frozenset()
             if not raw or _looks_like_airport_code(raw):
                 continue
             alias = _clean_alias(raw)
-            if alias and alias not in country_alias_vocabulary:
+            if alias and alias not in established_alias_vocabulary:
                 aliases.add(alias)
 
         cities_list.append(
@@ -264,8 +264,18 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
 
     countries_list, country_candidates = _build_countries(country_rows)
     regions_list, full_candidates, abbrev_candidates = _build_regions(admin1_map)
+    # Only country aliases guard the alternatenames filter, not region
+    # aliases: country-vs-city collisions resolve in the COUNTRY's favor
+    # (existing precedence, no demotion), so a noisy alternatename here
+    # would otherwise let the country silently swallow a real city's
+    # legitimate alias. Region-vs-city collisions resolve the opposite way
+    # (city wins, see the ambiguity classifier below) -- filtering region
+    # names here would strip exactly the alternatename that resolution is
+    # designed to let the city keep (confirmed as a real regression during
+    # implementation: it broke New York City's own "New York" alias, since
+    # that string is also the New York region's name).
     cities_list = _build_cities(
-        city_rows, admin1_map, country_alias_vocabulary=frozenset(country_candidates)
+        city_rows, admin1_map, established_alias_vocabulary=frozenset(country_candidates)
     )
 
     ambiguous = set()
