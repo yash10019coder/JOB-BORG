@@ -149,7 +149,14 @@ def diff_stale_locations(job_model, profile_model, batch_size=None):
         new_keys = {
             (e["city"], e["region"], e["country"]) for e in new_normalized if e["resolved"]
         }
-        if old_keys != new_keys:
+        # Subset check, not equality: a profile with an unrelated SECOND
+        # target_locations entry that newly resolves under v2 must not be
+        # flagged just because new_keys gained an entry old_keys didn't
+        # have -- that's the desired, expected outcome of the dataset
+        # swap, not a value change to review. Only flag when a previously
+        # resolved key is missing or changed (old_keys not a subset of
+        # new_keys).
+        if not old_keys.issubset(new_keys):
             profile_changes.append(
                 {
                     "pk": row.pk,

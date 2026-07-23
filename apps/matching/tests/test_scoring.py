@@ -46,6 +46,14 @@ def unresolved_target(raw):
     return {"raw": raw, "city": None, "region": None, "country": None, "resolved": False}
 
 
+def no_place_info_target(raw):
+    # apps/locations' defined "no place info" state for a bare remote/hybrid
+    # target string (e.g. a user typing "Remote" into target_locations) --
+    # resolved=True, but every field unset. Distinct from unresolved_target,
+    # which apps/locations' disambiguation rules could not resolve at all.
+    return {"raw": raw, "city": None, "region": None, "country": None, "resolved": True}
+
+
 class ScoringTests(SimpleTestCase):
     def test_strong_match_scores_above_threshold_with_correct_matched_tags(self):
         p = profile(
@@ -255,6 +263,40 @@ class LocationComponentTests(SimpleTestCase):
                                          location="Somewhere Else",
                                          location_resolved=False))
         self.assertLess(not_matching.score, matching.score)
+
+    def test_no_place_info_target_alone_is_treated_as_no_constraint(self):
+        # Code-review regression: a profile whose ONLY target_locations
+        # entry is a bare remote/hybrid string (e.g. "Remote") normalizes
+        # to resolved=True with every field unset. Without a guard,
+        # _hierarchy_match treats an all-unset target as a vacuous wildcard
+        # (matches any job) rather than "no constraint stated" -- but the
+        # correct behavior is the latter, matching the empty-list semantic.
+        p = profile(target_tags=["python"],
+                    target_locations=["Remote"],
+                    target_locations_normalized=[no_place_info_target("Remote")])
+        result = score_job(p, job(classification_tags=["python"], is_remote=False,
+                                   location_country="US", location_resolved=True))
+        no_targets = score_job(profile(target_tags=["python"]),
+                                job(classification_tags=["python"], is_remote=False,
+                                    location_country="US", location_resolved=True))
+        self.assertEqual(result.score, no_targets.score)
+
+    def test_no_place_info_target_does_not_mask_a_real_target_in_the_same_list(self):
+        # The dangerous shape: a "no place info" entry alongside a REAL
+        # target location. Without the fix, the vacuous entry's unconditional
+        # _hierarchy_match(True) would satisfy `any(...)`, silently matching
+        # every job and defeating the user's actual "US"-only preference.
+        p = profile(target_tags=["python"],
+                    target_locations=["Remote", "US"],
+                    target_locations_normalized=[
+                        no_place_info_target("Remote"),
+                        resolved_target(country="US", raw="US"),
+                    ])
+        us_job = score_job(p, job(classification_tags=["python"], is_remote=False,
+                                   location_country="US", location_resolved=True))
+        uk_job = score_job(p, job(classification_tags=["python"], is_remote=False,
+                                   location_country="UK", location_resolved=True))
+        self.assertLess(uk_job.score, us_job.score)
 
     def test_job_unresolved_target_resolved_falls_back_to_substring(self):
         p = profile(target_tags=["python"],

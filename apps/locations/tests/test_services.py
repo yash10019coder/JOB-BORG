@@ -248,6 +248,34 @@ class DiffStaleLocationsTests(TestCase):
         self.assertEqual(len(diff["profile_changes"]), 1)
         self.assertEqual(diff["profile_changes"][0]["pk"], profile.pk)
 
+    def test_profile_with_an_additional_newly_resolving_entry_is_not_reported(self):
+        # Code-review regression: a profile whose first entry ("Chicago")
+        # was already resolved and stays the same, but whose SECOND raw
+        # entry ("Xyzzyville") newly resolves under v2, must not be flagged
+        # -- new_keys gaining an entry beyond old_keys is exactly the
+        # desired outcome of the dataset swap, not a value change to review.
+        self._make_profile(
+            "henry",
+            ["Chicago", "Xyzzyville"],
+            [{"raw": "Chicago", "city": "Chicago", "region": "IL", "country": "US", "resolved": True}],
+        )
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+
+        def fake_normalize(raw):
+            if raw == "Chicago":
+                return {"city": "Chicago", "region": "IL", "country": "US", "resolved": True}
+            return {"city": "Xyzzyville", "region": None, "country": "US", "resolved": True}
+
+        services_module.normalize_location = fake_normalize
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(diff["profile_changes"], [])
+
 
 class NormalizeTargetLocationsTests(TestCase):
     def test_dedupes_on_structured_tuple(self):
