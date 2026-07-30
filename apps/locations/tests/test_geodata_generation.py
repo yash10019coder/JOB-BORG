@@ -322,6 +322,27 @@ class CountryIso2PrefixesTests(SimpleTestCase):
         self.assertEqual(data["country_iso2_prefixes"].get("us"), "US")
         self.assertEqual(data["country_iso2_prefixes"].get("gb"), "UK")
 
+    def test_overridden_country_whose_iso_code_collides_with_a_us_state_is_still_excluded(self):
+        # India's ISO code "IN" and Canada's "CA" are both real US postal
+        # abbreviations (Indiana, California) -- being in
+        # COUNTRY_NAME_OVERRIDES doesn't exempt a country from the
+        # US-state-collision exclusion, same as any other country. This is
+        # intentional (matches the Gabon/Georgia precedent), not a gap --
+        # asserted explicitly so a future change can't silently flip it
+        # either direction without a test noticing.
+        countries_text = (
+            COUNTRIES_TEXT
+            + "IN\tIND\t356\tIN\tIndia\tNew Delhi\t3287263\t1352617328\tAS\t.in\tINR\tRupee\t91\t\t\ten-IN,hi\t1269750\t\t\n"
+            + "CA\tCAN\t124\tCA\tCanada\tOttawa\t9984670\t37058856\tNA\t.ca\tCAD\tDollar\t1\t\t\ten-CA,fr-CA\t6251999\t\t\n"
+        )
+        data = self._build(LONDON_ROW, countries_text)
+        self.assertNotIn("in", data["country_iso2_prefixes"])
+        self.assertNotIn("ca", data["country_iso2_prefixes"])
+        # The full names remain usable via country_by_alias regardless --
+        # this exclusion only affects the R8 prefix-matching lookup.
+        india = next(c for c in data["countries"] if c["name"] == "India")
+        self.assertIn("india", india["aliases"])
+
 
 class CanadaProvinceAbbrevTests(SimpleTestCase):
     """GeoNames' Canadian admin1 codes are numeric ("CA.08" for Ontario), not
@@ -361,6 +382,53 @@ class CanadaProvinceAbbrevTests(SimpleTestCase):
         data = self._build(ADMIN1_TEXT)
         illinois = next(r for r in data["regions"] if r["name"] == "Illinois")
         self.assertIn("il", illinois["abbrev_aliases"])
+
+    def test_province_code_colliding_with_a_real_country_is_not_registered(self):
+        # Regression: Newfoundland and Labrador's postal code "NL" is also
+        # the Netherlands' ISO alpha-2 code. Registering it as a Canada
+        # region abbrev fed engine.py's same-abbrev region tiebreak (built
+        # for the legitimate "CA" California-vs-Luxembourg class of
+        # collision), but the Netherlands' own "nl" alias had already been
+        # dropped from country_by_alias by the existing
+        # country_abbrev_collisions logic -- so "Amsterdam, NL" silently
+        # resolved to Newfoundland, Canada instead of staying with the
+        # Netherlands or failing closed. Confirmed on the real generated
+        # dataset before this fix.
+        countries_text = COUNTRIES_TEXT + "NL\tNLD\t528\tNL\tNetherlands\tAmsterdam\t41526\t17231017\tEU\t.nl\tEUR\tEuro\t31\t\t\tnl-NL\t2750405\t\t\n"
+        admin1_text = ADMIN1_TEXT + "CA.05\tNewfoundland and Labrador\tNewfoundland and Labrador\t520998\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+        newfoundland = next(r for r in data["regions"] if r["name"] == "Newfoundland and Labrador")
+        self.assertEqual(newfoundland["abbrev_aliases"], [])
+        # Bonus effect: since Newfoundland's "nl" abbrev is never registered,
+        # there's no collision left for country_abbrev_collisions to catch
+        # either -- the Netherlands' own bare "nl" country alias survives
+        # intact (matching its pre-Canada-fix v2.yaml behavior), rather than
+        # being silently dropped as a side effect of this exclusion.
+        netherlands = next(c for c in data["countries"] if c["name"] == "Netherlands")
+        self.assertIn("nl", netherlands["aliases"])
+        self.assertIn("netherlands", netherlands["aliases"])
+
+    def test_non_colliding_province_codes_still_registered_alongside_a_colliding_one(self):
+        # Ontario's "ON" doesn't collide with any real country's ISO code --
+        # confirms the exclusion in the test above is scoped to the specific
+        # colliding province, not a blanket suppression of the Canada fix.
+        countries_text = COUNTRIES_TEXT + "NL\tNLD\t528\tNL\tNetherlands\tAmsterdam\t41526\t17231017\tEU\t.nl\tEUR\tEuro\t31\t\t\tnl-NL\t2750405\t\t\n"
+        admin1_text = (
+            ADMIN1_TEXT
+            + "CA.05\tNewfoundland and Labrador\tNewfoundland and Labrador\t520998\n"
+            + "CA.08\tOntario\tOntario\t13448494\n"
+        )
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+        ontario = next(r for r in data["regions"] if r["name"] == "Ontario")
+        self.assertIn("on", ontario["abbrev_aliases"])
 
 
 class ExpandedCountrySynonymTests(SimpleTestCase):

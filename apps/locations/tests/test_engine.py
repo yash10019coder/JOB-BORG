@@ -558,6 +558,14 @@ class PrefixCodeLookupTests(SimpleTestCase):
                 # all, which strips it so the remainder becomes bare
                 # "singapore", and (b) scoping the bare city match to SG.
                 {"name": "SG", "aliases": ["sgp"], "population": 5638676},
+                # "ga" IS present in country_by_alias here (unlike the real
+                # dataset, where it's dropped by the US-state-collision
+                # exclusion) specifically so the next test can prove R8
+                # doesn't fall back to country_by_alias for a code the
+                # dedicated prefix lookup excludes -- without this entry,
+                # the test would pass identically whether or not such a
+                # fallback existed.
+                {"name": "Gabon", "aliases": ["ga", "gab"], "population": 2119275},
             ],
             "regions": [],
             "cities": [
@@ -585,9 +593,10 @@ class PrefixCodeLookupTests(SimpleTestCase):
         self.assertEqual(result["country"], "SG")
 
     def test_code_absent_from_prefix_lookup_stays_unresolved(self):
-        # "ga" is not in country_iso2_prefixes at all in this fixture
-        # (simulating the US-state exclusion) -- the prefix must not fall
-        # back to country_by_alias or any other signal.
+        # "ga" is deliberately absent from country_iso2_prefixes (simulating
+        # the US-state exclusion) but IS present in country_by_alias (see
+        # setUp) -- if R8 fell back to country_by_alias for an excluded
+        # code, this would resolve to Gabon. It must not.
         result = normalize_location("GA - Atlanta")
         self.assertFalse(result["resolved"])
 

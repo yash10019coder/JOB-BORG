@@ -212,12 +212,17 @@ CANADA_PROVINCE_POSTAL_CODES = {
 }
 
 
-def _build_regions(admin1_map):
+def _build_regions(admin1_map, *, known_country_iso_codes=frozenset()):
     """Returns (regions_list, full_alias_candidates, abbrev_alias_candidates).
 
     Candidates map alias -> set of (country_iso, region_code) pairs, used
     to detect same-type collisions (e.g. "Central" recurring as an admin1
     name across multiple countries) before committing an alias.
+
+    ``known_country_iso_codes`` (lowercased) is used only to guard the
+    Canada postal-code fallback below -- see the comment at that branch for
+    why a same-type-only collision check (via ``abbrev_candidates``) isn't
+    enough here.
     """
     regions_list = []
     full_candidates = defaultdict(set)
@@ -234,7 +239,29 @@ def _build_regions(admin1_map):
         if region_code.isalpha():
             abbrev_alias = _clean_alias(region_code)
         elif country_iso == "CA":
-            abbrev_alias = _clean_alias(CANADA_PROVINCE_POSTAL_CODES.get(region_code) or "")
+            candidate = CANADA_PROVINCE_POSTAL_CODES.get(region_code)
+            # A handful of Canada's postal codes are themselves real
+            # countries' ISO alpha-2 codes (NL=Netherlands, PE=Peru,
+            # SK=Slovakia, YT=Mayotte, NU=Niue) -- confirmed via a real-data
+            # regression: registering these as Canada region abbreviations
+            # feeds the SAME-abbrev-collision tiebreak in
+            # apps/locations/engine.py's region_any_by_alias (deliberately
+            # list-valued for the legitimate "CA" California-vs-Luxembourg
+            # class of collision), but that tiebreak only compares *among
+            # regions* -- the colliding COUNTRY was already stripped from
+            # country_by_alias by the country_abbrev_collisions logic below
+            # and has no seat at that table, so "Amsterdam, NL" silently
+            # resolved to Newfoundland, Canada instead of the Netherlands.
+            # abbrev_candidates' own same-type collision tracking can't
+            # catch this either, since a country isn't a "region" candidate.
+            # Failing this specific abbrev closed (leaving these 4 provinces
+            # resolvable only by full name, e.g. "Saskatchewan") is the same
+            # conservative call this dataset makes everywhere else a bare
+            # code could confidently resolve to the wrong real place.
+            if candidate and candidate.lower() in known_country_iso_codes:
+                abbrev_alias = None
+            else:
+                abbrev_alias = _clean_alias(candidate or "")
         else:
             abbrev_alias = None
 
@@ -495,7 +522,10 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
     city_rows = [r for r in city_rows if r["population"] >= min_population]
 
     countries_list, country_candidates = _build_countries(country_rows)
-    regions_list, full_candidates, abbrev_candidates = _build_regions(admin1_map)
+    known_country_iso_codes = frozenset(row["iso"].lower() for row in country_rows if row["iso"])
+    regions_list, full_candidates, abbrev_candidates = _build_regions(
+        admin1_map, known_country_iso_codes=known_country_iso_codes
+    )
     # Only country aliases guard the alternatenames filter, not region
     # aliases: country-vs-city collisions resolve in the COUNTRY's favor
     # (existing precedence, no demotion), so a noisy alternatename here
