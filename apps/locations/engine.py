@@ -51,6 +51,18 @@ _NO_PLACE_INFO = {"city": None, "region": None, "country": None, "resolved": Tru
 # prefix stripping.
 _AREA_SUFFIX_RE = re.compile(r"\s+area$")
 
+# Generic geographic descriptors that coincidentally, uniquely match a real
+# (obscure) place somewhere in the dataset once R7 strips "Area" off them --
+# e.g. "Delta" is a small town in British Columbia, "Metro" a town in
+# Indonesia. A unique dataset match isn't a reliable "which real place did
+# they mean" signal for a common English word the way it is for an actual
+# place name, so these are suppressed from suffix-stripped bare resolution
+# regardless of match count.
+_GENERIC_AREA_DESCRIPTORS = {
+    "bay", "metro", "valley", "delta", "north", "south", "east", "west",
+    "central", "greater", "downtown", "uptown", "tri-state",
+}
+
 # R8: a leading two-letter country-code prefix + separator (e.g.
 # "SG - Singapore", "UK - London"). Anchored at the start. Matched against
 # the loaded index's actual country aliases (not blindly any two letters) so
@@ -224,7 +236,9 @@ def _split_segments(remainder):
     return [seg for seg in segments if seg]
 
 
-def _resolve_bare(token, index):
+def _resolve_bare(token, index, *, scope_country=None, strict=False):
+    if strict and token in _GENERIC_AREA_DESCRIPTORS:
+        return dict(_UNRESOLVED)
     if token in index.ambiguous_bare_tokens:
         return dict(_UNRESOLVED)
     country = index.country_by_alias.get(token)
@@ -236,21 +250,40 @@ def _resolve_bare(token, index):
         return {"city": None, "region": code, "country": country, "resolved": True}
     matches = index.city_by_alias.get(token)
     if matches:
+        candidates = matches
+        if scope_country:
+            scoped = [m for m in matches if m["country"] == scope_country]
+            if not scoped:
+                # A real country hint (R8's prefix, or a resolved tail
+                # segment) is present, but no candidate for this token
+                # exists there -- resolving to some other country's
+                # namesake would silently discard the hint the poster gave
+                # us. Stay unresolved rather than guess.
+                return dict(_UNRESOLVED)
+            candidates = scoped
+        if strict and len(candidates) != 1:
+            # Same-type collision reached via a heuristic string rewrite
+            # (R7's "<X> Area" suffix strip) rather than the token the
+            # poster actually wrote -- the population tiebreak is a "which
+            # real place did they mean" signal for genuine place names, not
+            # for a generic word ("Bay", "Metro", "Delta") that happens to
+            # also be a small town somewhere. Require an unambiguous match.
+            return dict(_UNRESOLVED)
         # Same-type collision (e.g. multiple cities named "Springfield"):
-        # resolve via feature-code tier then population rather than staying
+        # resolve via population then feature-code tier rather than staying
         # unresolved -- the one city type with a reliable secondary signal.
         # Cross-type collisions never reach here; they're caught by the
         # ambiguous_bare_tokens check above (see geodata_generation.py).
-        m = _best_city_candidate(matches)
+        m = _best_city_candidate(candidates)
         return {"city": m["name"], "region": m["region"], "country": m["country"], "resolved": True}
     return dict(_UNRESOLVED)
 
 
-def _resolve_segments(segments, index):
+def _resolve_segments(segments, index, *, scope_country=None, strict_city=False):
     if not segments:
         return dict(_UNRESOLVED)
     if len(segments) == 1:
-        return _resolve_bare(segments[0], index)
+        return _resolve_bare(segments[0], index, scope_country=scope_country, strict=strict_city)
 
     *head, tail = segments
     country = index.country_by_alias.get(tail)
@@ -324,21 +357,22 @@ def normalize_location(raw):
     # collapse would otherwise destroy the " - " delimiter R8 needs to
     # recognize a prefix at all (see plan Key Technical Decisions).
     without_suffix = _strip_area_suffix(first_segment)
+    suffix_stripped = without_suffix != first_segment
 
     # The dataset is only needed to validate an actual prefix match or to
     # resolve a real place segment -- a bare remote/hybrid string (a large
     # fraction of real job postings) never reaches either, so it shouldn't
     # have to pay for a dataset load at all.
     index = None
+    prefix_country = None
     prefix_match = _TWO_LETTER_PREFIX_RE.match(without_suffix)
     if prefix_match:
         index = _try_load_index()
         if index is None:
             return dict(_UNRESOLVED)
         code, remainder_after_prefix = prefix_match.groups()
-        without_prefix = (
-            remainder_after_prefix.strip() if code in index.country_by_alias else without_suffix
-        )
+        prefix_country = index.country_by_alias.get(code)
+        without_prefix = remainder_after_prefix.strip() if prefix_country else without_suffix
     else:
         without_prefix = without_suffix
 
@@ -355,4 +389,10 @@ def normalize_location(raw):
             return dict(_UNRESOLVED)
 
     segments = _split_segments(remainder)
-    return _resolve_segments(segments, index)
+    # scope_country only applies to a bare (single-segment) remainder -- a
+    # multi-segment remainder already carries its own explicit country
+    # signal in its tail (see _resolve_segments), which is more reliable
+    # than R8's prefix hint and shouldn't be overridden by it.
+    return _resolve_segments(
+        segments, index, scope_country=prefix_country, strict_city=suffix_stripped
+    )

@@ -382,17 +382,37 @@ class BareAliasNoRegressionTests(SimpleTestCase):
     not merely "still resolved." v1 never had a same-type collision to
     exercise the tiebreak against, so this is the concrete proof the
     tiebreak doesn't silently pick a different candidate for input that
-    previously had no ambiguity to resolve at all."""
+    previously had no ambiguity to resolve at all.
+
+    v1.yaml never populated `region` outside the US, and its display names
+    predate GeoNames canonicalization (e.g. "Bangalore" vs v2's official
+    "Bengaluru") -- so v1's own output isn't a reliable ground truth for
+    city/region equality across versions. Country equality against v1 is
+    still a meaningful cross-version check; city/region are instead
+    asserted directly against v2's known-correct values, which is the
+    actual proof the tiebreak didn't silently pick a different candidate.
+    """
+
+    EXPECTED_V2 = {
+        "london": {"city": "London", "region": "ENG", "country": "UK"},
+        "toronto": {"city": "Toronto", "region": "08", "country": "Canada"},
+        "chicago": {"city": "Chicago", "region": "IL", "country": "US"},
+        "munich": {"city": "Munich", "region": "02", "country": "Germany"},
+        "bangalore": {"city": "Bengaluru", "region": "19", "country": "India"},
+    }
 
     def test_v1_bare_resolved_cities_match_v2(self):
         v1_index = engine._load_index("v1")
-        for alias in ("london", "toronto", "chicago", "munich", "bangalore"):
+        for alias, expected in self.EXPECTED_V2.items():
             with self.subTest(alias=alias):
                 v1_result = engine._resolve_bare(alias, v1_index)
                 v2_result = normalize_location(alias)
                 self.assertTrue(v1_result["resolved"])
                 self.assertTrue(v2_result["resolved"])
                 self.assertEqual(v1_result["country"], v2_result["country"])
+                self.assertEqual(v2_result["city"], expected["city"])
+                self.assertEqual(v2_result["region"], expected["region"])
+                self.assertEqual(v2_result["country"], expected["country"])
 
 
 class FeatureCodeTierTests(SimpleTestCase):
@@ -467,3 +487,44 @@ class StringFormatFixesTests(SimpleTestCase):
         # left untouched and resolves (or not) on its own merits.
         result = normalize_location("xx - nowhereville")
         self.assertFalse(result["resolved"])
+
+    def test_prefix_country_scopes_the_remainder_instead_of_being_discarded(self):
+        # Regression for a real bug: the prefix's identified country used to
+        # be discarded once it confirmed the remainder had *some* match
+        # anywhere in the world, letting a same-type population tiebreak
+        # pick a city in a completely different country. "NZ - Cambridge"
+        # must resolve to Cambridge, New Zealand, not Cambridge, England
+        # (which would win a global population tiebreak).
+        result = normalize_location("NZ - Cambridge")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["country"], "NZ")
+
+    def test_prefix_country_with_no_matching_remainder_stays_unresolved(self):
+        # "Berlin" resolves globally (to Germany), but Mexico has no city
+        # by that name in the dataset -- silently falling back to the
+        # global tiebreak would discard the explicit "MX" hint and
+        # confidently resolve to the wrong country. Must stay unresolved.
+        result = normalize_location("MX - Berlin")
+        self.assertFalse(result["resolved"])
+
+
+class AreaSuffixSameTypeCollisionTests(SimpleTestCase):
+    """Regression for a real bug: R7's "<X> Area" suffix strip fed its
+    result directly into the unconstrained same-type bare-city tiebreak,
+    letting a generic word ("Bay", "Metro", "Delta", "North") that happens
+    to coincidentally match an obscure real place resolve confidently to
+    the wrong city. "Bay Area" is an especially common real-world string
+    for SF Bay Area job postings."""
+
+    def test_generic_area_descriptor_stays_unresolved(self):
+        for raw in ("Bay Area", "Metro Area", "Delta Area", "North Area", "Greater Boston Area"):
+            with self.subTest(raw=raw):
+                result = normalize_location(raw)
+                self.assertFalse(result["resolved"])
+
+    def test_unambiguous_suffix_stripped_city_still_resolves(self):
+        # The fix must not regress the case this suffix-stripping exists
+        # for: a real, unambiguous city name with "Area" appended.
+        result = normalize_location("Bangalore Area")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["city"], "Bengaluru")
