@@ -85,22 +85,26 @@ def _substring_fallback(raw_targets, raw_location):
     return 1.0 if any(t in location for t in targets) else 0.0
 
 
+def _is_no_place_info(target):
+    """A target that's "resolved" with every field unset -- apps/locations'
+    defined "no place info" state for a bare remote/hybrid target string
+    (e.g. a user typing "Remote" as one of their target_locations entries).
+    Must be treated as if the user hadn't specified it at all, on every
+    matching path -- not just the structured hierarchy-match path.
+    """
+    return target["resolved"] and not (target["city"] or target["region"] or target["country"])
+
+
 def _match_targets(profile, job):
     raw_targets = profile.get("target_locations_normalized") or []
 
-    # A target can be "resolved" with every field unset -- apps/locations'
-    # defined "no place info" state for a bare remote/hybrid target string
-    # (e.g. a user typing "Remote" as one of their target_locations
-    # entries). Treat these as if the user hadn't specified them at all:
-    # not a hierarchy-match wildcard (every level unset would otherwise
-    # vacuously match any job, silently defeating the user's *other* real
-    # target locations in the same list) and not a real-but-unresolved
-    # target either (which must still force 0.0 against a resolved job,
-    # per the bare-abbreviation regression this scorer exists to prevent).
-    targets = [
-        t for t in raw_targets
-        if not (t["resolved"] and not (t["city"] or t["region"] or t["country"]))
-    ]
+    # Treat "no place info" targets as absent: not a hierarchy-match
+    # wildcard (every level unset would otherwise vacuously match any job,
+    # silently defeating the user's *other* real target locations in the
+    # same list) and not a real-but-unresolved target either (which must
+    # still force 0.0 against a resolved job, per the bare-abbreviation
+    # regression this scorer exists to prevent).
+    targets = [t for t in raw_targets if not _is_no_place_info(t)]
     if not targets:
         return 1.0  # no location constraint stated — unchanged semantic
 
@@ -117,8 +121,16 @@ def _match_targets(profile, job):
 
     # Job itself isn't in the curated alias table yet (thin coverage) — fall
     # back to the pre-structured substring behavior rather than penalizing
-    # users for a curation gap outside their control.
-    return _substring_fallback(profile.get("target_locations"), job.get("location"))
+    # users for a curation gap outside their control. Excludes the same
+    # no-place-info raw strings the hierarchy-match path excludes above --
+    # otherwise a bare "Remote" target could substring-match an unresolved
+    # job's raw location text and mask a real target in the same list.
+    no_place_info_raw = {t["raw"] for t in raw_targets if _is_no_place_info(t)}
+    substring_targets = [
+        loc for loc in (profile.get("target_locations") or [])
+        if loc not in no_place_info_raw
+    ]
+    return _substring_fallback(substring_targets, job.get("location"))
 
 
 def _location_component(profile, job):
