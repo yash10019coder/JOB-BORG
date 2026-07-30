@@ -276,6 +276,33 @@ class DiffStaleLocationsTests(TestCase):
 
         self.assertEqual(diff["profile_changes"], [])
 
+    def test_multi_batch_cursor_advances_across_pages(self):
+        # Regression: _iter_stale_by_pk_cursor's pk-cursor advance/termination
+        # logic was previously only exercised within a single batch here --
+        # unlike backfill_jobs' own multi-batch test, nothing proved the
+        # dry-run diff itself sees rows past the first page.
+        for i in range(5):
+            job = _make_job(i, location="Springfield")
+            job.location_city = "Springfield"
+            job.location_region = "IL"
+            job.location_country = "US"
+            job.location_resolved = True
+            job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": "Springfield", "region": "MA", "country": "US", "resolved": True,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile, batch_size=2)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["job_changes"]), 5)
+        self.assertEqual({c["pk"] for c in diff["job_changes"]},
+                          {j.pk for j in Job.objects.all()})
+
 
 class NormalizeTargetLocationsTests(TestCase):
     def test_dedupes_on_structured_tuple(self):
