@@ -540,6 +540,58 @@ class StringFormatFixesTests(SimpleTestCase):
         self.assertFalse(result["resolved"])
 
 
+class PrefixCodeLookupTests(SimpleTestCase):
+    """R8's dedicated country_by_prefix_code lookup, exercised against a
+    fixture index rather than the real dataset -- reproduces the confirmed
+    "SG - Singapore" bug (SG absent from country_by_alias due to an
+    incidental region-abbrev collision, but present in the dedicated prefix
+    lookup) and the "GA - Atlanta" US-state-collision exclusion, independent
+    of whether the checked-in dataset has been regenerated yet."""
+
+    def setUp(self):
+        self.data = {
+            "countries": [
+                # "sg" and "singapore" deliberately absent from aliases --
+                # simulates the real collision-drop this dedicated lookup
+                # exists to fix. Resolution can only succeed by (a) using
+                # country_iso2_prefixes to recognize "sg" as a prefix at
+                # all, which strips it so the remainder becomes bare
+                # "singapore", and (b) scoping the bare city match to SG.
+                {"name": "SG", "aliases": ["sgp"], "population": 5638676},
+            ],
+            "regions": [],
+            "cities": [
+                {
+                    "name": "Singapore",
+                    "region": None,
+                    "country": "SG",
+                    "population": 5638676,
+                    "feature_code": "PPLC",
+                    "aliases": ["singapore"],
+                }
+            ],
+            "ambiguous_bare_tokens": [],
+            "country_iso2_prefixes": {"sg": "SG"},
+        }
+        self.patcher = mock.patch.object(
+            engine, "_load_index", return_value=engine._GeoIndex(self.data)
+        )
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_prefix_resolves_via_dedicated_lookup_despite_alias_collision(self):
+        result = normalize_location("SG - Singapore")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["country"], "SG")
+
+    def test_code_absent_from_prefix_lookup_stays_unresolved(self):
+        # "ga" is not in country_iso2_prefixes at all in this fixture
+        # (simulating the US-state exclusion) -- the prefix must not fall
+        # back to country_by_alias or any other signal.
+        result = normalize_location("GA - Atlanta")
+        self.assertFalse(result["resolved"])
+
+
 class AreaSuffixSameTypeCollisionTests(SimpleTestCase):
     """Regression for a real bug: R7's "<X> Area" suffix strip fed its
     result directly into the unconstrained same-type bare-city tiebreak,

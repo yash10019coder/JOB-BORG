@@ -66,11 +66,12 @@ _GENERIC_AREA_DESCRIPTORS = {
 
 # R8: a leading two-letter country-code prefix + separator (e.g.
 # "SG - Singapore", "UK - London"). Anchored at the start. Matched against
-# the loaded index's actual country aliases (not blindly any two letters) so
-# it doesn't fire on non-country two-letter tokens -- though a code that's
-# also a common US state abbreviation (e.g. ISO "IN" = India vs. Indiana) is
-# a known, deferred edge case (see plan Open Questions), not evidenced in
-# real data as of this dataset.
+# the loaded index's dedicated country_by_prefix_code lookup (not blindly any
+# two letters) so it doesn't fire on non-country two-letter tokens. A code
+# that's also a common US state abbreviation (e.g. ISO "GA" = Gabon vs.
+# Georgia) is excluded from that lookup entirely, so it correctly stays
+# unresolved rather than confidently resolving to the wrong country -- see
+# apps/locations/geodata_generation.py's US_STATE_POSTAL_CODES.
 _TWO_LETTER_PREFIX_RE = re.compile(r"^([a-z]{2})\s*-\s*(.+)$")
 
 # GeoNames' `feature code` column, tiered by administrative significance.
@@ -123,6 +124,13 @@ class _GeoIndex:
 
     def __init__(self, data):
         self.country_by_alias = {}
+        # R8's dedicated country-code-prefix lookup, always populated for
+        # every country's ISO code (except the ones colliding with a US
+        # state postal abbreviation) -- independent of country_by_alias,
+        # which drops a code entirely on ANY region-abbrev collision
+        # worldwide (see apps/locations/geodata_generation.py's
+        # country_iso2_prefixes for why the two lookups can't be merged).
+        self.country_by_prefix_code = dict(data.get("country_iso2_prefixes") or {})
         self.country_population = {}
         self.region_full_by_alias = {}
         # List-valued (unlike region_full_by_alias): same-abbrev collisions
@@ -389,7 +397,7 @@ def normalize_location(raw):
         if index is None:
             return dict(_UNRESOLVED)
         code, remainder_after_prefix = prefix_match.groups()
-        prefix_country = index.country_by_alias.get(code)
+        prefix_country = index.country_by_prefix_code.get(code)
         without_prefix = remainder_after_prefix.strip() if prefix_country else without_suffix
     else:
         without_prefix = without_suffix

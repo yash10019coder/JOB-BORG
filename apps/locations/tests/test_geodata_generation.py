@@ -280,6 +280,139 @@ class BuildGeodataTests(SimpleTestCase):
         self.assertIn("ga", georgia["abbrev_aliases"])
 
 
+class CountryIso2PrefixesTests(SimpleTestCase):
+    """R8's dedicated, always-available ISO2->country lookup (used by
+    apps/locations/engine.py's country-code-prefix matching), independent of
+    country_by_alias's region-abbrev-collision exclusion."""
+
+    def _build(self, city_text, countries_text, admin1_text=ADMIN1_TEXT):
+        city_rows = parse_cities_file(city_text, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        return build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+    def test_incidental_region_collision_still_gets_a_prefix_entry(self):
+        # Real confirmed bug: Singapore's "SG" collides with Switzerland's
+        # St. Gallen canton admin code (CH.SG), which drops "sg" from
+        # country_by_alias entirely -- but that collision has no bearing on
+        # "SG - Singapore" as a prefix, so the dedicated lookup must still
+        # carry it.
+        countries_text = (
+            COUNTRIES_TEXT
+            + "SG\tSGP\t702\tSG\tSingapore\tSingapore\t710\t5638676\tAS\t.sg\tSGD\tDollar\t65\t\t\ten-SG\t1880251\t\t\n"
+            + "CH\tCHE\t756\tSZ\tSwitzerland\tBern\t41290\t8341600\tEU\t.ch\tCHF\tFranc\t41\t\t\tde-CH\t2658434\t\t\n"
+        )
+        admin1_text = ADMIN1_TEXT + "CH.SG\tSt. Gallen\tSt. Gallen\t507697\n"
+        data = self._build(LONDON_ROW, countries_text, admin1_text)
+
+        # Confirm the collision actually suppressed "sg" from the
+        # ambiguity-filtered dict, or this test proves nothing.
+        singapore = next(c for c in data["countries"] if c["name"] == "SG")
+        self.assertNotIn("sg", singapore["aliases"])
+
+        self.assertEqual(data["country_iso2_prefixes"].get("sg"), "SG")
+
+    def test_us_state_colliding_code_excluded_from_prefix_lookup(self):
+        countries_text = COUNTRIES_TEXT + "GA\tGAB\t266\tGB\tGabon\tLibreville\t267668\t2119275\tAF\t.ga\tXAF\tFranc\t241\t\t\tfr-GA\t2400001\t\t\n"
+        data = self._build(LONDON_ROW, countries_text)
+        self.assertNotIn("ga", data["country_iso2_prefixes"])
+
+    def test_overridden_countries_use_their_display_name(self):
+        data = self._build(LONDON_ROW, COUNTRIES_TEXT)
+        self.assertEqual(data["country_iso2_prefixes"].get("us"), "US")
+        self.assertEqual(data["country_iso2_prefixes"].get("gb"), "UK")
+
+
+class CanadaProvinceAbbrevTests(SimpleTestCase):
+    """GeoNames' Canadian admin1 codes are numeric ("CA.08" for Ontario), not
+    alphabetic postal abbreviations -- the abbrev-alias derivation's default
+    `region_code.isalpha()` check silently produces no abbreviation alias at
+    all for any Canadian province without the CANADA_PROVINCE_POSTAL_CODES
+    fallback."""
+
+    def _build(self, admin1_text):
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        return build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+    def test_numeric_ontario_code_gets_postal_abbrev_alias(self):
+        admin1_text = ADMIN1_TEXT + "CA.08\tOntario\tOntario\t13448494\n"
+        data = self._build(admin1_text)
+        ontario = next(r for r in data["regions"] if r["name"] == "Ontario")
+        self.assertIn("on", ontario["abbrev_aliases"])
+
+    def test_numeric_alberta_code_gets_postal_abbrev_alias(self):
+        admin1_text = ADMIN1_TEXT + "CA.01\tAlberta\tAlberta\t4262635\n"
+        data = self._build(admin1_text)
+        alberta = next(r for r in data["regions"] if r["name"] == "Alberta")
+        self.assertIn("ab", alberta["abbrev_aliases"])
+
+    def test_unmapped_numeric_code_outside_canada_gets_no_abbrev(self):
+        # A non-Canadian numeric admin1 code (contrived) must not
+        # accidentally pick up a Canada-table entry -- the CA-country guard
+        # must gate the fallback, not just "is the code numeric".
+        admin1_text = ADMIN1_TEXT + "US.08\tSomeNumericDistrict\tSomeNumericDistrict\t1\n"
+        data = self._build(admin1_text)
+        district = next(r for r in data["regions"] if r["name"] == "SomeNumericDistrict")
+        self.assertEqual(district["abbrev_aliases"], [])
+
+    def test_existing_alphabetic_us_state_codes_unaffected(self):
+        data = self._build(ADMIN1_TEXT)
+        illinois = next(r for r in data["regions"] if r["name"] == "Illinois")
+        self.assertIn("il", illinois["abbrev_aliases"])
+
+
+class ExpandedCountrySynonymTests(SimpleTestCase):
+    """Only 5 countries (US/UK/Germany/India/Canada) had hand-curated common
+    English synonyms before this fix -- every other country got only
+    GeoNames' literal `name` field, which real unresolved-data sampling
+    confirmed doesn't cover how job postings actually write these five
+    countries (e.g. "korea" instead of GeoNames' "South Korea")."""
+
+    def _build(self, countries_text):
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(ADMIN1_TEXT)
+        country_rows = parse_countries_file(countries_text)
+        return build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+
+    def test_south_korea_common_name(self):
+        countries_text = COUNTRIES_TEXT + "KR\tKOR\t410\tKS\tSouth Korea\tSeoul\t98480\t51635256\tAS\t.kr\tKRW\tWon\t82\t\t\tko-KR\t1835841\t\t\n"
+        data = self._build(countries_text)
+        korea = next(c for c in data["countries"] if c["name"] == "South Korea")
+        self.assertIn("korea", korea["aliases"])
+
+    def test_netherlands_common_name(self):
+        countries_text = COUNTRIES_TEXT + "NL\tNLD\t528\tNL\tThe Netherlands\tAmsterdam\t41526\t17231017\tEU\t.nl\tEUR\tEuro\t31\t\t\tnl-NL\t2750405\t\t\n"
+        data = self._build(countries_text)
+        netherlands = next(c for c in data["countries"] if c["name"] == "Netherlands")
+        self.assertIn("netherlands", netherlands["aliases"])
+
+    def test_taiwan_common_name(self):
+        countries_text = COUNTRIES_TEXT + "TW\tTWN\t158\tTW\t\tTaipei\t35980\t23451837\tAS\t.tw\tTWD\tDollar\t886\t\t\tzh-TW\t1668284\t\t\n"
+        data = self._build(countries_text)
+        taiwan = next(c for c in data["countries"] if c["name"] == "Taiwan")
+        self.assertIn("taiwan", taiwan["aliases"])
+
+    def test_hong_kong_common_name(self):
+        countries_text = COUNTRIES_TEXT + "HK\tHKG\t344\tHK\tHong Kong\tHong Kong\t1092\t7491609\tAS\t.hk\tHKD\tDollar\t852\t\t\tzh-HK\t1819730\t\t\n"
+        data = self._build(countries_text)
+        hk = next(c for c in data["countries"] if c["name"] == "Hong Kong")
+        self.assertIn("hong kong", hk["aliases"])
+
+    def test_czech_republic_common_name(self):
+        countries_text = COUNTRIES_TEXT + "CZ\tCZE\t203\tEZ\tCzechia\tPrague\t78866\t10256760\tEU\t.cz\tCZK\tCzech Koruna\t420\t\t\tcs-CZ\t3077311\t\t\n"
+        data = self._build(countries_text)
+        cz = next(c for c in data["countries"] if c["name"] == "Czech Republic")
+        self.assertIn("czech republic", cz["aliases"])
+        self.assertIn("czechia", cz["aliases"])
+
+    def test_existing_five_overridden_countries_unaffected(self):
+        data = self._build(COUNTRIES_TEXT)
+        us = next(c for c in data["countries"] if c["name"] == "US")
+        self.assertIn("usa", us["aliases"])
+
+
 class RenderYamlTests(SimpleTestCase):
     def test_output_is_loadable_yaml_with_attribution_header(self):
         import yaml
