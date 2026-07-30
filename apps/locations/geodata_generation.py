@@ -412,6 +412,7 @@ def _to_yaml_shape(
     region_full_aliases_to_drop,
     country_abbrev_collisions,
     country_iso2_prefixes,
+    version,
 ):
     """Apply exclusion/demotion decisions and assemble the v2.yaml-shaped dict."""
     # Build final resolvable dicts, excluding ambiguous aliases entirely.
@@ -468,7 +469,7 @@ def _to_yaml_shape(
     ]
 
     return {
-        "version": "v2",
+        "version": version,
         "countries": countries_yaml,
         "regions": regions_yaml,
         "cities": cities_yaml,
@@ -477,7 +478,7 @@ def _to_yaml_shape(
     }
 
 
-def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT_MIN_POPULATION):
+def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT_MIN_POPULATION, version="v2"):
     """Assemble the full v2.yaml-shaped dataset dict from parsed GeoNames rows.
 
     ``city_rows`` should already be filtered to ``min_population`` by
@@ -509,21 +510,24 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
         city_rows, admin1_map, established_alias_vocabulary=frozenset(country_candidates)
     )
 
-    # A dedicated, always-available ISO-alpha2 -> country-display-name lookup
-    # for R8's country-code-prefix matching (apps/locations/engine.py), kept
-    # independent of country_by_alias below. ISO codes are globally unique by
-    # construction, so this lookup isn't subject to the region-abbrev-
-    # collision exclusion that drops e.g. Singapore's "SG" from
-    # country_by_alias just because it also happens to be a Swiss canton's
-    # admin code -- that ambiguity has no bearing on a code used specifically
-    # as a leading prefix. The one exclusion that *does* apply here is a
-    # code doubling as a US state postal abbreviation (e.g. "GA" = Gabon vs.
-    # Georgia) -- resolving that confidently to the country would silently
-    # discard the overwhelmingly more likely US-state meaning.
+    # A dedicated, always-available 2-letter-code -> country-display-name
+    # lookup for R8's country-code-prefix matching (apps/locations/engine.py),
+    # kept independent of country_by_alias below. Built from every country's
+    # full 2-character alias -- its ISO code plus any 2-letter informal code
+    # from COUNTRY_NAME_OVERRIDES (e.g. "uk" for GB, which GeoNames itself
+    # never uses) -- so it isn't subject to the region-abbrev-collision
+    # exclusion that drops e.g. Singapore's "SG" from country_by_alias just
+    # because it also happens to be a Swiss canton's admin code. That
+    # ambiguity has no bearing on a code used specifically as a leading
+    # prefix. The one exclusion that *does* apply here is a code doubling as
+    # a US state postal abbreviation (e.g. "GA" = Gabon vs. Georgia) --
+    # resolving that confidently to the country would silently discard the
+    # overwhelmingly more likely US-state meaning.
     country_iso2_prefixes = {
-        row["iso"].lower(): _country_display(row["iso"])
-        for row in country_rows
-        if row["iso"] and row["iso"].upper() not in US_STATE_POSTAL_CODES
+        alias: country["name"]
+        for country in countries_list
+        for alias in country["aliases"]
+        if len(alias) == 2 and alias.upper() not in US_STATE_POSTAL_CODES
     }
 
     ambiguous, region_full_aliases_to_drop = _classify_cross_type_ambiguity(
@@ -541,11 +545,12 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
         region_full_aliases_to_drop=region_full_aliases_to_drop,
         country_abbrev_collisions=country_abbrev_collisions,
         country_iso2_prefixes=country_iso2_prefixes,
+        version=version,
     )
 
 
 HEADER_TEMPLATE = """\
-# JobBorg location alias/hierarchy dataset v2.
+# JobBorg location alias/hierarchy dataset {version}.
 #
 # Machine-generated from GeoNames (https://www.geonames.org/) data, licensed
 # CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Derived from
@@ -573,6 +578,8 @@ def render_yaml(data, *, download_date, min_population=DEFAULT_MIN_POPULATION):
     """Render the dataset dict as YAML text with the provenance header."""
     import yaml
 
-    header = HEADER_TEMPLATE.format(download_date=download_date, min_population=min_population)
+    header = HEADER_TEMPLATE.format(
+        download_date=download_date, min_population=min_population, version=data.get("version", "v2")
+    )
     body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False)
     return header + "\n" + body

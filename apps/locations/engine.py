@@ -26,7 +26,7 @@ GEODATA_DIR = Path(__file__).resolve().parent / "geodata"
 # output — the version stamp is the only signal the sweep task uses to find
 # rows that need re-normalizing, so a logic-only fix with no version bump
 # leaves existing rows silently stale.
-CURRENT_LOCATION_ALIAS_VERSION = "v2"
+CURRENT_LOCATION_ALIAS_VERSION = "v3"
 
 # Substrings (lowercased) that mark a posting as remote. Public so
 # apps/jobs/ingestion/normalizers.py's is_remote derivation can reuse the

@@ -8,6 +8,7 @@ from django.test import SimpleTestCase
 from apps.jobs.ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
 from apps.jobs.ingestion.greenhouse_client import BASE_URL, GreenhouseClient
 from apps.jobs.ingestion.normalizers import normalize_job
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "greenhouse_board.json"
 BOARD = "acme"
@@ -42,7 +43,7 @@ class NormalizerTests(SimpleTestCase):
         # the curated country alias list.
         self.assertTrue(first["location_resolved"])
         self.assertEqual(first["location_country"], "US")
-        self.assertEqual(first["location_alias_version"], "v2")
+        self.assertEqual(first["location_alias_version"], CURRENT_LOCATION_ALIAS_VERSION)
 
     def test_onsite_job_is_not_remote(self):
         designer = normalize_job(_load_fixture()["jobs"][1])
