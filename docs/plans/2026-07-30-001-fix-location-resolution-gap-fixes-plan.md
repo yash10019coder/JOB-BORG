@@ -2,7 +2,7 @@
 date: 2026-07-30
 type: fix
 origin: docs/brainstorms/2026-07-30-location-resolution-gap-fixes-requirements.md
-status: active
+status: completed
 ---
 
 # Fix: Close the Location-Resolution Gap (Prefix Collisions, Canada Provinces, Country Synonyms)
