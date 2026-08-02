@@ -276,6 +276,36 @@ class DiffStaleLocationsTests(TestCase):
 
         self.assertEqual(diff["profile_changes"], [])
 
+    def test_resolved_to_unresolved_regression_is_reported_via_resolved_flag_alone(self):
+        # Regression coverage for the `or not structured["resolved"]`
+        # disjunct specifically -- isolated from the `old != new` tuple
+        # path by constructing an old row whose (city, region, country)
+        # tuple is already all-blank (an edge case, but a legal DB state:
+        # location_resolved=True with blank structured fields), so the new
+        # all-None/unresolved result produces an EQUAL tuple. Only the
+        # `not structured["resolved"]` disjunct can flag this as a change.
+        job = _make_job(1, location="Nowhereville")
+        job.location_city = ""
+        job.location_region = ""
+        job.location_country = ""
+        job.location_resolved = True
+        job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": None, "region": None, "country": None, "resolved": False,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["job_changes"]), 1)
+        self.assertEqual(diff["job_changes"][0]["pk"], job.pk)
+        self.assertEqual(diff["job_changes"][0]["old"]["city"], "")
+        self.assertFalse(diff["job_changes"][0]["new"]["resolved"])
+
     def test_multi_batch_cursor_advances_across_pages(self):
         # Regression: _iter_stale_by_pk_cursor's pk-cursor advance/termination
         # logic was previously only exercised within a single batch here --
@@ -311,3 +341,26 @@ class NormalizeTargetLocationsTests(TestCase):
 
     def test_empty_list(self):
         self.assertEqual(normalize_target_locations([]), [])
+
+    def test_multiple_no_place_info_entries_are_all_preserved(self):
+        # Regression: every "no place info" resolution (bare "Remote",
+        # "Anywhere", "WFH") shares the (None, None, None) key, so the
+        # tuple-based dedup used to silently drop every entry after the
+        # first -- reopening the vacuous-wildcard substring-match hole in
+        # apps.matching.scoring's exclusion-set computation, since a
+        # dropped entry's raw string never made it into
+        # target_locations_normalized for scoring to exclude.
+        result = normalize_target_locations(["Remote", "Anywhere", "US"])
+        raws = [entry["raw"] for entry in result]
+        self.assertEqual(raws, ["Remote", "Anywhere", "US"])
+        self.assertTrue(result[0]["resolved"])
+        self.assertIsNone(result[0]["country"])
+        self.assertTrue(result[1]["resolved"])
+        self.assertIsNone(result[1]["country"])
+        self.assertEqual(result[2]["country"], "US")
+
+    def test_genuine_duplicate_real_places_still_dedup(self):
+        # Must not regress the dedup's actual purpose: two raw strings that
+        # resolve to the same real place still collapse to one entry.
+        result = normalize_target_locations(["Chicago", "chicago"])
+        self.assertEqual(len(result), 1)

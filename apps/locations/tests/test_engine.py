@@ -234,6 +234,38 @@ class LoadIndexTests(SimpleTestCase):
         with self.assertRaises(LocationDataError):
             engine._load_index("does-not-exist")
 
+    def test_structurally_malformed_dataset_raises_location_data_error_not_keyerror(self):
+        # Regression: _try_load_index only caught LocationDataError, so a
+        # structurally-malformed-but-dict-shaped dataset (e.g. a country
+        # entry missing its required "name" key) used to raise an uncaught
+        # KeyError, violating normalize_location's documented never-raise
+        # contract instead of surfacing as the defined "unresolved" fallback.
+        engine._load_index.cache_clear()
+        bad_data = {"countries": [{"aliases": ["us"], "population": 1}]}
+        try:
+            with mock.patch("yaml.safe_load", return_value=bad_data):
+                with mock.patch("pathlib.Path.exists", return_value=True):
+                    with mock.patch("pathlib.Path.read_text", return_value=""):
+                        with self.assertRaises(LocationDataError):
+                            engine._load_index("bogus-version-for-malformed-test")
+        finally:
+            engine._load_index.cache_clear()
+
+    def test_normalize_location_stays_unresolved_not_raising_on_malformed_dataset(self):
+        engine._load_index.cache_clear()
+        bad_data = {"countries": [{"aliases": ["us"], "population": 1}]}
+        try:
+            with mock.patch("yaml.safe_load", return_value=bad_data):
+                with mock.patch("pathlib.Path.exists", return_value=True):
+                    with mock.patch("pathlib.Path.read_text", return_value=""):
+                        result = normalize_location("New York, NY, US")
+        finally:
+            engine._load_index.cache_clear()
+        self.assertEqual(
+            result,
+            {"city": None, "region": None, "country": None, "resolved": False},
+        )
+
 
 class NormalizeLocationNeverRaisesTests(SimpleTestCase):
     def test_missing_dataset_file_does_not_raise(self):
@@ -528,3 +560,66 @@ class AreaSuffixSameTypeCollisionTests(SimpleTestCase):
         result = normalize_location("Bangalore Area")
         self.assertTrue(result["resolved"])
         self.assertEqual(result["city"], "Bengaluru")
+
+    def test_bare_generic_descriptor_without_area_suffix_stays_unresolved(self):
+        # Regression: _GENERIC_AREA_DESCRIPTORS was only consulted when
+        # `strict` was set, which only happened when R7's "Area" suffix was
+        # actually stripped -- a bare generic word with no suffix skipped
+        # the check entirely and confidently resolved to an obscure
+        # namesake place (e.g. "Metro" -> Metro, Indonesia; "Delta" ->
+        # Delta, Canada; "Downtown" -> Śródmieście, Poland).
+        for raw in ("Metro", "Delta", "Bay", "Downtown", "North", "Uptown"):
+            with self.subTest(raw=raw):
+                result = normalize_location(raw)
+                self.assertFalse(result["resolved"])
+
+    def test_extended_generic_area_descriptors_stay_unresolved(self):
+        # Adversarially-discovered generic descriptors added to the
+        # blocklist: "Shore Area", "North Shore Area", "Piedmont Area",
+        # "Gold Coast Area", "Highlands Area" all previously resolved
+        # confidently to an obscure namesake place.
+        for raw in (
+            "Shore Area",
+            "North Shore Area",
+            "Piedmont Area",
+            "Gold Coast Area",
+            "Highlands Area",
+        ):
+            with self.subTest(raw=raw):
+                result = normalize_location(raw)
+                self.assertFalse(result["resolved"])
+
+
+class PrefixCountryPreservedThroughRemoteStrippingTests(SimpleTestCase):
+    """Regression: "<CC> - <remote marker>" used to discard an already-
+    identified prefix_country once the remainder stripped to empty,
+    regressing e.g. "US - Remote" to NO_PLACE_INFO with country=None even
+    though "Remote - US" (differently ordered) correctly resolved country."""
+
+    def test_country_prefix_before_remote_marker_preserves_country(self):
+        result = normalize_location("US - Remote")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["country"], "US")
+        self.assertIsNone(result["city"])
+
+    def test_uk_country_prefix_before_remote_marker_preserves_country(self):
+        result = normalize_location("UK - Remote")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["country"], "UK")
+        self.assertIsNone(result["city"])
+
+
+class ScopeCountryEnforcedForCountryAndRegionBranchesTests(SimpleTestCase):
+    """Regression: R8's `scope_country` hint was only enforced in
+    _resolve_bare's city-matching branch -- the country and region branches
+    returned immediately without consulting it, letting a mismatched prefix
+    discard the poster's own hint (e.g. "NZ - Germany" resolving to Germany,
+    "NZ - Texas" resolving to Texas, US)."""
+
+    def test_prefix_country_mismatched_with_resolved_country_stays_unresolved(self):
+        result = normalize_location("NZ - Germany")
+        self.assertFalse(result["resolved"])
+
+    def test_prefix_country_mismatched_with_resolved_region_stays_unresolved(self):
+        result = normalize_location("NZ - Texas")
+        self.assertFalse(result["resolved"])

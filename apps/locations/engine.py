@@ -61,6 +61,7 @@ _AREA_SUFFIX_RE = re.compile(r"\s+area$")
 _GENERIC_AREA_DESCRIPTORS = {
     "bay", "metro", "valley", "delta", "north", "south", "east", "west",
     "central", "greater", "downtown", "uptown", "tri-state",
+    "shore", "piedmont", "gold coast", "highlands", "north shore",
 }
 
 # R8: a leading two-letter country-code prefix + separator (e.g.
@@ -186,7 +187,17 @@ def _load_index(version=CURRENT_LOCATION_ALIAS_VERSION):
     data = yaml.safe_load(path.read_text())
     if not isinstance(data, dict):
         raise LocationDataError(f"Location dataset {version!r} is malformed")
-    return _GeoIndex(data)
+    try:
+        return _GeoIndex(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        # A structurally-malformed dataset (e.g. a country/region/city entry
+        # missing a required key) would otherwise raise an uncaught
+        # exception here, violating normalize_location's documented
+        # never-raise contract -- _try_load_index only catches
+        # LocationDataError, so any load failure must surface as one.
+        raise LocationDataError(
+            f"Location dataset {version!r} is structurally malformed: {exc}"
+        ) from exc
 
 
 def _try_load_index():
@@ -237,16 +248,23 @@ def _split_segments(remainder):
 
 
 def _resolve_bare(token, index, *, scope_country=None, strict=False):
-    if strict and token in _GENERIC_AREA_DESCRIPTORS:
+    if token in _GENERIC_AREA_DESCRIPTORS:
         return dict(_UNRESOLVED)
     if token in index.ambiguous_bare_tokens:
         return dict(_UNRESOLVED)
     country = index.country_by_alias.get(token)
     if country:
+        if scope_country and country != scope_country:
+            # A real country hint (R8's prefix) is present but disagrees
+            # with the resolved country -- resolving to the mismatched
+            # country would silently discard the hint the poster gave us.
+            return dict(_UNRESOLVED)
         return {"city": None, "region": None, "country": country, "resolved": True}
     region = index.region_full_by_alias.get(token)
     if region:
         code, country = region
+        if scope_country and country != scope_country:
+            return dict(_UNRESOLVED)
         return {"city": None, "region": code, "country": country, "resolved": True}
     matches = index.city_by_alias.get(token)
     if matches:
@@ -380,7 +398,11 @@ def normalize_location(raw):
     if not remainder:
         # R9: nothing left after remote-marker stripping means the input was
         # remote/hybrid noise with no place information -- a defined
-        # "resolved, no location" state, not a coverage gap to flag.
+        # "resolved, no location" state, not a coverage gap to flag. If R8
+        # already identified a prefix country (e.g. "US - Remote"), preserve
+        # it rather than discarding an already-resolved signal.
+        if prefix_country:
+            return {**_NO_PLACE_INFO, "country": prefix_country}
         return dict(_NO_PLACE_INFO)
 
     if index is None:

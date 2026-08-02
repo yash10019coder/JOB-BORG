@@ -253,35 +253,20 @@ def _build_cities(
     return cities_list
 
 
-def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT_MIN_POPULATION):
-    """Assemble the full v2.yaml-shaped dataset dict from parsed GeoNames rows.
+def _classify_cross_type_ambiguity(cities_list, country_candidates, full_candidates):
+    """A bare alias resolving to more than one of {country, region, city}.
 
-    ``city_rows`` should already be filtered to ``min_population`` by
-    ``parse_cities_file`` -- ``min_population`` is accepted here only so
-    callers passing pre-parsed rows can re-assert the threshold.
+    Returns ``(ambiguous, region_full_aliases_to_drop)``: ``ambiguous`` holds
+    aliases that must fail closed (country-vs-region, or all three types at
+    once); ``region_full_aliases_to_drop`` holds region-vs-city collisions
+    where the city wins instead (see inline comment below). Country-vs-city
+    collisions (e.g. city-states like "Singapore") need no entry in either
+    set -- ``_resolve_bare`` already checks country before city, so existing
+    precedence resolves them without exclusion.
     """
-    city_rows = [r for r in city_rows if r["population"] >= min_population]
-
-    countries_list, country_candidates = _build_countries(country_rows)
-    regions_list, full_candidates, abbrev_candidates = _build_regions(admin1_map)
-    # Only country aliases guard the alternatenames filter, not region
-    # aliases: country-vs-city collisions resolve in the COUNTRY's favor
-    # (existing precedence, no demotion), so a noisy alternatename here
-    # would otherwise let the country silently swallow a real city's
-    # legitimate alias. Region-vs-city collisions resolve the opposite way
-    # (city wins, see the ambiguity classifier below) -- filtering region
-    # names here would strip exactly the alternatename that resolution is
-    # designed to let the city keep (confirmed as a real regression during
-    # implementation: it broke New York City's own "New York" alias, since
-    # that string is also the New York region's name).
-    cities_list = _build_cities(
-        city_rows, admin1_map, established_alias_vocabulary=frozenset(country_candidates)
-    )
-
     ambiguous = set()
     region_full_aliases_to_drop = set()
 
-    # Cross-type: a bare alias resolving to more than one of {country, region, city}.
     city_alias_index = defaultdict(list)
     for city in cities_list:
         for alias in city["aliases"]:
@@ -322,6 +307,13 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
             # unresolved -- fail closed.
             ambiguous.add(alias)
 
+    return ambiguous, region_full_aliases_to_drop
+
+
+def _classify_same_type_ambiguity(ambiguous, country_candidates, full_candidates, abbrev_candidates):
+    """Extends ``ambiguous`` in place with same-type collisions and returns
+    ``country_abbrev_collisions`` (a distinct exclusion set -- see below).
+    """
     # Same-type: a bare country alias claimed by more than one distinct ISO code.
     for alias, isos in country_candidates.items():
         if len(isos) > 1:
@@ -359,6 +351,19 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
     # country still has (its ISO3 and full name survive untouched).
     country_abbrev_collisions = set(country_candidates) & set(abbrev_candidates)
 
+    return country_abbrev_collisions
+
+
+def _to_yaml_shape(
+    countries_list,
+    regions_list,
+    cities_list,
+    *,
+    ambiguous,
+    region_full_aliases_to_drop,
+    country_abbrev_collisions,
+):
+    """Apply exclusion/demotion decisions and assemble the v2.yaml-shaped dict."""
     # Build final resolvable dicts, excluding ambiguous aliases entirely.
     for country in countries_list:
         country["aliases"] = [
@@ -419,6 +424,55 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
         "cities": cities_yaml,
         "ambiguous_bare_tokens": sorted(ambiguous),
     }
+
+
+def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT_MIN_POPULATION):
+    """Assemble the full v2.yaml-shaped dataset dict from parsed GeoNames rows.
+
+    ``city_rows`` should already be filtered to ``min_population`` by
+    ``parse_cities_file`` -- ``min_population`` is accepted here only so
+    callers passing pre-parsed rows can re-assert the threshold.
+
+    Four phases, delegated to helpers: build the raw per-type lists
+    (``_build_countries``/``_build_regions``/``_build_cities``), classify
+    cross-type ambiguity (``_classify_cross_type_ambiguity``), classify
+    same-type ambiguity (``_classify_same_type_ambiguity``), then apply the
+    resulting exclusions/demotions and assemble the YAML shape
+    (``_to_yaml_shape``).
+    """
+    city_rows = [r for r in city_rows if r["population"] >= min_population]
+
+    countries_list, country_candidates = _build_countries(country_rows)
+    regions_list, full_candidates, abbrev_candidates = _build_regions(admin1_map)
+    # Only country aliases guard the alternatenames filter, not region
+    # aliases: country-vs-city collisions resolve in the COUNTRY's favor
+    # (existing precedence, no demotion), so a noisy alternatename here
+    # would otherwise let the country silently swallow a real city's
+    # legitimate alias. Region-vs-city collisions resolve the opposite way
+    # (city wins, see the ambiguity classifier below) -- filtering region
+    # names here would strip exactly the alternatename that resolution is
+    # designed to let the city keep (confirmed as a real regression during
+    # implementation: it broke New York City's own "New York" alias, since
+    # that string is also the New York region's name).
+    cities_list = _build_cities(
+        city_rows, admin1_map, established_alias_vocabulary=frozenset(country_candidates)
+    )
+
+    ambiguous, region_full_aliases_to_drop = _classify_cross_type_ambiguity(
+        cities_list, country_candidates, full_candidates
+    )
+    country_abbrev_collisions = _classify_same_type_ambiguity(
+        ambiguous, country_candidates, full_candidates, abbrev_candidates
+    )
+
+    return _to_yaml_shape(
+        countries_list,
+        regions_list,
+        cities_list,
+        ambiguous=ambiguous,
+        region_full_aliases_to_drop=region_full_aliases_to_drop,
+        country_abbrev_collisions=country_abbrev_collisions,
+    )
 
 
 HEADER_TEMPLATE = """\

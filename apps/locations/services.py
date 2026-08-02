@@ -25,15 +25,28 @@ def normalize_target_locations(raw_locations):
     on the normalized (city, region, country) tuple so typing "NYC" and
     "New York" together doesn't double-count in hierarchy matching. Unresolved
     entries are kept (not dropped) -- scoring treats them as inert.
+
+    "No place info" entries (resolved, but city/region/country all unset --
+    a bare remote/hybrid string like "Remote" or "Anywhere") are exempted
+    from this dedup: they all share the same (None, None, None) key, but
+    apps.matching.scoring's substring-fallback exclusion set is computed by
+    scanning every raw string that produced a no-place-info entry here. If
+    only the first such entry survived the dedup, a second one (e.g.
+    "Anywhere" alongside "Remote") would silently leak past that exclusion
+    set and re-open the vacuous substring-match hole scoring.py exists to
+    close. Genuinely-duplicate *real* places still dedup as before.
     """
     seen_keys = set()
     normalized = []
     for raw in raw_locations:
         structured = normalize_location(raw)
+        is_no_place_info = structured["resolved"] and not (
+            structured["city"] or structured["region"] or structured["country"]
+        )
         key = (structured["city"], structured["region"], structured["country"])
-        if structured["resolved"] and key in seen_keys:
+        if structured["resolved"] and not is_no_place_info and key in seen_keys:
             continue
-        if structured["resolved"]:
+        if structured["resolved"] and not is_no_place_info:
             seen_keys.add(key)
         normalized.append({"raw": raw, **structured})
     return normalized

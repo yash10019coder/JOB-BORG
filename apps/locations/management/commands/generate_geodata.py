@@ -10,7 +10,7 @@ import datetime
 
 import requests
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from apps.locations.geodata_generation import (
     build_geodata,
@@ -82,5 +82,10 @@ class Command(BaseCommand):
         import zipfile
 
         with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
-            inner_name = next(n for n in zf.namelist() if n.endswith(".txt"))
-            return zf.read(inner_name).decode("utf-8")
+            txt_names = [n for n in zf.namelist() if n.endswith(".txt")]
+            if not txt_names:
+                raise CommandError(
+                    f"No .txt member found in zip fetched from {url} -- "
+                    f"archive contents: {zf.namelist()!r}"
+                )
+            return zf.read(txt_names[0]).decode("utf-8")

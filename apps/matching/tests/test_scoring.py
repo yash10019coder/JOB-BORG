@@ -298,6 +298,35 @@ class LocationComponentTests(SimpleTestCase):
                                    location_country="UK", location_resolved=True))
         self.assertLess(uk_job.score, us_job.score)
 
+    def test_second_no_place_info_raw_is_excluded_from_substring_fallback(self):
+        # Regression: apps.locations.services.normalize_target_locations used
+        # to dedup every "no place info" entry down to the first (they all
+        # share the (None, None, None) key), silently dropping a second
+        # marker's raw string (e.g. "Anywhere" alongside "Remote") out of
+        # target_locations_normalized. scoring's no_place_info_raw exclusion
+        # set is built by scanning that list, so the dropped raw string
+        # never got excluded and leaked into the substring-match fallback --
+        # a job whose raw location text merely contained "anywhere" scored
+        # 1.0 regardless of the user's real "US" target. With the fix,
+        # target_locations_normalized carries every no-place-info entry, so
+        # this must stay excluded.
+        p = profile(target_tags=["python"],
+                    target_locations=["Remote", "Anywhere", "US"],
+                    target_locations_normalized=[
+                        no_place_info_target("Remote"),
+                        no_place_info_target("Anywhere"),
+                        resolved_target(country="US", raw="US"),
+                    ])
+        vacuous_job = score_job(p, job(classification_tags=["python"], is_remote=False,
+                                        location="Job available anywhere in Europe",
+                                        location_resolved=False))
+        us_unresolved_job = score_job(p, job(classification_tags=["python"], is_remote=False,
+                                              location="Somewhere in the US",
+                                              location_resolved=False))
+        # The "anywhere" substring must not vacuously match -- only the
+        # real "US" target (via the surviving substring fallback) should.
+        self.assertLess(vacuous_job.score, us_unresolved_job.score)
+
     def test_job_unresolved_target_resolved_falls_back_to_substring(self):
         p = profile(target_tags=["python"],
                     target_locations=["small town"],
