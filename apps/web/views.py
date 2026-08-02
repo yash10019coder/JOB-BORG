@@ -155,40 +155,48 @@ def job_action(request, job_id):
 
 # --- Auto-apply (U8) -------------------------------------------------------
 
-# Small mapping from stored `exclusion_reason`/`error_message` substrings to
-# a short, user-facing message -- the raw internal text (exception repr,
-# form-schema diagnostics, etc.) is never shown verbatim in the UI.
-_EXCLUSION_MESSAGE_PATTERNS = (
-    ("unsupported field", "This application has a question we couldn't fill in automatically."),
-    ("could not load", "We couldn't load this employer's application form."),
-    ("required question", "This application asks something we don't have an answer for yet."),
-)
-_FAILED_MESSAGE_PATTERNS = (
-    ("timed out", "Submission timed out and wasn't completed; you can try again."),
-)
+# User-facing message per `AutoApplyDraft.ReasonCode` -- keyed on the
+# structured code the drafting/submission code already sets (see
+# apps/auto_apply/services/drafting.py and apps/auto_apply/tasks.py), not
+# derived by pattern-matching the free-text `exclusion_reason`/
+# `error_message` (which exist for logs/debugging and can be reworded
+# there without silently breaking this mapping).
+_REASON_CODE_MESSAGES = {
+    AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH: (
+        "This application has a question we couldn't fill in automatically."
+    ),
+    AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
+        "We couldn't load this employer's application form."
+    ),
+    AutoApplyDraft.ReasonCode.UNANSWERABLE_REQUIRED: (
+        "This application asks something we don't have an answer for yet."
+    ),
+    AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED: (
+        "This employer's form couldn't be completed automatically right now."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_FAILED: (
+        "The application couldn't be submitted; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.SENDING_TIMEOUT: (
+        "Submission timed out and wasn't completed; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR: (
+        "Something went wrong while submitting this application."
+    ),
+}
 _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
 _STALE_MESSAGE = "This job posting closed before we could apply."
 
 
 def _friendly_draft_message(draft):
-    """User-facing explanation for a non-actionable draft state, derived
-    from the stored `exclusion_reason`/`error_message` rather than shown
-    verbatim (plan review flagged raw internal exception text as unsuitable
-    for direct display)."""
+    """User-facing explanation for a non-actionable draft state, keyed on
+    `draft.reason_code` rather than the stored `exclusion_reason`/
+    `error_message` free text (plan review flagged both raw internal text
+    and prose pattern-matching as unsuitable/fragile for direct display)."""
     if draft.status == AutoApplyDraft.Status.STALE:
         return _STALE_MESSAGE
-    if draft.status == AutoApplyDraft.Status.EXCLUDED:
-        text = (draft.exclusion_reason or "").lower()
-        for needle, message in _EXCLUSION_MESSAGE_PATTERNS:
-            if needle in text:
-                return message
-        return _GENERIC_UNAVAILABLE_MESSAGE
-    if draft.status == AutoApplyDraft.Status.FAILED:
-        text = (draft.error_message or "").lower()
-        for needle, message in _FAILED_MESSAGE_PATTERNS:
-            if needle in text:
-                return message
-        return _GENERIC_UNAVAILABLE_MESSAGE
+    if draft.status in (AutoApplyDraft.Status.EXCLUDED, AutoApplyDraft.Status.FAILED):
+        return _REASON_CODE_MESSAGES.get(draft.reason_code, _GENERIC_UNAVAILABLE_MESSAGE)
     return ""
 
 

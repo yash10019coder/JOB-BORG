@@ -139,6 +139,7 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
         self._draft(
             self.alice, job, status=AutoApplyDraft.Status.EXCLUDED,
             exclusion_reason="Required question(s) could not be answered: Visa status",
+            reason_code=AutoApplyDraft.ReasonCode.UNANSWERABLE_REQUIRED,
         )
         client = self._client_for(self.alice)
         response = client.get(reverse("auto_apply_queue"))

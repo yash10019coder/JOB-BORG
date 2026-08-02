@@ -60,6 +60,24 @@ class AutoApplyDraft(models.Model):
         FAILED = "failed", "Failed"
         EXCLUDED = "excluded", "Excluded"
 
+    class ReasonCode(models.TextChoices):
+        """Machine-readable classification of why a draft is EXCLUDED/FAILED.
+
+        `exclusion_reason`/`error_message` remain free text for logs/
+        debugging, but UI code (see `apps/web/views.py`'s
+        `_friendly_draft_message`) should switch on this code, not
+        substring-match the free text -- the two would otherwise have to
+        stay in sync by hand across modules with no test/type enforcing it.
+        """
+
+        SCHEMA_MISMATCH = "schema_mismatch", "Unsupported form field"
+        FORM_LOAD_FAILED = "form_load_failed", "Could not load application form"
+        UNANSWERABLE_REQUIRED = "unanswerable_required", "Required question unanswered"
+        CAPTCHA_CHALLENGED = "captcha_challenged", "Bot-detection challenge"
+        SUBMISSION_FAILED = "submission_failed", "Submission rejected"
+        SENDING_TIMEOUT = "sending_timeout", "Submission timed out"
+        UNEXPECTED_ERROR = "unexpected_error", "Unexpected error"
+
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.
     ACTIVE_STATUSES = (Status.DRAFTED, Status.SENDING)
@@ -104,6 +122,17 @@ class AutoApplyDraft(models.Model):
         null=True,
         blank=True,
         help_text="Populated when status=FAILED (R14).",
+    )
+    reason_code = models.CharField(
+        max_length=32,
+        choices=ReasonCode.choices,
+        null=True,
+        blank=True,
+        help_text=(
+            "Machine-readable reason for EXCLUDED/FAILED, set alongside "
+            "exclusion_reason/error_message. UI code should switch on this, "
+            "not the free-text message."
+        ),
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

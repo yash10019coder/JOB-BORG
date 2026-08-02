@@ -134,6 +134,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             job,
             status=AutoApplyDraft.Status.EXCLUDED,
             exclusion_reason=f"Application form has an unsupported field: {exc}",
+            reason_code=AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH,
         )
     except GreenhouseFormError as exc:
         return _persist_draft(
@@ -141,6 +142,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             job,
             status=AutoApplyDraft.Status.EXCLUDED,
             exclusion_reason=f"Could not load the application form: {exc}",
+            reason_code=AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED,
         )
 
     standard_fields: list[FormField] = []
@@ -197,7 +199,11 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             unanswerable_required
         )
         return _persist_draft(
-            user, job, status=AutoApplyDraft.Status.EXCLUDED, exclusion_reason=reason
+            user,
+            job,
+            status=AutoApplyDraft.Status.EXCLUDED,
+            exclusion_reason=reason,
+            reason_code=AutoApplyDraft.ReasonCode.UNANSWERABLE_REQUIRED,
         )
 
     return _persist_draft(
@@ -206,7 +212,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
 
 
 def _persist_draft(
-    user, job, *, status, answers=None, exclusion_reason=None
+    user, job, *, status, answers=None, exclusion_reason=None, reason_code=None
 ) -> AutoApplyDraft | None:
     """Create the `AutoApplyDraft` row, treating a violation of the
     conditional unique constraint (`uniq_autoapplydraft_user_job_active`)
@@ -222,6 +228,7 @@ def _persist_draft(
                 status=status,
                 answers=answers or {},
                 exclusion_reason=exclusion_reason,
+                reason_code=reason_code,
             )
     except IntegrityError:
         logger.info(
