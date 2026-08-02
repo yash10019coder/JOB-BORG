@@ -24,13 +24,32 @@ from apps.applications.models import JobApplication
 from apps.jobs.models import Job
 
 from .greenhouse_form.client import GreenhouseFormClient
-from .greenhouse_form.exceptions import GreenhouseFormError
+from .greenhouse_form.exceptions import (
+    GreenhouseFormChallenged,
+    GreenhouseFormError,
+    GreenhouseFormSchemaMismatch,
+)
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
+
+
+def _reason_code_for(exc: GreenhouseFormError) -> str:
+    """Map a submission-time exception to `AutoApplyDraft.ReasonCode`.
+
+    Used instead of substring-matching `str(exc)` later in the UI layer
+    (`apps/web/views.py`) -- the exception type is already the structured
+    signal; discarding it into free text and re-deriving it from prose
+    elsewhere would let the two drift out of sync silently.
+    """
+    if isinstance(exc, GreenhouseFormChallenged):
+        return AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED
+    if isinstance(exc, GreenhouseFormSchemaMismatch):
+        return AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH
+    return AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
 
 
 @shared_task(name="apps.auto_apply.draft_auto_apply")
@@ -148,7 +167,8 @@ def submit_auto_apply_draft(draft_id):
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)
-        draft.save(update_fields=["status", "error_message", "updated_at"])
+        draft.reason_code = _reason_code_for(exc)
+        draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
         logger.warning(
             "submit_auto_apply_draft(draft_id=%s): submission failed: %s", draft_id, exc
         )
@@ -160,7 +180,8 @@ def submit_auto_apply_draft(draft_id):
         )
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = "Unexpected error during submission."
-        draft.save(update_fields=["status", "error_message", "updated_at"])
+        draft.reason_code = AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR
+        draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
         return draft.pk
 
     with transaction.atomic():
@@ -212,6 +233,7 @@ def sweep_stale_auto_apply_drafts():
     ).update(
         status=AutoApplyDraft.Status.FAILED,
         error_message="Submission timed out / recovered from stuck SENDING state.",
+        reason_code=AutoApplyDraft.ReasonCode.SENDING_TIMEOUT,
         updated_at=timezone.now(),
     )
 

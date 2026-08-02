@@ -26,9 +26,10 @@ constructed via an injectable ``context_factory`` and torn down after use.
 """
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol
+
+from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
 
 from .exceptions import (
     DebugArtifacts,
@@ -70,31 +71,10 @@ _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 
 # -- Pluggable CAPTCHA-solver interface --------------------------------------
 #
-# The real CaptchaSolver implementation ships separately (see U5); this is
-# only the minimal shape this client needs to hand a detected challenge off
-# to *something*, expressed as a Protocol so any structurally-compatible
-# solver (including U5's) can be injected without this module importing it.
-
-
-@dataclass
-class ChallengeContext:
-    """Minimal, duck-typed description of a detected bot-detection challenge."""
-
-    url: str
-    challenge_type: str = "unknown"
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@runtime_checkable
-class CaptchaSolver(Protocol):
-    """Protocol a pluggable CAPTCHA-solving provider must satisfy.
-
-    Implementations that raise or exceed ``timeout`` are, by contract,
-    treated identically to returning ``False`` -- solving failed, and this
-    client fails closed (``GreenhouseFormChallenged``) either way.
-    """
-
-    def solve(self, challenge: ChallengeContext, timeout: float) -> bool: ...
+# ChallengeContext/CaptchaSolver are the shared, vendor-agnostic contract
+# defined in apps.auto_apply.captcha.base (U5) -- imported rather than
+# redeclared here, since both are plain dataclass/Protocol definitions with
+# no Playwright dependency, so importing them carries no coupling cost.
 
 
 # -- Context-factory injection seam ------------------------------------------

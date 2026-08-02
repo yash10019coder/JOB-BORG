@@ -132,23 +132,25 @@ class Profile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def set_resume(self, file):
-        """Assign an uploaded resume file and explicitly enqueue async text
-        extraction.
+        """Assign an uploaded resume file, or clear it if `file` is falsy,
+        and explicitly enqueue async text extraction (skipped on clear).
 
         This is the one call site every write path to `resume` should go
-        through (the profile-edit view once it exists in apps/web, and
-        `ProfileAdmin.save_model` today) so parsing is triggered the same
-        way everywhere -- deliberately not a `post_save` signal, per U1's
+        through -- add *and* clear -- (the profile-edit view once it exists
+        in apps/web, and `ProfileAdmin.save_model` today) so parsing is
+        triggered the same way everywhere and there's no second, divergent
+        path for clearing. Deliberately not a `post_save` signal, per U1's
         approach, so the trigger stays visible here instead of implicit.
         """
-        self.resume = file
+        self.resume = file or None
         self.resume_text = ""
         self.full_clean(validate_unique=False)
         self.save(update_fields=["resume", "resume_text", "updated_at"])
 
-        from .resume_parsing import parse_resume
+        if file:
+            from .resume_parsing import parse_resume
 
-        parse_resume.delay(self.pk)
+            parse_resume.delay(self.pk)
 
     def __str__(self):
         return f"Profile<{self.user.username}>"
