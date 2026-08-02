@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "apps.classification",
     "apps.matching",
     "apps.applications",
+    "apps.auto_apply",
     "apps.web",
 ]
 
