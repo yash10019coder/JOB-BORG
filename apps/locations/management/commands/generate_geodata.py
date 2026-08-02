@@ -1,4 +1,4 @@
-"""Regenerate apps/locations/geodata/v2.yaml from GeoNames' raw exports.
+"""Regenerate apps/locations/geodata/<version>.yaml from GeoNames' raw exports.
 
 Offline, one-shot: fetches (or reads locally-provided copies of)
 cities15000.txt, admin1CodesASCII.txt, and countryInfo.txt, transforms them
@@ -12,6 +12,7 @@ import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 from apps.locations.geodata_generation import (
     build_geodata,
     parse_admin1_file,
@@ -26,7 +27,7 @@ COUNTRIES_URL = "https://download.geonames.org/export/dump/countryInfo.txt"
 
 
 class Command(BaseCommand):
-    help = "Regenerate apps/locations/geodata/v2.yaml from GeoNames' exports."
+    help = "Regenerate apps/locations/geodata/<version>.yaml from GeoNames' exports."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -39,7 +40,12 @@ class Command(BaseCommand):
             "--countries-file", help="Local path to countryInfo.txt (skip download)."
         )
         parser.add_argument(
-            "--output", help="Output path (defaults to apps/locations/geodata/v2.yaml)."
+            "--output", help="Output path (defaults to apps/locations/geodata/<version>.yaml)."
+        )
+        parser.add_argument(
+            "--dataset-version",
+            default=CURRENT_LOCATION_ALIAS_VERSION,
+            help="Dataset version stamp (defaults to engine.py's CURRENT_LOCATION_ALIAS_VERSION).",
         )
 
     def handle(self, *args, **options):
@@ -51,11 +57,12 @@ class Command(BaseCommand):
         admin1_map = parse_admin1_file(admin1_text)
         country_rows = parse_countries_file(countries_text)
 
-        data = build_geodata(city_rows, admin1_map, country_rows)
+        version = options["dataset_version"]
+        data = build_geodata(city_rows, admin1_map, country_rows, version=version)
         yaml_text = render_yaml(data, download_date=datetime.date.today().isoformat())
 
         output_path = options["output"] or (
-            settings.BASE_DIR / "apps" / "locations" / "geodata" / "v2.yaml"
+            settings.BASE_DIR / "apps" / "locations" / "geodata" / f"{version}.yaml"
         )
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(yaml_text)
