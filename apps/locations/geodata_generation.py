@@ -46,6 +46,8 @@ COUNTRY_NAME_OVERRIDES = {
     "NL": ("Netherlands", ["netherlands", "the netherlands", "holland"]),
     "TW": ("Taiwan", ["taiwan"]),
     "HK": ("Hong Kong", ["hong kong"]),
+    "AE": ("UAE", ["uae", "u.a.e.", "united arab emirates"]),
+    "BR": ("Brazil", ["brazil", "brasil"]),
     "CZ": ("Czech Republic", ["czech republic", "czechia"]),
 }
 
@@ -72,7 +74,15 @@ def _looks_like_airport_code(raw_alias):
 
 
 def _clean_alias(raw):
-    alias = raw.strip().lower()
+    # Must mirror apps/locations/engine.py's _clean() period-stripping, or
+    # a GeoNames name/alternatename with a period ("Port St. Lucie", "St.
+    # Louis") gets registered here WITH its period while real input has
+    # its periods stripped before matching -- confirmed as a real
+    # regression: "Port St. Lucie" (period-preserving alias) stopped
+    # matching once input-side period-stripping was added without this
+    # side following suit.
+    alias = raw.strip().lower().replace(".", "")
+    alias = alias.strip()
     return alias if alias else None
 
 
@@ -211,6 +221,63 @@ CANADA_PROVINCE_POSTAL_CODES = {
     "14": "NU",  # Nunavut
 }
 
+# Same GeoNames numeric-admin1-code gap as Canada above, confirmed on real
+# unresolved production data ("Sydney, NSW", "Dubai, UAE"-adjacent
+# state-abbrev postings): Australia's states/territories use official
+# Australia Post abbreviations job postings actually write, not GeoNames'
+# numeric codes.
+AUSTRALIA_STATE_POSTAL_CODES = {
+    "01": "ACT",  # Australian Capital Territory
+    "02": "NSW",  # New South Wales
+    "03": "NT",  # Northern Territory
+    "04": "QLD",  # Queensland
+    "05": "SA",  # South Australia -- collides with Saudi Arabia's ISO
+    # alpha-2 code; the known_country_iso_codes guard below (same one
+    # protecting Canada's NL/PE/SK/YT/NU) correctly drops this one.
+    "06": "TAS",  # Tasmania
+    "07": "VIC",  # Victoria
+    "08": "WA",  # Western Australia
+}
+
+# Country ISOs with a curated numeric-admin1-code -> real postal-abbreviation
+# table above (GeoNames provides no alphabetic code for these countries at
+# all). Keyed by ISO so _build_regions can look up the right table generically
+# instead of hardcoding one country's branch.
+_REGION_POSTAL_CODE_OVERRIDES = {
+    "CA": CANADA_PROVINCE_POSTAL_CODES,
+    "AU": AUSTRALIA_STATE_POSTAL_CODES,
+}
+
+
+def _canonical_region_code(country_iso, raw_region_code, known_country_iso_codes):
+    """The code stored on both a region entry and every city inside it.
+
+    For an alpha admin1 code this is already the postal-style abbreviation
+    GeoNames provides directly. For a numeric admin1 code (Canada,
+    Australia), prefer the curated postal abbreviation from
+    ``_REGION_POSTAL_CODE_OVERRIDES`` when one exists and isn't blocked by a
+    country-code collision -- confirmed as a real gap: without this, a
+    resolved Canadian/Australian city carried its raw numeric GeoNames
+    admin1 code (e.g. "08", "02") as its ``region`` instead of the postal
+    abbreviation ("ON", "NSW") a US city's ``region`` already returns,
+    breaking the parity the feature was built for. Falls back to the raw
+    numeric code, unchanged, when no override applies -- must stay
+    consistent with the abbrev-alias-collision guard in ``_build_regions``
+    (same collision, same fallback), since this code is also the value
+    ``apps/locations/engine.py`` narrows city candidates by (``m["region"]
+    == region``): using a different code here than in the alias-registered
+    region entry would silently break that narrowing for every CA/AU city.
+    """
+    if raw_region_code.isalpha():
+        return raw_region_code
+    overrides = _REGION_POSTAL_CODE_OVERRIDES.get(country_iso)
+    if not overrides:
+        return raw_region_code
+    candidate = overrides.get(raw_region_code)
+    if candidate and candidate.lower() not in known_country_iso_codes:
+        return candidate
+    return raw_region_code
+
 
 def _build_regions(admin1_map, *, known_country_iso_codes=frozenset()):
     """Returns (regions_list, full_alias_candidates, abbrev_alias_candidates).
@@ -231,33 +298,34 @@ def _build_regions(admin1_map, *, known_country_iso_codes=frozenset()):
     for code, name in admin1_map.items():
         if "." not in code:
             continue
-        country_iso, region_code = code.split(".", 1)
+        country_iso, raw_region_code = code.split(".", 1)
         country_display = _country_display(country_iso)
-        key = (country_iso, region_code)
+        key = (country_iso, raw_region_code)
 
         full_alias = _clean_alias(name)
-        if region_code.isalpha():
-            abbrev_alias = _clean_alias(region_code)
-        elif country_iso == "CA":
-            candidate = CANADA_PROVINCE_POSTAL_CODES.get(region_code)
-            # A handful of Canada's postal codes are themselves real
-            # countries' ISO alpha-2 codes (NL=Netherlands, PE=Peru,
-            # SK=Slovakia, YT=Mayotte, NU=Niue) -- confirmed via a real-data
-            # regression: registering these as Canada region abbreviations
-            # feeds the SAME-abbrev-collision tiebreak in
-            # apps/locations/engine.py's region_any_by_alias (deliberately
-            # list-valued for the legitimate "CA" California-vs-Luxembourg
-            # class of collision), but that tiebreak only compares *among
-            # regions* -- the colliding COUNTRY was already stripped from
-            # country_by_alias by the country_abbrev_collisions logic below
-            # and has no seat at that table, so "Amsterdam, NL" silently
-            # resolved to Newfoundland, Canada instead of the Netherlands.
+        if raw_region_code.isalpha():
+            abbrev_alias = _clean_alias(raw_region_code)
+        elif country_iso in _REGION_POSTAL_CODE_OVERRIDES:
+            candidate = _REGION_POSTAL_CODE_OVERRIDES[country_iso].get(raw_region_code)
+            # A handful of these curated postal codes are themselves real
+            # countries' ISO alpha-2 codes (Canada's NL=Netherlands,
+            # PE=Peru, SK=Slovakia, YT=Mayotte, NU=Niue; Australia's
+            # SA=Saudi Arabia) -- confirmed via a real-data regression:
+            # registering these as region abbreviations feeds the SAME-
+            # abbrev-collision tiebreak in apps/locations/engine.py's
+            # region_any_by_alias (deliberately list-valued for the
+            # legitimate "CA" California-vs-Luxembourg class of collision),
+            # but that tiebreak only compares *among regions* -- the
+            # colliding COUNTRY was already stripped from country_by_alias
+            # by the country_abbrev_collisions logic below and has no seat
+            # at that table, so "Amsterdam, NL" silently resolved to
+            # Newfoundland, Canada instead of the Netherlands.
             # abbrev_candidates' own same-type collision tracking can't
             # catch this either, since a country isn't a "region" candidate.
-            # Failing this specific abbrev closed (leaving these 4 provinces
-            # resolvable only by full name, e.g. "Saskatchewan") is the same
-            # conservative call this dataset makes everywhere else a bare
-            # code could confidently resolve to the wrong real place.
+            # Failing this specific abbrev closed (leaving that one region
+            # resolvable only by full name) is the same conservative call
+            # this dataset makes everywhere else a bare code could
+            # confidently resolve to the wrong real place.
             if candidate and candidate.lower() in known_country_iso_codes:
                 abbrev_alias = None
             else:
@@ -265,6 +333,7 @@ def _build_regions(admin1_map, *, known_country_iso_codes=frozenset()):
         else:
             abbrev_alias = None
 
+        region_code = _canonical_region_code(country_iso, raw_region_code, known_country_iso_codes)
         regions_list.append(
             {
                 "name": name,
@@ -283,7 +352,8 @@ def _build_regions(admin1_map, *, known_country_iso_codes=frozenset()):
 
 
 def _build_cities(
-    city_rows, admin1_map, *, established_alias_vocabulary=frozenset()
+    city_rows, admin1_map, *, established_alias_vocabulary=frozenset(),
+    known_country_iso_codes=frozenset()
 ):
     """``established_alias_vocabulary`` is the set of already-claimed
     country and region aliases. GeoNames' ``alternatenames`` column is a
@@ -301,7 +371,10 @@ def _build_cities(
         country_iso = row["country_code"]
         admin1_key = f"{country_iso}.{row['admin1_code']}" if row["admin1_code"] else None
         region_name = admin1_map.get(admin1_key) if admin1_key else None
-        region_code = row["admin1_code"] if region_name else None
+        region_code = (
+            _canonical_region_code(country_iso, row["admin1_code"], known_country_iso_codes)
+            if region_name else None
+        )
 
         aliases = set()
         for raw in (row["name"], row["asciiname"]):
@@ -375,12 +448,32 @@ def _classify_cross_type_ambiguity(cities_list, country_candidates, full_candida
             # before city, so simply not marking this ambiguous lets the
             # existing precedence resolve it -- no exclusion needed.
             pass
+        elif (
+            hits_country
+            and hits_region
+            and not hits_city
+            and {pair[0] for pair in full_candidates[alias]} <= country_candidates[alias]
+        ):
+            # Country-vs-region, but every colliding region belongs to the
+            # SAME country the alias also names (e.g. Taiwan the country,
+            # ISO "TW", has an admin1 province literally named "Taiwan",
+            # TW.04 -- also true for Djibouti, Guadeloupe, Guatemala,
+            # Luxembourg, Martinique, Reunion, Saint Helena, San Marino).
+            # Unlike Georgia (country) vs. Georgia (a DIFFERENT country's
+            # region) -- a genuine either/or ambiguity -- resolving to the
+            # country here is correct no matter which the poster meant,
+            # since both names refer to the same place. Confirmed as a real
+            # regression: without this carve-out "taiwan" was dropped from
+            # country_by_alias entirely, breaking every "<City>, Taiwan"
+            # job posting (the single largest unresolved bucket in
+            # production data).
+            region_full_aliases_to_drop.add(alias)
         else:
-            # Country-vs-region (e.g. "Georgia"), or all three types at
-            # once: no comparable "which one is overwhelmingly more common"
-            # precedent exists, and the origin brainstorm's own success
-            # criteria requires the country/region homograph case to stay
-            # unresolved -- fail closed.
+            # Country-vs-region across different countries (e.g. "Georgia"),
+            # or all three types at once: no comparable "which one is
+            # overwhelmingly more common" precedent exists, and the origin
+            # brainstorm's own success criteria requires the country/region
+            # homograph case to stay unresolved -- fail closed.
             ambiguous.add(alias)
 
     return ambiguous, region_full_aliases_to_drop
@@ -537,7 +630,9 @@ def build_geodata(city_rows, admin1_map, country_rows, *, min_population=DEFAULT
     # implementation: it broke New York City's own "New York" alias, since
     # that string is also the New York region's name).
     cities_list = _build_cities(
-        city_rows, admin1_map, established_alias_vocabulary=frozenset(country_candidates)
+        city_rows, admin1_map,
+        established_alias_vocabulary=frozenset(country_candidates),
+        known_country_iso_codes=known_country_iso_codes,
     )
 
     # A dedicated, always-available 2-letter-code -> country-display-name

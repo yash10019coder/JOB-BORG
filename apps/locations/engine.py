@@ -33,7 +33,10 @@ CURRENT_LOCATION_ALIAS_VERSION = "v3"
 # exact same vocabulary instead of hand-maintaining a duplicate copy --
 # apps.jobs already depends on apps.locations (the reverse would violate the
 # leaf-app rule), so this direction of reuse is safe.
-REMOTE_MARKERS = ("remote", "anywhere", "work from home", "wfh", "world wide")
+REMOTE_MARKERS = (
+    "remote", "anywhere", "work from home", "wfh", "world wide", "worldwide",
+    "remoto",
+)
 
 _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
@@ -50,6 +53,15 @@ _NO_PLACE_INFO = {"city": None, "region": None, "country": None, "resolved": Tru
 # matching. Anchored at the end so it can't interfere with R8's start-anchored
 # prefix stripping.
 _AREA_SUFFIX_RE = re.compile(r"\s+area$")
+
+# A "metro"/"metropolitan"/"metropolitain" (French spelling, seen verbatim
+# in real production data -- "Rome Metropolitain Area", 47 rows) qualifier
+# directly before "Area", stripped only once "Area" itself is already gone
+# so a bare "Metro Area" (no city) is untouched -- that string must keep
+# reducing to the single generic token "metro" that _GENERIC_AREA_DESCRIPTORS
+# blocks, not to "" (which would misclassify it as no-place-info instead of
+# an unresolved gap).
+_METRO_QUALIFIER_RE = re.compile(r"\s+metro(?:politan|politain)?$")
 
 # Generic geographic descriptors that coincidentally, uniquely match a real
 # (obscure) place somewhere in the dataset once R7 strips "Area" off them --
@@ -73,6 +85,26 @@ _GENERIC_AREA_DESCRIPTORS = {
 # unresolved rather than confidently resolving to the wrong country -- see
 # apps/locations/geodata_generation.py's US_STATE_POSTAL_CODES.
 _TWO_LETTER_PREFIX_RE = re.compile(r"^([a-z]{2})\s*-\s*(.+)$")
+
+# The mirror of R8, at the tail instead of the head, with no separator at
+# all (e.g. "Atlanta GA", "Tempe AZ") -- a common bare "<City> <ST>" shape
+# with neither a comma nor a dash. Only tried as a fallback after the plain
+# bare-token lookup already failed (see _resolve_segments), so it can never
+# turn an already-resolvable single-word city into something else -- it
+# only ever gives an otherwise-unresolved string a second chance by
+# re-trying it as a (head, tail) pair through the same tail-is-country-or-
+# region machinery R8/comma-tail already use, which harmlessly leaves it
+# unresolved if the trailing token isn't a real country/region alias (e.g.
+# "Emeryville HQ" -- "hq" matches nothing).
+_TRAILING_BARE_CODE_RE = re.compile(r"^(.+)\s+([a-z]{2})$")
+
+# A trailing US ZIP code on a comma-tail segment (e.g. "New York, NY
+# 10065") -- see _resolve_segments for why. The ZIP+4 separator is matched
+# as whitespace, not a literal "-", because this runs after
+# _strip_remote_markers has already collapsed every hyphen in the string
+# to a space ("10065-1234" -> "10065 1234") by the time the tail segment
+# is examined.
+_TRAILING_ZIP_RE = re.compile(r"\s+\d{5}(?:\s?\d{4})?$")
 
 # GeoNames' `feature code` column, tiered by administrative significance.
 # Used as the *secondary* same-type tiebreak, after population -- see
@@ -141,6 +173,17 @@ class _GeoIndex:
         # at generation time -- unlike region_full_by_alias, whose bare
         # resolution has no comparable tiebreak signal and fails closed.
         self.region_any_by_alias = {}
+        # Abbrev-only subset of region_any_by_alias (excludes
+        # comma_context_full_aliases, e.g. "new york" the demoted state
+        # name) -- region_any_by_alias's comma-context entries are only
+        # safe in the tail position of an explicit multi-segment string
+        # ("Seattle, Washington"), never for a fully bare single-token
+        # lookup, where they'd silently resolve "New York"/"Washington" to
+        # the state instead of letting the city win as the demotion
+        # intends. Confirmed as a real regression caught by this file's own
+        # test suite when a bare-abbrev fallback was added to _resolve_bare
+        # using region_any_by_alias directly.
+        self.region_abbrev_by_alias = {}
         self.region_scoped_by_country_alias = {}
         self.city_by_alias = {}
         self.ambiguous_bare_tokens = set(data.get("ambiguous_bare_tokens") or [])
@@ -168,6 +211,7 @@ class _GeoIndex:
                 self._register_region_alias(alias, code, country)
             for alias in region.get("abbrev_aliases") or []:
                 self._register_region_alias(alias, code, country)
+                self.region_abbrev_by_alias.setdefault(alias, []).append((code, country))
 
         for city in data.get("cities") or []:
             entry = {
@@ -226,6 +270,15 @@ def _clean(raw):
         return ""
     s = unicodedata.normalize("NFKC", raw)
     s = s.strip().casefold()
+    # Abbreviation periods ("D.C.", "N.Y.", "U.S. - Chicago") never carry
+    # alias-matching significance -- GeoNames-derived aliases are period-
+    # free (region abbreviations especially: "dc", never "d.c."), so a
+    # period-preserving input silently fails to match its own dataset's
+    # alias. Confirmed as a real gap: "Washington, D.C." stayed unresolved
+    # while "Washington, DC" already worked. Deleting outright (not just
+    # collapsing to a space) so "D.C." reduces to "dc" and matches R8's
+    # 2-letter-prefix regex the same way a hand-typed "DC" would.
+    s = s.replace(".", "")
     s = re.sub(r"\s+", " ", s)
     s = s.strip(" .,-")
     return s
@@ -239,7 +292,11 @@ def _first_multi_location_segment(cleaned):
 
 
 def _strip_area_suffix(segment):
-    return _AREA_SUFFIX_RE.sub("", segment)
+    without_area = _AREA_SUFFIX_RE.sub("", segment)
+    if without_area == segment:
+        return segment
+    without_metro = _METRO_QUALIFIER_RE.sub("", without_area)
+    return without_metro if without_metro else without_area
 
 
 def _strip_remote_markers(cleaned):
@@ -250,12 +307,98 @@ def _strip_remote_markers(cleaned):
     return result
 
 
+# Words that describe a work arrangement or generic office/entity
+# reference, never part of a real place name -- deliberately separate from
+# REMOTE_MARKERS (which apps/jobs/ingestion/normalizers.py's is_remote
+# derivation also reads: "hybrid", "office", "hq" etc. do NOT imply remote
+# and must never be added there). Stripping these serves two purposes: (1)
+# unlocks a real place hiding behind office/company noise -- "New York
+# Office" -> "New York" resolves, as does "Emeryville HQ" if the city
+# itself is in the dataset -- and (2) lets a string with nothing else left
+# ("Hybrid", "Location TBD", "2 Locations") correctly fall into the
+# existing _NO_PLACE_INFO state below instead of being flagged as an
+# unresolved coverage gap when there was never any place info to find.
+_LOCATION_NOISE_WORDS_RE = re.compile(
+    # "in-office"/"on-site" are written here as space-separated ("in
+    # office", "on site") because this runs after _strip_remote_markers,
+    # which has already collapsed every hyphen to a space -- a literal
+    # "in-office" alternative would never match the text this actually
+    # sees. Deliberately excludes "based"/"remotely": REMOTE_MARKERS'
+    # substring-replace already turns "remotely" into the fragment "ly"
+    # (it strips "remote" out of the middle, leaving "ly"), and stripping
+    # "based" too would leave that bare "ly" as the sole remaining token --
+    # which then confidently (and wrongly) resolves as Libya's ISO code.
+    # Confirmed as a real bug caught by this file's own test suite.
+    r"\b(?:\d+\s*locations?|in\s+office|on\s+site|onsite|headquarters|hq|"
+    r"office|offices|location|hybrid|distributed|tbd|global|nationwide|"
+    r"n/a|multiple\s+(?:cities|locations)|home\s+based|emea|apac|americas|"
+    r"latin\s+america|north\s+america|europe|any|ceo)\b"
+)
+
+
+def _strip_location_noise_words(cleaned):
+    result = _LOCATION_NOISE_WORDS_RE.sub(" ", cleaned)
+    result = re.sub(r"\s+", " ", result).strip(" -–—,.")
+    return result
+
+
 def _split_segments(remainder):
+    if " > " in remainder:
+        # Breadcrumb format (e.g. "US > Arizona > Phoenix", "China >
+        # Shanghai") used by some ATSes -- biggest-to-smallest, the
+        # opposite order of the comma convention this module otherwise
+        # assumes (city, ..., country). Reversing lets it reuse
+        # _resolve_segments' existing tail-is-country/head-is-city logic
+        # unchanged. Confirmed as a real, isolated pattern: 45 distinct
+        # unresolved production strings, all this exact hierarchy, no
+        # comma-delimited variant observed mixing the two conventions.
+        segments = [seg.strip(" .,-") for seg in remainder.split(" > ")]
+        segments = [seg for seg in segments if seg]
+        segments.reverse()
+        return segments
     segments = [seg.strip(" .,-") for seg in remainder.split(",")]
     return [seg for seg in segments if seg]
 
 
-def _resolve_bare(token, index, *, scope_country=None, strict=False):
+def _reorder_country_first_dash(text, index):
+    """"<Country full name> - City" (and "<noise> - Country - City", e.g.
+    "APAC - Australia - Sydney") -- country-first, the opposite order of
+    this module's comma convention. Distinct from R8 (a 2-letter ISO-code
+    prefix): this is a full country name, arbitrary length, so it can only
+    be recognized via a real dataset lookup, not a fixed-width regex.
+
+    Scans left to right for the first dash-segment that's a genuine country
+    alias (not merely 2 characters, so it can't misfire on "Hub - UT - Salt
+    Lake City" the way a naive first-segment check might) and, once found,
+    treats everything from there on as a reversed breadcrumb -- silently
+    dropping any leading noise segment ("APAC", "Retail", "Hub") that isn't
+    itself a country. Must run before R9's dash-collapsing
+    _strip_remote_markers, on the same not-yet-collapsed text R8 uses (see
+    plan Key Technical Decisions), or the " - " delimiter this depends on
+    is destroyed before it's ever seen. Returns None (try the normal
+    pipeline instead) when no segment is a country -- e.g. "Retail - New
+    York" or "Remote - CA" have no country-named segment at all, so this
+    never fires on them.
+    """
+    if " - " not in text:
+        return None
+    parts = [p.strip(" .,-") for p in text.split(" - ")]
+    parts = [p for p in parts if p]
+    for i, part in enumerate(parts):
+        # 2-letter codes are R8's dedicated domain (country_by_prefix_code,
+        # which excludes codes colliding with a US state postal abbreviation
+        # -- e.g. "GA" = Gabon vs. Georgia). country_by_alias has no such
+        # exclusion, so matching a 2-letter part here would resolve "GA -
+        # Atlanta" to Gabon instead of correctly deferring to R8 (which
+        # already ran and correctly left it unresolved).
+        if len(part) > 2 and part in index.country_by_alias:
+            reordered = parts[i:]
+            reordered.reverse()
+            return reordered
+    return None
+
+
+def _resolve_bare(token, index, *, scope_country=None, strict=False, allow_bare_abbrev=False):
     if token in _GENERIC_AREA_DESCRIPTORS:
         return dict(_UNRESOLVED)
     if token in index.ambiguous_bare_tokens:
@@ -274,6 +417,32 @@ def _resolve_bare(token, index, *, scope_country=None, strict=False):
         if scope_country and country != scope_country:
             return dict(_UNRESOLVED)
         return {"city": None, "region": code, "country": country, "resolved": True}
+    if allow_bare_abbrev:
+        region_matches = index.region_abbrev_by_alias.get(token)
+        if region_matches:
+            # Bare abbrev code with no head/city at all (e.g. "MI" left
+            # after "Hybrid" is stripped from "Hybrid - MI" by
+            # _strip_location_noise_words) -- same same-abbrev-collision
+            # population tiebreak _resolve_segments' tail lookup already
+            # uses (e.g. "CA" California vs. Luxembourg's Capellen
+            # district). Gated on allow_bare_abbrev, set only when noise-
+            # word stripping actually removed something (see
+            # normalize_location): a token the user typed bare, with no
+            # noise-word context discarded, must NOT gain this -- e.g. bare
+            # "GA" alone must stay unresolved (it's also Gabon's ISO code;
+            # R8's dedicated prefix lookup already excludes exactly this
+            # class of collision, and this fallback must defer to that same
+            # caution, not quietly reopen it for every US state whose
+            # 2-letter code happens to double as a country's). Deliberately
+            # region_abbrev_by_alias, NOT region_any_by_alias -- the latter
+            # also carries comma_context_full_aliases (e.g. "new york" the
+            # demoted state name), which must never win a bare lookup or it
+            # would silently undo the region-vs-city demotion that lets the
+            # city win there (see _GeoIndex).
+            code, country = max(
+                region_matches, key=lambda m: index.country_population.get(m[1]) or 0
+            )
+            return {"city": None, "region": code, "country": country, "resolved": True}
     matches = index.city_by_alias.get(token)
     if matches:
         candidates = matches
@@ -287,14 +456,6 @@ def _resolve_bare(token, index, *, scope_country=None, strict=False):
                 # us. Stay unresolved rather than guess.
                 return dict(_UNRESOLVED)
             candidates = scoped
-        if strict and len(candidates) != 1:
-            # Same-type collision reached via a heuristic string rewrite
-            # (R7's "<X> Area" suffix strip) rather than the token the
-            # poster actually wrote -- the population tiebreak is a "which
-            # real place did they mean" signal for genuine place names, not
-            # for a generic word ("Bay", "Metro", "Delta") that happens to
-            # also be a small town somewhere. Require an unambiguous match.
-            return dict(_UNRESOLVED)
         # Same-type collision (e.g. multiple cities named "Springfield"):
         # resolve via population then feature-code tier rather than staying
         # unresolved -- the one city type with a reliable secondary signal.
@@ -305,13 +466,43 @@ def _resolve_bare(token, index, *, scope_country=None, strict=False):
     return dict(_UNRESOLVED)
 
 
-def _resolve_segments(segments, index, *, scope_country=None, strict_city=False):
+def _resolve_segments(
+    segments, index, *, scope_country=None, strict_city=False, allow_bare_abbrev=False
+):
     if not segments:
         return dict(_UNRESOLVED)
     if len(segments) == 1:
-        return _resolve_bare(segments[0], index, scope_country=scope_country, strict=strict_city)
+        result = _resolve_bare(
+            segments[0],
+            index,
+            scope_country=scope_country,
+            strict=strict_city,
+            allow_bare_abbrev=allow_bare_abbrev,
+        )
+        if result["resolved"]:
+            return result
+        match = _TRAILING_BARE_CODE_RE.match(segments[0])
+        if match:
+            return _resolve_segments(
+                [match.group(1), match.group(2)],
+                index,
+                scope_country=scope_country,
+                strict_city=strict_city,
+            )
+        return result
 
     *head, tail = segments
+    # A trailing US ZIP code on the tail segment (e.g. "New York, NY
+    # 10065") is common in full-address-shaped location strings but was
+    # never anticipated by R6's original "last comma segment is the
+    # country/region" design -- "ny 10065" matches neither a country nor a
+    # region alias verbatim, so the whole string fell through to
+    # unresolved despite carrying a perfectly good regional signal. Only
+    # strips when it leaves a non-empty remainder, so a segment that's
+    # nothing but a ZIP code doesn't collapse to an empty tail.
+    zip_stripped_tail = _TRAILING_ZIP_RE.sub("", tail)
+    if zip_stripped_tail:
+        tail = zip_stripped_tail
     country = index.country_by_alias.get(tail)
     region = None
     if country is None:
@@ -346,6 +537,25 @@ def _resolve_segments(segments, index, *, scope_country=None, strict_city=False)
     if head:
         candidate = head[0]
         matches = index.city_by_alias.get(candidate)
+        if not matches and "|" in candidate:
+            # A literal "|" can survive into the comma-tail head segment
+            # when the tail alone already resolves without the top-level
+            # "|" fallback in normalize_location ever getting a chance to
+            # run (e.g. "GA | Atlanta, GA" -- the tail "ga" resolves to
+            # Georgia, US on its own, so the whole string is already
+            # resolved=True before that fallback's "not resolved" gate is
+            # checked). Try each pipe-separated piece of the head as its
+            # own city candidate, first genuine match wins, rather than
+            # silently losing the city because the raw, unsplit head never
+            # matches any alias verbatim.
+            for piece in candidate.split("|"):
+                piece = piece.strip(" .,-")
+                if not piece:
+                    continue
+                piece_matches = index.city_by_alias.get(piece)
+                if piece_matches:
+                    matches = piece_matches
+                    break
         if matches:
             narrowed = [
                 m for m in matches
@@ -363,6 +573,9 @@ def _resolve_segments(segments, index, *, scope_country=None, strict_city=False)
     }
 
 
+_TRAILING_PAREN_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+
 def normalize_location(raw):
     """Resolve a free-text location string into a structured dict.
 
@@ -372,6 +585,62 @@ def normalize_location(raw):
     never-raise contract, since ingestion and profile-save both call this
     unconditionally on user- or scraper-supplied text.
     """
+    result = _normalize_location_once(raw)
+    if result["resolved"] or not isinstance(raw, str):
+        return result
+
+    # Fallback only, never a first attempt, and tried in this exact order --
+    # each stage can only ever rescue an otherwise-unresolved row, never
+    # override a resolution the plain whole-string attempt above already
+    # found (confirmed necessary by a real regression: some job postings
+    # list several "|"-separated offices with a non-place leading blurb,
+    # e.g. "Remote-Friendly (Travel Required) | San Francisco, CA" -- the
+    # whole string already resolves via the comma-tail machinery reading
+    # straight through the leading noise to "CA", so unconditionally
+    # splitting on "|" and resolving only the first segment discarded that
+    # and lost the row entirely).
+    if "|" in raw:
+        # Real production gap: some ATSes list several candidate offices
+        # separated by "|" (e.g. "San Jose | San Francisco") with no single
+        # segment being noise -- try each in order, first segment carrying
+        # real place info wins. A segment that merely resolves to
+        # _NO_PLACE_INFO (pure noise, e.g. "Remote") must not win the race
+        # over a later segment that resolves to an actual place --
+        # confirmed as a real regression: "Remote | San Francisco HQ" was
+        # silently discarding "San Francisco HQ" because _NO_PLACE_INFO's
+        # resolved=True let a noise-only leading segment win by being tried
+        # first. A no-place-info segment is remembered and returned only if
+        # no later segment carries real place info, so "Remote | Hybrid"
+        # still correctly resolves as no-place-info rather than unresolved.
+        no_place_info_result = None
+        for candidate in raw.split("|"):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            candidate_result = _normalize_location_once(candidate)
+            if not candidate_result["resolved"]:
+                continue
+            if candidate_result == _NO_PLACE_INFO:
+                no_place_info_result = no_place_info_result or candidate_result
+                continue
+            return candidate_result
+        if no_place_info_result is not None:
+            return no_place_info_result
+
+    # A trailing parenthetical is sometimes pure noise ("Brasov (30
+    # Hermann)", "Bangkok (Central World Office)") and sometimes a genuine
+    # disambiguating hint ("Georgia (US)") -- stripping it unconditionally
+    # up front could turn a resolvable string into an ambiguous one.
+    without_paren = _TRAILING_PAREN_RE.sub("", raw)
+    if without_paren != raw:
+        paren_result = _normalize_location_once(without_paren)
+        if paren_result["resolved"]:
+            return paren_result
+
+    return result
+
+
+def _normalize_location_once(raw):
     cleaned = _clean(raw)
     if not cleaned:
         return dict(_UNRESOLVED)
@@ -402,13 +671,35 @@ def normalize_location(raw):
     else:
         without_prefix = without_suffix
 
+    if " - " in without_prefix:
+        if index is None:
+            index = _try_load_index()
+            if index is None:
+                return dict(_UNRESOLVED)
+        country_first_segments = _reorder_country_first_dash(without_prefix, index)
+        if country_first_segments is not None:
+            return _resolve_segments(
+                country_first_segments, index, scope_country=None, strict_city=suffix_stripped
+            )
+
     remainder = _strip_remote_markers(without_prefix)
+    without_noise = _strip_location_noise_words(remainder)
+    # Whether a noise word ("Hybrid", "Office", "HQ", ...) was actually
+    # discarded -- gates _resolve_bare's bare-abbrev-region fallback (see
+    # its docstring): a bare 2-letter code the user typed directly (e.g.
+    # "GA") must stay unresolved, but the same code left over after
+    # discarding a noise word ("Hybrid - MI" -> "MI") is safe to resolve,
+    # since the noise word was never a competing place-name interpretation
+    # to guard against.
+    noise_stripped = without_noise != remainder
+    remainder = without_noise
     if not remainder:
-        # R9: nothing left after remote-marker stripping means the input was
-        # remote/hybrid noise with no place information -- a defined
-        # "resolved, no location" state, not a coverage gap to flag. If R8
-        # already identified a prefix country (e.g. "US - Remote"), preserve
-        # it rather than discarding an already-resolved signal.
+        # R9: nothing left after remote-marker/noise-word stripping means
+        # the input was remote/hybrid/office-noise with no place
+        # information -- a defined "resolved, no location" state, not a
+        # coverage gap to flag. If R8 already identified a prefix country
+        # (e.g. "US - Remote"), preserve it rather than discarding an
+        # already-resolved signal.
         if prefix_country:
             return {**_NO_PLACE_INFO, "country": prefix_country}
         return dict(_NO_PLACE_INFO)
@@ -424,5 +715,9 @@ def normalize_location(raw):
     # signal in its tail (see _resolve_segments), which is more reliable
     # than R8's prefix hint and shouldn't be overridden by it.
     return _resolve_segments(
-        segments, index, scope_country=prefix_country, strict_city=suffix_stripped
+        segments,
+        index,
+        scope_country=prefix_country,
+        strict_city=suffix_stripped,
+        allow_bare_abbrev=noise_stripped,
     )

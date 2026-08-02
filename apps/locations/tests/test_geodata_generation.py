@@ -193,6 +193,34 @@ class BuildGeodataTests(SimpleTestCase):
         country_aliases = next(c for c in data["countries"] if c["name"] == "UK")["aliases"]
         self.assertNotIn("uk", country_aliases)
 
+    def test_same_country_region_name_matching_its_own_country_not_ambiguous(self):
+        # Real GeoNames data: Taiwan (country, ISO "TW") has an admin1
+        # province literally named "Taiwan" (TW.04) -- and 8 other countries
+        # (Djibouti, Guadeloupe, Guatemala, Luxembourg, Martinique, Reunion,
+        # Saint Helena, San Marino) have the same self-referential pattern.
+        # Unlike Georgia (country) vs. Georgia (a DIFFERENT country's, US's,
+        # region) -- a real either/or ambiguity -- resolving "Taiwan" to the
+        # country is correct regardless of whether the poster meant the
+        # country or its namesake province, since both are the same place.
+        # Confirmed as a real regression: this false-positive marked "taiwan"
+        # ambiguous and dropped it from country_by_alias entirely, breaking
+        # resolution for every "<City>, Taiwan" job posting.
+        # Region code "99" (numeric, like Taiwan's real "TW.04") rather than
+        # a 2-letter alpha code, so this exercises only the full-name
+        # collision this fix targets -- not the separate, pre-existing
+        # abbrev-code collision exclusion (e.g. "CA" California vs.
+        # Luxembourg) that a 2-letter admin1 code would also trigger.
+        admin1_text = ADMIN1_TEXT + "GB.99\tUK\tUK\t9999999\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+        self.assertNotIn("uk", data["ambiguous_bare_tokens"])
+        country_aliases = next(c for c in data["countries"] if c["name"] == "UK")["aliases"]
+        self.assertIn("uk", country_aliases)
+        uk_region = next(r for r in data["regions"] if r["code"] == "99")
+        self.assertNotIn("uk", uk_region["full_aliases"])
+
     def test_same_type_region_collision_across_countries_marked_ambiguous(self):
         # Two different (country, region) pairs both named "England"-alike
         # via a contrived admin1 map collision.
@@ -430,6 +458,79 @@ class CanadaProvinceAbbrevTests(SimpleTestCase):
         ontario = next(r for r in data["regions"] if r["name"] == "Ontario")
         self.assertIn("on", ontario["abbrev_aliases"])
 
+    def test_ontario_region_code_is_postal_abbrev_not_raw_numeric(self):
+        # Regression: the abbrev *alias* ("on") let "Toronto, ON" resolve,
+        # but the region's stored "code" field (and every city's "region"
+        # field inside it) stayed the raw GeoNames numeric admin1 code
+        # ("08") -- so normalize_location("Toronto, ON") returned
+        # region="08" instead of region="ON", unlike a US city, whose
+        # region code already IS its postal abbreviation. Confirmed on the
+        # real generated dataset before this fix.
+        admin1_text = ADMIN1_TEXT + "CA.08\tOntario\tOntario\t13448494\n"
+        data = self._build(admin1_text)
+        ontario = next(r for r in data["regions"] if r["name"] == "Ontario")
+        self.assertEqual(ontario["code"], "ON")
+
+    def test_newfoundland_region_code_falls_back_to_numeric_when_abbrev_blocked(self):
+        # Newfoundland's postal code "NL" collides with the Netherlands'
+        # ISO alpha-2 code, so its abbrev alias is correctly suppressed
+        # (see test_province_code_colliding_with_a_real_country_is_not_registered
+        # above) -- the region's "code" field must stay consistent with
+        # that same exclusion (raw numeric), not silently leak the blocked
+        # postal abbreviation through a different field.
+        countries_text = COUNTRIES_TEXT + "NL\tNLD\t528\tNL\tNetherlands\tAmsterdam\t41526\t17231017\tEU\t.nl\tEUR\tEuro\t31\t\t\tnl-NL\t2750405\t\t\n"
+        admin1_text = ADMIN1_TEXT + "CA.05\tNewfoundland and Labrador\tNewfoundland and Labrador\t520998\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+        newfoundland = next(r for r in data["regions"] if r["name"] == "Newfoundland and Labrador")
+        self.assertEqual(newfoundland["code"], "05")
+
+    def test_city_inside_canadian_province_gets_matching_postal_region_code(self):
+        # The region "code" field and every city's "region" field inside it
+        # must be the same value, since apps/locations/engine.py narrows
+        # city candidates by exact region-code equality -- if these two
+        # sites disagreed (one postal abbrev, one raw numeric), city
+        # narrowing for every Canadian/Australian city would silently break.
+        admin1_text = ADMIN1_TEXT + "CA.08\tOntario\tOntario\t13448494\n"
+        toronto_row = (
+            "6167865\tToronto\tToronto\t\t43.70011\t-79.4163\tP\tPPLA\t"
+            "CA\t\t08\t\t\t\t2731571\t\t76\tAmerica/Toronto\t2019-10-24"
+        )
+        city_rows = parse_cities_file(toronto_row, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+        toronto = next(c for c in data["cities"] if c["name"] == "Toronto")
+        ontario = next(r for r in data["regions"] if r["name"] == "Ontario")
+        self.assertEqual(toronto["region"], ontario["code"])
+        self.assertEqual(toronto["region"], "ON")
+
+    def test_numeric_australia_code_gets_postal_abbrev_alias(self):
+        # Same GeoNames-numeric-admin1-code gap as Canada, confirmed on
+        # real unresolved production data ("Sydney, NSW").
+        admin1_text = ADMIN1_TEXT + "AU.02\tNew South Wales\tNew South Wales\t8189266\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(COUNTRIES_TEXT)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+        nsw = next(r for r in data["regions"] if r["name"] == "New South Wales")
+        self.assertIn("nsw", nsw["abbrev_aliases"])
+
+    def test_australia_state_code_colliding_with_a_real_country_is_not_registered(self):
+        # South Australia's postal code "SA" is also Saudi Arabia's ISO
+        # alpha-2 code -- must be excluded by the same guard that protects
+        # Canada's NL/PE/SK/YT/NU, not silently registered.
+        countries_text = COUNTRIES_TEXT + "SA\tSAU\t682\tSA\tSaudi Arabia\tRiyadh\t70712\t34813867\tAS\t.sa\tSAR\tRiyal\t966\t\t\tar-SA\t102358\t\t\n"
+        admin1_text = ADMIN1_TEXT + "AU.05\tSouth Australia\tSouth Australia\t1771703\n"
+        city_rows = parse_cities_file(LONDON_ROW, min_population=1)
+        admin1_map = parse_admin1_file(admin1_text)
+        country_rows = parse_countries_file(countries_text)
+        data = build_geodata(city_rows, admin1_map, country_rows, min_population=1)
+        south_australia = next(r for r in data["regions"] if r["name"] == "South Australia")
+        self.assertEqual(south_australia["abbrev_aliases"], [])
+
 
 class ExpandedCountrySynonymTests(SimpleTestCase):
     """Only 5 countries (US/UK/Germany/India/Canada) had hand-curated common
@@ -479,6 +580,23 @@ class ExpandedCountrySynonymTests(SimpleTestCase):
         data = self._build(COUNTRIES_TEXT)
         us = next(c for c in data["countries"] if c["name"] == "US")
         self.assertIn("usa", us["aliases"])
+
+    def test_uae_common_name(self):
+        # Real production gap: "Dubai, UAE" / "Abu Dhabi, UAE" stayed
+        # unresolved because GeoNames' own name for AE is "United Arab
+        # Emirates" with no shorter synonym.
+        countries_text = COUNTRIES_TEXT + "AE\tARE\t784\tAE\tUnited Arab Emirates\tAbu Dhabi\t83600\t9770529\tAS\t.ae\tAED\tDirham\t971\t\t\tar-AE\t290557\t\t\n"
+        data = self._build(countries_text)
+        uae = next(c for c in data["countries"] if c["name"] == "UAE")
+        self.assertIn("uae", uae["aliases"])
+
+    def test_brasil_common_name(self):
+        # Real production gap: "Brasil" (Portuguese spelling) stayed
+        # unresolved despite "Brazil" (GeoNames' own name) already working.
+        countries_text = COUNTRIES_TEXT + "BR\tBRA\t76\tBR\tBrazil\tBrasilia\t8511965\t209469333\tSA\t.br\tBRL\tReal\t55\t\t\tpt-BR\t3469034\t\t\n"
+        data = self._build(countries_text)
+        brazil = next(c for c in data["countries"] if c["name"] == "Brazil")
+        self.assertIn("brasil", brazil["aliases"])
 
 
 class RenderYamlTests(SimpleTestCase):
