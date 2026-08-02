@@ -15,6 +15,7 @@ from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 from apps.locations.services import (
     backfill_jobs,
     backfill_profiles,
+    diff_stale_locations,
     normalize_target_locations,
 )
 
@@ -161,10 +162,205 @@ class BackfillProfilesTests(TestCase):
             mocked.assert_not_called()
 
 
+class DiffStaleLocationsTests(TestCase):
+    """Covers U4's pre-cutover safety check: a read-only preview of what
+    backfill would change, restricted to rows whose *value* would change or
+    regress -- not rows that would merely newly-resolve."""
+
+    def _make_profile(self, username, locations, normalized, alias_version=""):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.create_user(username=username, password="pw")
+        profile = user.profile
+        profile.target_locations = locations
+        profile.target_locations_normalized = normalized
+        profile.target_locations_alias_version = alias_version
+        profile.save()
+        return profile
+
+    def test_value_changing_resolution_is_reported(self):
+        job = _make_job(1, location="Springfield")
+        job.location_city = "Springfield"
+        job.location_region = "IL"
+        job.location_country = "US"
+        job.location_resolved = True
+        job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": "Springfield", "region": "MA", "country": "US", "resolved": True,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["job_changes"]), 1)
+        self.assertEqual(diff["job_changes"][0]["pk"], job.pk)
+        self.assertEqual(diff["job_changes"][0]["old"]["region"], "IL")
+        self.assertEqual(diff["job_changes"][0]["new"]["region"], "MA")
+
+    def test_unchanged_resolution_is_not_reported(self):
+        job = _make_job(1, location="Austin, TX, US")
+        job.location_city = "Austin"
+        job.location_region = "TX"
+        job.location_country = "US"
+        job.location_resolved = True
+        job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        diff = diff_stale_locations(Job, Profile)
+        self.assertEqual(diff["job_changes"], [])
+
+    def test_newly_resolving_row_is_not_reported(self):
+        # Previously-unresolved rows becoming resolved is the desired,
+        # expected outcome of a dataset swap -- reporting every one of these
+        # would drown the actual signal (a value CHANGING) in noise.
+        _make_job(1, location="São Paulo")
+        diff = diff_stale_locations(Job, Profile)
+        self.assertEqual(diff["job_changes"], [])
+
+    def test_dry_run_writes_nothing(self):
+        job = _make_job(1, location="Austin, TX, US")
+        diff_stale_locations(Job, Profile)
+        job.refresh_from_db()
+        self.assertEqual(job.location_alias_version, "")
+        self.assertFalse(job.location_resolved)
+
+    def test_profile_value_change_is_reported(self):
+        profile = self._make_profile(
+            "gina",
+            ["Springfield"],
+            [{"raw": "Springfield", "city": "Springfield", "region": "IL", "country": "US", "resolved": True}],
+        )
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": "Springfield", "region": "MA", "country": "US", "resolved": True,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["profile_changes"]), 1)
+        self.assertEqual(diff["profile_changes"][0]["pk"], profile.pk)
+
+    def test_profile_with_an_additional_newly_resolving_entry_is_not_reported(self):
+        # Code-review regression: a profile whose first entry ("Chicago")
+        # was already resolved and stays the same, but whose SECOND raw
+        # entry ("Xyzzyville") newly resolves under v2, must not be flagged
+        # -- new_keys gaining an entry beyond old_keys is exactly the
+        # desired outcome of the dataset swap, not a value change to review.
+        self._make_profile(
+            "henry",
+            ["Chicago", "Xyzzyville"],
+            [{"raw": "Chicago", "city": "Chicago", "region": "IL", "country": "US", "resolved": True}],
+        )
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+
+        def fake_normalize(raw):
+            if raw == "Chicago":
+                return {"city": "Chicago", "region": "IL", "country": "US", "resolved": True}
+            return {"city": "Xyzzyville", "region": None, "country": "US", "resolved": True}
+
+        services_module.normalize_location = fake_normalize
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(diff["profile_changes"], [])
+
+    def test_resolved_to_unresolved_regression_is_reported_via_resolved_flag_alone(self):
+        # Regression coverage for the `or not structured["resolved"]`
+        # disjunct specifically -- isolated from the `old != new` tuple
+        # path by constructing an old row whose (city, region, country)
+        # tuple is already all-blank (an edge case, but a legal DB state:
+        # location_resolved=True with blank structured fields), so the new
+        # all-None/unresolved result produces an EQUAL tuple. Only the
+        # `not structured["resolved"]` disjunct can flag this as a change.
+        job = _make_job(1, location="Nowhereville")
+        job.location_city = ""
+        job.location_region = ""
+        job.location_country = ""
+        job.location_resolved = True
+        job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": None, "region": None, "country": None, "resolved": False,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["job_changes"]), 1)
+        self.assertEqual(diff["job_changes"][0]["pk"], job.pk)
+        self.assertEqual(diff["job_changes"][0]["old"]["city"], "")
+        self.assertFalse(diff["job_changes"][0]["new"]["resolved"])
+
+    def test_multi_batch_cursor_advances_across_pages(self):
+        # Regression: _iter_stale_by_pk_cursor's pk-cursor advance/termination
+        # logic was previously only exercised within a single batch here --
+        # unlike backfill_jobs' own multi-batch test, nothing proved the
+        # dry-run diff itself sees rows past the first page.
+        for i in range(5):
+            job = _make_job(i, location="Springfield")
+            job.location_city = "Springfield"
+            job.location_region = "IL"
+            job.location_country = "US"
+            job.location_resolved = True
+            job.save(update_fields=["location_city", "location_region", "location_country", "location_resolved"])
+
+        import apps.locations.services as services_module
+        original = services_module.normalize_location
+        services_module.normalize_location = lambda raw: {
+            "city": "Springfield", "region": "MA", "country": "US", "resolved": True,
+        }
+        try:
+            diff = diff_stale_locations(Job, Profile, batch_size=2)
+        finally:
+            services_module.normalize_location = original
+
+        self.assertEqual(len(diff["job_changes"]), 5)
+        self.assertEqual({c["pk"] for c in diff["job_changes"]},
+                          {j.pk for j in Job.objects.all()})
+
+
 class NormalizeTargetLocationsTests(TestCase):
     def test_dedupes_on_structured_tuple(self):
-        result = normalize_target_locations(["NYC", "New York"])
+        result = normalize_target_locations(["SF", "San Francisco"])
         self.assertEqual(len(result), 1)
 
     def test_empty_list(self):
         self.assertEqual(normalize_target_locations([]), [])
+
+    def test_multiple_no_place_info_entries_are_all_preserved(self):
+        # Regression: every "no place info" resolution (bare "Remote",
+        # "Anywhere", "WFH") shares the (None, None, None) key, so the
+        # tuple-based dedup used to silently drop every entry after the
+        # first -- reopening the vacuous-wildcard substring-match hole in
+        # apps.matching.scoring's exclusion-set computation, since a
+        # dropped entry's raw string never made it into
+        # target_locations_normalized for scoring to exclude.
+        result = normalize_target_locations(["Remote", "Anywhere", "US"])
+        raws = [entry["raw"] for entry in result]
+        self.assertEqual(raws, ["Remote", "Anywhere", "US"])
+        self.assertTrue(result[0]["resolved"])
+        self.assertIsNone(result[0]["country"])
+        self.assertTrue(result[1]["resolved"])
+        self.assertIsNone(result[1]["country"])
+        self.assertEqual(result[2]["country"], "US")
+
+    def test_genuine_duplicate_real_places_still_dedup(self):
+        # Must not regress the dedup's actual purpose: two raw strings that
+        # resolve to the same real place still collapse to one entry.
+        result = normalize_target_locations(["Chicago", "chicago"])
+        self.assertEqual(len(result), 1)

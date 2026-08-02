@@ -23,3 +23,8 @@ media/
 .coverage
 htmlcov/
 .playwright-mcp/
+
+# Compound Engineering
+.compound-engineering/*.local.yaml
+.compound-engineering/*.local.example.yaml
+
