@@ -64,7 +64,7 @@ class NormalizerTests(SimpleTestCase):
         job = _make_job(location="New York, NY", is_remote=False)
         normalized = normalize_workday_job(job)
         self.assertFalse(normalized["is_remote"])
-        self.assertEqual(normalized["location_city"], "New York")
+        self.assertEqual(normalized["location_city"], "New York City")
 
     def test_salary_passes_through_when_present(self):
         # Unlike Greenhouse/Lever/Ashby, Workday's Job model can carry real

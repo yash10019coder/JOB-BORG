@@ -13,6 +13,7 @@ from apps.jobs.ingestion.exceptions import (
 )
 from apps.jobs.ingestion.greenhouse_client import BASE_URL, GreenhouseClient
 from apps.jobs.ingestion.normalizers import normalize_greenhouse_job
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "greenhouse_board.json"
 BOARD = "acme"
@@ -47,13 +48,15 @@ class NormalizerTests(SimpleTestCase):
         # the curated country alias list.
         self.assertTrue(first["location_resolved"])
         self.assertEqual(first["location_country"], "US")
-        self.assertEqual(first["location_alias_version"], "v1")
+        self.assertEqual(first["location_alias_version"], CURRENT_LOCATION_ALIAS_VERSION)
 
     def test_onsite_job_is_not_remote(self):
         designer = normalize_greenhouse_job(_load_fixture()["jobs"][1])
         self.assertFalse(designer["is_remote"])
         self.assertTrue(designer["location_resolved"])
-        self.assertEqual(designer["location_city"], "New York")
+        # GeoNames' canonical name for this city (v1.yaml hand-curated the
+        # shorter "New York" instead).
+        self.assertEqual(designer["location_city"], "New York City")
         self.assertEqual(designer["location_region"], "NY")
         self.assertEqual(designer["location_country"], "US")
 

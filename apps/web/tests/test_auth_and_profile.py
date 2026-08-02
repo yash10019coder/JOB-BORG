@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.accounts.models import Profile
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 
 User = get_user_model()
 
@@ -67,7 +68,7 @@ class AuthProfileTests(TestCase):
             {
                 "full_name": "", "headline": "",
                 "target_titles": "", "target_tags": "",
-                "target_locations": "New York, London",
+                "target_locations": "Chicago, London",
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
@@ -78,7 +79,7 @@ class AuthProfileTests(TestCase):
         resolved_countries = {e["country"] for e in profile.target_locations_normalized}
         self.assertEqual(resolved_countries, {"US", "UK"})
         self.assertTrue(all(e["resolved"] for e in profile.target_locations_normalized))
-        self.assertEqual(profile.target_locations_alias_version, "v1")
+        self.assertEqual(profile.target_locations_alias_version, CURRENT_LOCATION_ALIAS_VERSION)
 
     def test_target_locations_normalized_empty_when_no_locations(self):
         user = User.objects.create_user(username="dave", password="pw")
@@ -105,7 +106,7 @@ class AuthProfileTests(TestCase):
             {
                 "full_name": "", "headline": "",
                 "target_titles": "", "target_tags": "",
-                "target_locations": "New York, Xyzzyville",
+                "target_locations": "Chicago, Xyzzyville",
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
@@ -124,7 +125,7 @@ class AuthProfileTests(TestCase):
             {
                 "full_name": "", "headline": "",
                 "target_titles": "", "target_tags": "",
-                "target_locations": "NYC, New York",
+                "target_locations": "SF, San Francisco",
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
@@ -132,7 +133,7 @@ class AuthProfileTests(TestCase):
         )
         profile = User.objects.get(username="frank").profile
         # Raw list preserves both user-typed entries (CSV round-trip)...
-        self.assertEqual(profile.target_locations, ["NYC", "New York"])
+        self.assertEqual(profile.target_locations, ["SF", "San Francisco"])
         # ...but the structured mirror collapses them to one location.
         self.assertEqual(len(profile.target_locations_normalized), 1)
 

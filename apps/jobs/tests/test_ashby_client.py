@@ -13,6 +13,7 @@ from apps.jobs.ingestion.exceptions import (
     IngestionUnavailable,
 )
 from apps.jobs.ingestion.normalizers import normalize_ashby_job
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "ashby_board.json"
 BOARD = "acme"
@@ -51,7 +52,7 @@ class NormalizerTests(SimpleTestCase):
         )
         self.assertTrue(first["location_resolved"])
         self.assertEqual(first["location_country"], "US")
-        self.assertEqual(first["location_alias_version"], "v1")
+        self.assertEqual(first["location_alias_version"], CURRENT_LOCATION_ALIAS_VERSION)
         self.assertIsNone(first["salary_min"])
         self.assertIsNone(first["salary_max"])
 
@@ -59,7 +60,7 @@ class NormalizerTests(SimpleTestCase):
         designer = normalize_ashby_job(_load_jobs()[1])
         self.assertFalse(designer["is_remote"])
         self.assertTrue(designer["location_resolved"])
-        self.assertEqual(designer["location_city"], "New York")
+        self.assertEqual(designer["location_city"], "New York City")
         self.assertEqual(designer["location_region"], "NY")
         self.assertEqual(designer["location_country"], "US")
 
