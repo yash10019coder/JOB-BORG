@@ -25,3 +25,21 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
+    readonly_fields = ("resume_text",)
+
+    def save_model(self, request, obj, form, change):
+        """The admin is a write path to `Profile.resume` too (see U1), so it
+        must trigger the same explicit parse -- there's no post_save signal
+        to fall back on. Routes through `Profile.set_resume()` when the
+        upload changed so this is the one call site that actually enqueues
+        parsing, mirroring the future profile-edit view in apps/web.
+        """
+        resume_changed = "resume" in form.changed_data
+        if resume_changed and obj.resume:
+            obj.set_resume(obj.resume)
+            return
+
+        if resume_changed and not obj.resume:
+            obj.resume_text = ""
+
+        super().save_model(request, obj, form, change)
