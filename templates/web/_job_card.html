@@ -30,6 +30,15 @@
             <button type="submit" name="action" value="apply">Mark applied</button>
             <button type="submit" name="action" value="dismiss">Dismiss</button>
         </form>
+        {% if job.source_ats == "greenhouse" %}
+        <form class="actions" method="post" action="{% url 'trigger_auto_apply' job.id %}"
+              onsubmit="var b=this.querySelector('button'); b.disabled=true; b.textContent='Drafting…';">
+            {% csrf_token %}
+            {% if show_all %}<input type="hidden" name="all" value="1">{% endif %}
+            {% if query %}<input type="hidden" name="q" value="{{ query }}">{% endif %}
+            <button type="submit">Auto-apply</button>
+        </form>
+        {% endif %}
     </div>
 </div>
 {% endwith %}
