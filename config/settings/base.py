@@ -104,6 +104,63 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# ---------------------------------------------------------------------------
+# File storage -- resume uploads (U1). No FileField existed anywhere in this
+# codebase before this unit, so there was no prior storage-backend decision
+# to inherit. Local/dev falls back to FileSystemStorage under MEDIA_ROOT
+# (only coincidentally durable/multi-process-safe via Docker Compose's shared
+# bind mount); setting AWS_STORAGE_BUCKET_NAME switches to S3-compatible
+# object storage (django-storages) so the uploaded file is readable by both
+# the web process (upload) and Celery workers (resume parsing here, and the
+# Playwright submission task in U7) in a real deployment, not just a single
+# host. AWS_S3_ENDPOINT_URL lets this point at any S3-compatible provider
+# (e.g. MinIO/R2), not only AWS.
+# ---------------------------------------------------------------------------
+MEDIA_URL = env("MEDIA_URL", default="/media/")
+MEDIA_ROOT = BASE_DIR / "media"
+
+AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME", default="")
+if AWS_STORAGE_BUCKET_NAME:
+    AWS_S3_REGION_NAME = env("AWS_S3_REGION_NAME", default="us-east-1")
+    AWS_S3_ENDPOINT_URL = env("AWS_S3_ENDPOINT_URL", default=None)
+    AWS_ACCESS_KEY_ID = env("AWS_ACCESS_KEY_ID", default="")
+    AWS_SECRET_ACCESS_KEY = env("AWS_SECRET_ACCESS_KEY", default="")
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_QUERYSTRING_AUTH = env.bool("AWS_QUERYSTRING_AUTH", default=True)
+    STORAGES = {
+        "default": {"BACKEND": "storages.backends.s3boto3.S3Boto3Storage"},
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }
+else:
+    STORAGES = {
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }
+
+# Resume upload constraints (U1), enforced at the model layer
+# (Profile.validate_resume_file) before a file ever reaches the parsing
+# task/library -- a storage/DoS control and a first line of defense against
+# malicious uploads (disguised executables, malformed PDFs).
+RESUME_MAX_UPLOAD_SIZE_BYTES = env.int(
+    "RESUME_MAX_UPLOAD_SIZE_BYTES", default=10 * 1024 * 1024  # 10 MB
+)
+RESUME_ALLOWED_CONTENT_TYPES = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+]
+RESUME_ALLOWED_EXTENSIONS = [".pdf", ".docx", ".txt"]
+
+# Bounded execution for the resume text-extraction task (U1) -- allowlisting
+# file type doesn't guarantee a well-formed file; PDF/DOCX parsers have a
+# history of resource-exhaustion bugs independent of content type.
+RESUME_PARSE_TASK_TIME_LIMIT_SECONDS = env.int(
+    "RESUME_PARSE_TASK_TIME_LIMIT_SECONDS", default=120
+)
+RESUME_PARSE_TASK_SOFT_TIME_LIMIT_SECONDS = env.int(
+    "RESUME_PARSE_TASK_SOFT_TIME_LIMIT_SECONDS", default=90
+)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Auth redirects (used by the web UI in U11/U12).
@@ -174,6 +231,29 @@ LOCATION_BACKFILL_BATCH_SIZE = env.int("LOCATION_BACKFILL_BATCH_SIZE", default=5
 # return thousands of tokens at once, and reviewer throughput, not
 # candidate-source volume, is meant to be the growth bottleneck.
 DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", default=50)
+
+# ---------------------------------------------------------------------------
+# Auto-apply: LLM answer inference (apps.auto_apply.llm) -- provider-agnostic;
+# Anthropic Claude is the only registered implementation in this slice (see
+# apps/auto_apply/llm/base.py's CLIENT_REGISTRY).
+# ---------------------------------------------------------------------------
+AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+# Secondary tiebreaker only -- consulted after the deterministic evidence-
+# groundedness check has already passed (see
+# apps/auto_apply/llm/base.py:resolve_answers).
+AUTO_APPLY_CONFIDENCE_THRESHOLD = env.float("AUTO_APPLY_CONFIDENCE_THRESHOLD", default=0.75)
+
+# ---------------------------------------------------------------------------
+# Auto-apply: CAPTCHA solving (apps.auto_apply.captcha)
+# ---------------------------------------------------------------------------
+# Provider key looked up in apps.auto_apply.captcha.base.CAPTCHA_SOLVER_REGISTRY.
+# Unset by default: this slice ships the pluggable interface only, with no
+# vendor registered, so lookups return None and callers fail closed (R14).
+AUTO_APPLY_CAPTCHA_PROVIDER = env("AUTO_APPLY_CAPTCHA_PROVIDER", default="")
+# Placeholder credential for a future registered provider (e.g. 2Captcha,
+# Anti-Captcha). Unused until a provider is actually registered.
+AUTO_APPLY_CAPTCHA_API_KEY = env("AUTO_APPLY_CAPTCHA_API_KEY", default="")
 
 # ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
