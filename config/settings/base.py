@@ -211,6 +211,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.locations.sweep_stale_locations",
         "schedule": crontab(minute="*/5"),  # cheap no-op until the alias table version bumps
     },
+    "auto-apply-staleness-sweep": {
+        "task": "apps.auto_apply.sweep_stale_auto_apply_drafts",
+        "schedule": crontab(minute="*/5"),  # same cadence as location-alias-sweep
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -255,6 +259,17 @@ AUTO_APPLY_CAPTCHA_PROVIDER = env("AUTO_APPLY_CAPTCHA_PROVIDER", default="")
 # Placeholder credential for a future registered provider (e.g. 2Captcha,
 # Anti-Captcha). Unused until a provider is actually registered.
 AUTO_APPLY_CAPTCHA_API_KEY = env("AUTO_APPLY_CAPTCHA_API_KEY", default="")
+
+# ---------------------------------------------------------------------------
+# Auto-apply: send flow (apps.auto_apply.tasks.submit_auto_apply_draft)
+# ---------------------------------------------------------------------------
+# How long a draft may sit in SENDING before `sweep_stale_auto_apply_drafts`
+# treats it as stuck (crashed worker / lost task enqueue) and recovers it to
+# FAILED. Well beyond the expected "seconds to over a minute" submission
+# round trip (including a possible CAPTCHA-solve attempt).
+AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
+    "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", default=300
+)
 
 # ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
