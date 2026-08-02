@@ -5,6 +5,7 @@ token against the live ATS API before writing anything, so a typo'd token
 fails fast instead of creating a dead Employer/JobSource pair.
 """
 from django.core.management.base import BaseCommand, CommandError
+from django.db import IntegrityError
 
 from apps.jobs.ingestion.dispatch import get_client
 from apps.jobs.ingestion.exceptions import IngestionParseError, IngestionUnavailable
@@ -57,6 +58,14 @@ class Command(BaseCommand):
             outcome = register_job_source(token, name_override, ats=ats, client=client)
         except (IngestionUnavailable, IngestionParseError) as exc:
             self.stderr.write(self.style.ERROR(f"{token}: unreachable or invalid board ({exc})"))
+            return
+        except IntegrityError as exc:
+            self.stderr.write(
+                self.style.ERROR(
+                    f"{token}: could not register, conflicted with an existing "
+                    f"Employer/JobSource ({exc})"
+                )
+            )
             return
 
         if outcome.status == "already_registered":

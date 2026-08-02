@@ -99,7 +99,12 @@ def discover_boards():
         "skipped_for_cap": 0,
     }
     for ats in _DISCOVERY_ATS_PLATFORMS:
-        platform_stats = _discover_boards_for_ats(ats)
+        try:
+            platform_stats = _discover_boards_for_ats(ats)
+        except Exception:  # noqa: BLE001 — one platform's failure must not abort the others
+            logger.exception("Discovery failed outright for platform %s", ats)
+            stats["search_failed"] = True
+            continue
         for key in ("found", "already_known", "validated", "failed", "skipped_for_cap"):
             stats[key] += platform_stats[key]
         stats["search_failed"] = stats["search_failed"] or platform_stats["search_failed"]

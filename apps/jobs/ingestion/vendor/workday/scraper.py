@@ -256,6 +256,7 @@ class WorkdayScraper(BaseScraper):
             return
 
         async def resolve(i: int, job: Job) -> None:
+            self._check_deadline()
             external_path = (job.raw or {}).get("externalPath") or _external_path(job.url)
             if not external_path:
                 return

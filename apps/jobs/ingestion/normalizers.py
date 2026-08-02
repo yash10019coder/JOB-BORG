@@ -28,6 +28,45 @@ def _derive_is_remote(location_name):
     return any(marker in loc for marker in REMOTE_MARKERS)
 
 
+def _build_normalized_job(
+    *,
+    source_ats,
+    source_job_id,
+    title,
+    description,
+    location_name,
+    is_remote,
+    salary_min=None,
+    salary_max=None,
+    source_url,
+):
+    """Shared output-shape scaffolding for every ``normalize_*_job`` function.
+
+    Each platform's parsing/validation genuinely differs (hence four
+    functions), but they all end by resolving ``location_name`` through
+    ``normalize_location`` and building the same 14-key dict -- this is that
+    shared tail, so a change to the normalized job shape only has to be made
+    once.
+    """
+    structured_location = normalize_location(location_name)
+    return {
+        "source_ats": source_ats,
+        "source_job_id": source_job_id,
+        "title": title,
+        "description": description,
+        "location": location_name,
+        "is_remote": is_remote,
+        "location_city": structured_location["city"] or "",
+        "location_region": structured_location["region"] or "",
+        "location_country": structured_location["country"] or "",
+        "location_resolved": structured_location["resolved"],
+        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
+        "salary_min": salary_min,
+        "salary_max": salary_max,
+        "source_url": source_url,
+    }
+
+
 def normalize_greenhouse_job(raw):
     """Return a normalized job dict. Raises GreenhouseParseError on bad shape."""
     if not isinstance(raw, dict):
@@ -50,24 +89,15 @@ def normalize_greenhouse_job(raw):
     content = raw.get("content") or ""
     description = html.unescape(content)
 
-    structured_location = normalize_location(location_name)
-
-    return {
-        "source_ats": GREENHOUSE_SOURCE_ATS,
-        "source_job_id": str(job_id),
-        "title": title,
-        "description": description,
-        "location": location_name,
-        "is_remote": _derive_is_remote(location_name),
-        "location_city": structured_location["city"] or "",
-        "location_region": structured_location["region"] or "",
-        "location_country": structured_location["country"] or "",
-        "location_resolved": structured_location["resolved"],
-        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
-        "salary_min": None,
-        "salary_max": None,
-        "source_url": raw.get("absolute_url", ""),
-    }
+    return _build_normalized_job(
+        source_ats=GREENHOUSE_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=_derive_is_remote(location_name),
+        source_url=raw.get("absolute_url", ""),
+    )
 
 
 def normalize_lever_job(raw):
@@ -100,27 +130,18 @@ def normalize_lever_job(raw):
     # like Greenhouse's content field), so no html.unescape needed here.
     description = raw.get("descriptionPlain") or ""
 
-    structured_location = normalize_location(location_name)
-
     workplace_type = raw.get("workplaceType")
     is_remote = workplace_type == "remote" or _derive_is_remote(location_name)
 
-    return {
-        "source_ats": LEVER_SOURCE_ATS,
-        "source_job_id": str(job_id),
-        "title": title,
-        "description": description,
-        "location": location_name,
-        "is_remote": is_remote,
-        "location_city": structured_location["city"] or "",
-        "location_region": structured_location["region"] or "",
-        "location_country": structured_location["country"] or "",
-        "location_resolved": structured_location["resolved"],
-        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
-        "salary_min": None,
-        "salary_max": None,
-        "source_url": raw.get("hostedUrl", ""),
-    }
+    return _build_normalized_job(
+        source_ats=LEVER_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url=raw.get("hostedUrl", ""),
+    )
 
 
 def normalize_ashby_job(raw):
@@ -150,26 +171,17 @@ def normalize_ashby_job(raw):
     location_name = raw.get("location") or ""
     description = raw.get("descriptionPlain") or ""
 
-    structured_location = normalize_location(location_name)
-
     is_remote = bool(raw.get("isRemote")) or _derive_is_remote(location_name)
 
-    return {
-        "source_ats": ASHBY_SOURCE_ATS,
-        "source_job_id": str(job_id),
-        "title": title,
-        "description": description,
-        "location": location_name,
-        "is_remote": is_remote,
-        "location_city": structured_location["city"] or "",
-        "location_region": structured_location["region"] or "",
-        "location_country": structured_location["country"] or "",
-        "location_resolved": structured_location["resolved"],
-        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
-        "salary_min": None,
-        "salary_max": None,
-        "source_url": raw.get("jobUrl", ""),
-    }
+    return _build_normalized_job(
+        source_ats=ASHBY_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url=raw.get("jobUrl", ""),
+    )
 
 
 def normalize_workday_job(job):
@@ -186,23 +198,16 @@ def normalize_workday_job(job):
     signal with the location-text fallback, same as the other normalizers.
     """
     location_name = job.location or ""
-    structured_location = normalize_location(location_name)
-
     is_remote = bool(job.is_remote) or _derive_is_remote(location_name)
 
-    return {
-        "source_ats": WORKDAY_SOURCE_ATS,
-        "source_job_id": str(job.ats_id) if job.ats_id else "",
-        "title": job.title,
-        "description": job.description or "",
-        "location": location_name,
-        "is_remote": is_remote,
-        "location_city": structured_location["city"] or "",
-        "location_region": structured_location["region"] or "",
-        "location_country": structured_location["country"] or "",
-        "location_resolved": structured_location["resolved"],
-        "location_alias_version": CURRENT_LOCATION_ALIAS_VERSION,
-        "salary_min": job.salary_min,
-        "salary_max": job.salary_max,
-        "source_url": str(job.url) if job.url else "",
-    }
+    return _build_normalized_job(
+        source_ats=WORKDAY_SOURCE_ATS,
+        source_job_id=str(job.ats_id) if job.ats_id else "",
+        title=job.title,
+        description=job.description or "",
+        location_name=location_name,
+        is_remote=is_remote,
+        salary_min=job.salary_min,
+        salary_max=job.salary_max,
+        source_url=str(job.url) if job.url else "",
+    )

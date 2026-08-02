@@ -39,6 +39,20 @@ from .vendor.workday.scraper import URL_PATTERN, WorkdayScraper
 _SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+def derive_workday_company(token):
+    """Extract the ``company`` URL segment from a Workday careers URL token.
+
+    The sole call site outside this module is ``register.py``'s
+    ``derive_employer_name``, which needs a short display name rather than
+    the full careers URL -- this keeps that ATS-agnostic module from
+    importing ``URL_PATTERN`` out of the vendored scraper directly. Returns
+    ``None`` when ``token`` doesn't match a recognizable Workday careers URL
+    (the caller falls back to the raw token in that case).
+    """
+    match = URL_PATTERN.match(token.rstrip("/"))
+    return match.group("company") if match else None
+
+
 class WorkdayClient:
     # Bounds a single tenant's fetch (pagination + facet subdivision +
     # description enrichment can mean many sequential/concurrent requests).

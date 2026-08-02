@@ -8,6 +8,15 @@ from .ingestion.exceptions import IngestionParseError, IngestionUnavailable
 from .ingestion.register import register_job_source
 from .models import DiscoveredBoard, Job, JobSource
 
+# WorkdayClient.fetch_jobs can legitimately take up to
+# WorkdayClient.DEFAULT_MAX_FETCH_SECONDS (120s) per board, synchronously, on
+# the request thread that handles this admin action -- unlike Greenhouse/
+# Lever/Ashby's fast REST calls. Capping how many Workday rows one approve()
+# click can process keeps a bulk selection from blocking the request/worker
+# for minutes; approving more than this many Workday boards at once should be
+# done in smaller batches instead.
+_MAX_WORKDAY_APPROVALS_PER_ACTION = 5
+
 
 @admin.register(JobSource)
 class JobSourceAdmin(admin.ModelAdmin):
@@ -47,8 +56,21 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
 
     @admin.action(description="Approve selected discovered boards")
     def approve(self, request, queryset):
+        pending = queryset.filter(status=DiscoveredBoard.Status.PENDING)
+        workday_count = pending.filter(ats=JobSource.ATS.WORKDAY).count()
+        if workday_count > _MAX_WORKDAY_APPROVALS_PER_ACTION:
+            self.message_user(
+                request,
+                f"Selected {workday_count} Workday board(s), but Workday fetches "
+                f"can take up to two minutes each and run synchronously on this "
+                f"request -- approve at most {_MAX_WORKDAY_APPROVALS_PER_ACTION} "
+                "Workday boards per action. Please approve them in smaller batches.",
+                level=messages.ERROR,
+            )
+            return
+
         approved = 0
-        for board in queryset.filter(status=DiscoveredBoard.Status.PENDING):
+        for board in pending:
             try:
                 # A savepoint, not just a try/except: a failed INSERT (e.g. a
                 # concurrent approval of the same token racing us to

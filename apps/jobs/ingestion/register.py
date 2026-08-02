@@ -6,13 +6,14 @@ action so the manual and automated registration paths can never drift.
 """
 from dataclasses import dataclass
 
+from django.db import IntegrityError
 from django.utils.text import slugify
 
 from apps.employers.models import Employer
 from apps.jobs.models import JobSource
 
 from .dispatch import get_client
-from .vendor.workday.scraper import URL_PATTERN as _WORKDAY_URL_PATTERN
+from .workday_client import derive_workday_company
 
 
 @dataclass
@@ -33,8 +34,7 @@ def derive_employer_name(ats, token):
     extracts the company segment from the URL first.
     """
     if ats == JobSource.ATS.WORKDAY:
-        match = _WORKDAY_URL_PATTERN.match(token.rstrip("/"))
-        name_source = match.group("company") if match else token
+        name_source = derive_workday_company(token) or token
     else:
         name_source = token
     return name_source.replace("-", " ").replace("_", " ").title()
@@ -87,11 +87,23 @@ def _get_or_create_employer(name):
     slug = slugify(name)
     existing = Employer.objects.filter(slug=slug).first()
     if existing is None:
-        return Employer.objects.create(slug=slug, name=name)
+        try:
+            return Employer.objects.create(slug=slug, name=name)
+        except IntegrityError:
+            # Lost the race to a concurrent create() with the same slug --
+            # mirror Django's own get_or_create() and re-query instead of
+            # propagating, matching the race-safety the old
+            # Employer.objects.get_or_create() call used to provide.
+            return Employer.objects.filter(slug=slug).first()
     if existing.name.strip().casefold() == name.strip().casefold():
         return existing
 
     suffix = 2
     while Employer.objects.filter(slug=f"{slug}-{suffix}").exists():
         suffix += 1
-    return Employer.objects.create(slug=f"{slug}-{suffix}", name=name)
+    numbered_slug = f"{slug}-{suffix}"
+    try:
+        return Employer.objects.create(slug=numbered_slug, name=name)
+    except IntegrityError:
+        # Same race, on the numbered-suffix slug this time.
+        return Employer.objects.filter(slug=numbered_slug).first()
