@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name <span aria-hidden="true">*</span></label>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email <span aria-hidden="true">*</span></label>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <!-- Standard Greenhouse spam-protection widget markup. -->
+      <div class="g-recaptcha" data-sitekey="6Lc-fake-sitekey-000000000000"></div>
+      <iframe title="reCAPTCHA" src="about:blank" width="304" height="78"></iframe>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+</body>
+</html>

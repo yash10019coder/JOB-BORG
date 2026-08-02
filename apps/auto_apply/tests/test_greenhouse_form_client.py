@@ -1,0 +1,350 @@
+"""Tests for the Greenhouse browser-automation client.
+
+Exercised against a real headless Chromium instance (via Playwright) with
+route interception serving local HTML fixtures, so `getByRole`/`getByLabel`
+locator behavior, `expect()` assertions, and the accessibility snapshot are
+genuine rather than mocked -- while never touching a live Greenhouse page,
+per U3's verification requirement. The whole class is skipped when Playwright
+or its Chromium binary isn't available in the current environment (see the
+module docstring note below for how to enable it).
+
+To run these for real:
+    pip install playwright && playwright install chromium
+"""
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from django.test import SimpleTestCase
+
+from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
+from apps.auto_apply.greenhouse_form.exceptions import (
+    GreenhouseFormChallenged,
+    GreenhouseFormError,
+    GreenhouseFormSchemaMismatch,
+    GreenhouseFormSubmissionFailed,
+)
+from apps.auto_apply.greenhouse_form.field_mapping import (
+    FILE,
+    MULTI_SELECT,
+    SINGLE_SELECT,
+    TEXT,
+    TEXTAREA,
+    FormField,
+    FormSchema,
+)
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+JOB_URL = "https://job-boards.greenhouse.io/acme/jobs/12345"
+DISALLOWED_URL = "https://evil.example.com/acme/jobs/12345"
+
+
+def _fixture_html(name: str) -> str:
+    return (FIXTURES / name).read_text()
+
+
+try:
+    from playwright.sync_api import sync_playwright
+
+    _PLAYWRIGHT_IMPORTABLE = True
+except ImportError:
+    _PLAYWRIGHT_IMPORTABLE = False
+
+
+def _playwright_chromium_available() -> bool:
+    if not _PLAYWRIGHT_IMPORTABLE:
+        return False
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            browser.close()
+        return True
+    except Exception:  # noqa: BLE001 -- any launch failure means "unavailable"
+        return False
+
+
+_SKIP_REASON = (
+    "Playwright is not importable, or `playwright install chromium` has not "
+    "been run in this environment -- these tests drive a real headless "
+    "Chromium instance against local HTML fixtures."
+)
+_BROWSER_AVAILABLE = _playwright_chromium_available()
+
+
+class _TestContextHandle:
+    """Test-only ContextHandle: closes only the per-test context, not the
+    class-shared browser/Playwright driver those contexts were spawned
+    from."""
+
+    def __init__(self, context):
+        self._context = context
+
+    def new_page(self):
+        return self._context.new_page()
+
+    def close(self) -> None:
+        self._context.close()
+
+
+def _routed_context_factory(browser, url: str, html: str, calls: list | None = None):
+    """Build a `context_factory` that hands the client a *real* isolated
+    Playwright context, with `url` intercepted to serve `html` locally --
+    the client's own `page.goto(url)` call is satisfied without any network
+    access, exercising the real navigation/DOM/accessibility-tree code
+    paths rather than a mock."""
+
+    def factory():
+        if calls is not None:
+            calls.append(1)
+        context = browser.new_context()
+        context.route(url, lambda route: route.fulfill(status=200, content_type="text/html", body=html))
+        return _TestContextHandle(context)
+
+    return factory
+
+
+class _AlwaysTrueSolver:
+    def solve(self, challenge, timeout):
+        return True
+
+
+class _AlwaysFalseSolver:
+    def solve(self, challenge, timeout):
+        return False
+
+
+class _RaisingSolver:
+    def solve(self, challenge, timeout):
+        raise TimeoutError("solver timed out")
+
+
+@unittest.skipUnless(_BROWSER_AVAILABLE, _SKIP_REASON)
+class GreenhouseFormClientTests(SimpleTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._playwright = sync_playwright().start()
+        cls._browser = cls._playwright.chromium.launch(headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._browser.close()
+        cls._playwright.stop()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="gh-form-test-"))
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+
+    def _client(self, html: str, *, url: str = JOB_URL, calls: list | None = None, **kwargs):
+        factory = _routed_context_factory(self._browser, url, html, calls=calls)
+        return GreenhouseFormClient(context_factory=factory, **kwargs)
+
+    def _resume_file(self) -> Path:
+        path = self._tmpdir / "resume.pdf"
+        path.write_bytes(b"%PDF-1.4 fake resume content")
+        return path
+
+    # -- inspect(): standard-fields-only fixture -------------------------
+
+    def test_inspect_standard_form_returns_expected_fields(self):
+        client = self._client(_fixture_html("greenhouse_standard_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertEqual(
+            set(by_label),
+            {"First Name", "Last Name", "Email", "Phone", "Resume/CV"},
+        )
+        self.assertEqual(by_label["First Name"].field_type, TEXT)
+        self.assertTrue(by_label["First Name"].required)
+        self.assertEqual(by_label["Phone"].field_type, TEXT)
+        self.assertFalse(by_label["Phone"].required)
+        self.assertEqual(by_label["Resume/CV"].field_type, FILE)
+        self.assertTrue(by_label["Resume/CV"].required)
+
+    # -- inspect(): custom-question fixture -------------------------------
+
+    def test_inspect_custom_questions_form_identifies_field_types(self):
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertEqual(by_label["Why do you want to work here?"].field_type, TEXTAREA)
+        self.assertTrue(by_label["Why do you want to work here?"].required)
+
+        work_auth = by_label["Are you legally authorized to work in the US?"]
+        self.assertEqual(work_auth.field_type, SINGLE_SELECT)
+        self.assertTrue(work_auth.required)
+        self.assertEqual(set(work_auth.options), {"Select...", "Yes", "No"})
+
+        tech_stack = by_label["Which of the following technologies have you used professionally?"]
+        self.assertEqual(tech_stack.field_type, MULTI_SELECT)
+        self.assertFalse(tech_stack.required)
+        self.assertEqual(set(tech_stack.options), {"Python", "JavaScript", "Go", "Rust"})
+
+    # -- required unsupported field type ----------------------------------
+
+    def test_required_unsupported_field_type_raises_schema_mismatch(self):
+        client = self._client(_fixture_html("greenhouse_unsupported_required_field_form.html"))
+        with self.assertRaises(GreenhouseFormSchemaMismatch):
+            client.inspect(JOB_URL)
+
+    # -- submit(): schema drift between draft and send --------------------
+
+    def test_submit_against_drifted_schema_raises_schema_mismatch(self):
+        inspect_client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        expected_schema = inspect_client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_custom_questions_form_drifted.html"))
+        with self.assertRaises(GreenhouseFormSchemaMismatch):
+            submit_client.submit(
+                JOB_URL,
+                {"First Name": "Ada"},
+                expected_schema=expected_schema,
+            )
+
+    # -- challenge handling -------------------------------------------------
+
+    def test_inspect_challenge_page_raises_challenged(self):
+        client = self._client(_fixture_html("greenhouse_challenge_form.html"))
+        with self.assertRaises(GreenhouseFormChallenged):
+            client.inspect(JOB_URL)
+
+    def test_submit_challenge_with_no_solver_raises_challenged_without_filling(self):
+        client = self._client(_fixture_html("greenhouse_challenge_form.html"))
+        with patch.object(GreenhouseFormClient, "_fill_answers") as fill_mock:
+            with self.assertRaises(GreenhouseFormChallenged):
+                client.submit(JOB_URL, {"First Name": "Ada"})
+        fill_mock.assert_not_called()
+
+    def test_submit_challenge_with_solver_returning_true_proceeds(self):
+        client = self._client(
+            _fixture_html("greenhouse_standard_form.html"),
+            captcha_solver=_AlwaysTrueSolver(),
+        )
+        with patch.object(GreenhouseFormClient, "_challenge_detected", side_effect=[True, False]):
+            result = client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Last Name": "Lovelace",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+        self.assertTrue(result.success)
+
+    def test_submit_captcha_solver_returning_false_raises_challenged(self):
+        client = self._client(
+            _fixture_html("greenhouse_challenge_form.html"),
+            captcha_solver=_AlwaysFalseSolver(),
+        )
+        with self.assertRaises(GreenhouseFormChallenged):
+            client.submit(JOB_URL, {"First Name": "Ada"})
+
+    def test_submit_captcha_solver_raising_is_treated_as_challenged(self):
+        client = self._client(
+            _fixture_html("greenhouse_challenge_form.html"),
+            captcha_solver=_RaisingSolver(),
+        )
+        with self.assertRaises(GreenhouseFormChallenged):
+            client.submit(JOB_URL, {"First Name": "Ada"})
+
+    # -- happy-path submit() integration -----------------------------------
+
+    def test_submit_happy_path_confirms_success(self):
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Last Name": "Lovelace",
+                "Email": "ada@example.com",
+                "Phone": "555-0100",
+                "Resume/CV": str(self._resume_file()),
+                "Why do you want to work here?": "Because I love hard problems.",
+                "Are you legally authorized to work in the US?": "Yes",
+                "Which of the following technologies have you used professionally?": [
+                    "Python",
+                    "Go",
+                ],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("submitted successfully", result.confirmation_text.lower())
+
+    # -- submission failure + debug artifacts --------------------------------
+
+    def test_submit_rejected_form_raises_submission_failed_with_debug_artifacts(self):
+        debug_dir = self._tmpdir / "debug"
+        client = self._client(
+            _fixture_html("greenhouse_submission_rejected_form.html"),
+            debug_artifact_dir=debug_dir,
+            confirmation_timeout_ms=500,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+
+        artifacts = ctx.exception.debug_artifacts
+        self.assertIsNotNone(artifacts)
+        self.assertTrue(Path(artifacts.screenshot_path).exists())
+        self.assertTrue(Path(artifacts.accessibility_tree_path).exists())
+
+    # -- hostname allowlist -------------------------------------------------
+
+    def test_disallowed_hostname_rejected_before_navigation(self):
+        calls: list = []
+        client = self._client(
+            _fixture_html("greenhouse_standard_form.html"), url=DISALLOWED_URL, calls=calls
+        )
+        with self.assertRaises(GreenhouseFormError):
+            client.inspect(DISALLOWED_URL)
+        self.assertEqual(calls, [])  # context_factory (and thus navigation) never invoked
+
+
+class SchemaMatchesTests(SimpleTestCase):
+    """Direct unit coverage of the option-set-aware drift comparison, since
+    the integration tests above exercise it only indirectly."""
+
+    def test_identical_schemas_match(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import schema_matches
+
+        a = FormSchema(fields=(FormField("Email", TEXT, True),))
+        b = FormSchema(fields=(FormField("Email", TEXT, True),))
+        self.assertTrue(schema_matches(a, b))
+
+    def test_option_set_drift_is_detected_regardless_of_order(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import schema_matches
+
+        a = FormSchema(fields=(FormField("Auth", SINGLE_SELECT, True, ("Yes", "No")),))
+        # Same set, different order -> still a match.
+        b = FormSchema(fields=(FormField("Auth", SINGLE_SELECT, True, ("No", "Yes")),))
+        self.assertTrue(schema_matches(a, b))
+        # A genuinely added option -> drift.
+        c = FormSchema(
+            fields=(FormField("Auth", SINGLE_SELECT, True, ("Yes", "No", "Sponsorship")),)
+        )
+        self.assertFalse(schema_matches(a, c))
+
+    def test_missing_field_is_drift(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import schema_matches
+
+        a = FormSchema(fields=(FormField("Email", TEXT, True), FormField("Phone", TEXT, False)))
+        b = FormSchema(fields=(FormField("Email", TEXT, True),))
+        self.assertFalse(schema_matches(a, b))
