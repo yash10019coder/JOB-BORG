@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Auto-apply queue — JobBorg{% endblock %}
+{% block content %}
+<h1>Auto-apply queue</h1>
+<p class="muted">Every job you've triggered auto-apply for, including ones we couldn't complete automatically.</p>
+
+{% if messages %}
+<ul class="messages muted" style="list-style:none; padding:0;">
+    {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if page_obj and page_obj.object_list %}
+    {% for draft in page_obj %}
+    <div class="card">
+        <h3>
+            {% if draft.job.source_url %}<a href="{{ draft.job.source_url }}" target="_blank" rel="noopener">{{ draft.job.title }}</a>
+            {% else %}{{ draft.job.title }}{% endif %}
+        </h3>
+        <p class="muted">
+            {{ draft.job.employer.name }}
+            &middot; <span class="tag" style="background:#f3f4f6; color:#374151;">{{ draft.get_status_display }}</span>
+        </p>
+
+        {% if draft.friendly_message %}
+        <p class="muted" role="status">{{ draft.friendly_message }}</p>
+        {% endif %}
+
+        {% if draft.answers %}
+        <form method="post" action="{% url 'edit_auto_apply_draft' draft.id %}">
+            {% csrf_token %}
+            {% for label, entry in draft.answers.items %}
+            <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
+                <label for="value__{{ forloop.counter0 }}">
+                    {{ label }}
+                    {% if entry.needs_review %}
+                    <span class="tag" style="background:#fef3c7; color:#92400e;" aria-label="Needs review, please confirm this answer">Needs review</span>
+                    {% endif %}
+                </label>
+                <input type="hidden" name="label__{{ forloop.counter0 }}" value="{{ label }}">
+                {% if draft.status == "drafted" %}
+                <input type="text" id="value__{{ forloop.counter0 }}" name="value__{{ forloop.counter0 }}" value="{{ entry.value }}">
+                {% else %}
+                <p>{{ entry.value }}</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+            {% if draft.status == "drafted" %}
+            <button type="submit">Save answers</button>
+            {% endif %}
+        </form>
+        {% endif %}
+
+        {% if draft.status == "drafted" %}
+        <form method="post" action="{% url 'send_auto_apply_draft' draft.id %}"
+              onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='Sending…';">
+            {% csrf_token %}
+            <button type="submit">Send application</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if page_obj.has_other_pages %}
+    <nav class="muted">
+        {% if page_obj.has_previous %}<a href="{% querystring page=page_obj.previous_page_number %}">&larr; Prev</a>{% endif %}
+        <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}<a href="{% querystring page=page_obj.next_page_number %}">Next &rarr;</a>{% endif %}
+    </nav>
+    {% endif %}
+{% else %}
+    <p class="muted">No auto-apply drafts yet. Trigger "Auto-apply" on a Greenhouse-sourced job from your <a href="{% url 'recommendations' %}">recommendations</a>.</p>
+{% endif %}
+{% endblock %}
