@@ -9,15 +9,25 @@ from django.test import TestCase
 
 from apps.employers.models import Employer
 from apps.jobs.ingestion.greenhouse_client import BASE_URL
+from apps.jobs.ingestion.lever_client import BASE_URL as LEVER_BASE_URL
 from apps.jobs.models import JobSource
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "greenhouse_board.json"
+LEVER_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "lever_board.json"
 
 
 def _mock_board(token, status=200):
     body = FIXTURE.read_text() if status == 200 else "not found"
     responses.add(
         responses.GET, f"{BASE_URL}/{token}/jobs", body=body, status=status,
+        content_type="application/json",
+    )
+
+
+def _mock_lever_board(token, status=200):
+    body = LEVER_FIXTURE.read_text() if status == 200 else "not found"
+    responses.add(
+        responses.GET, f"{LEVER_BASE_URL}/{token}", body=body, status=status,
         content_type="application/json",
     )
 
@@ -39,7 +49,8 @@ class AddJobSourceCommandTests(TestCase):
     def test_name_override_applied(self):
         _mock_board("stripe")
         call_command("add_job_source", "stripe", "--name", "Stripe Inc.")
-        self.assertEqual(Employer.objects.get(slug="stripe").name, "Stripe Inc.")
+        # slug is derived from the employer name, not the raw board token.
+        self.assertEqual(Employer.objects.get(slug="stripe-inc").name, "Stripe Inc.")
 
     @responses.activate
     def test_registers_multiple_tokens_in_one_call(self):
@@ -72,3 +83,11 @@ class AddJobSourceCommandTests(TestCase):
 
         with self.assertRaises(CommandError):
             call_command("add_job_source", "stripe", "airbnb", "--name", "X")
+
+    @responses.activate
+    def test_ats_flag_registers_non_greenhouse_source(self):
+        _mock_lever_board("widget-co")
+        call_command("add_job_source", "widget-co", "--ats", "lever")
+
+        source = JobSource.objects.get(board_token="widget-co")
+        self.assertEqual(source.ats, JobSource.ATS.LEVER)

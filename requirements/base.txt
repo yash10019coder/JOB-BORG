@@ -10,3 +10,9 @@ requests==2.32.3
 PyYAML==6.0.2
 django-prometheus==2.3.1
 python-json-logger==2.0.7
+# Required by the vendored Workday scraper (apps/jobs/ingestion/vendor/workday/) --
+# NOT a jobhive-py package dependency; that package's __init__.py also pulls in
+# pandas, which vendoring the scraper source directly avoids. See
+# docs/plans/2026-07-21-001-feat-ats-platform-expansion-plan.md.
+httpx==0.28.1
+pydantic==2.13.4

@@ -4,9 +4,18 @@ from django.utils import timezone
 
 from apps.employers.models import Employer
 
-from .ingestion.exceptions import GreenhouseParseError, GreenhouseUnavailable
+from .ingestion.exceptions import IngestionParseError, IngestionUnavailable
 from .ingestion.register import register_job_source
 from .models import DiscoveredBoard, Job, JobSource
+
+# WorkdayClient.fetch_jobs can legitimately take up to
+# WorkdayClient.DEFAULT_MAX_FETCH_SECONDS (120s) per board, synchronously, on
+# the request thread that handles this admin action -- unlike Greenhouse/
+# Lever/Ashby's fast REST calls. Capping how many Workday rows one approve()
+# click can process keeps a bulk selection from blocking the request/worker
+# for minutes; approving more than this many Workday boards at once should be
+# done in smaller batches instead.
+_MAX_WORKDAY_APPROVALS_PER_ACTION = 5
 
 
 @admin.register(JobSource)
@@ -42,17 +51,26 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
         name_fragment = obj.derived_employer_name.strip()
         if not name_fragment:
             return ""
-        match = (
-            Employer.objects.filter(name__icontains=name_fragment)
-            .exclude(slug=obj.board_token)
-            .first()
-        )
+        match = Employer.objects.filter(name__icontains=name_fragment).first()
         return f"⚠ {match.name}" if match else ""
 
     @admin.action(description="Approve selected discovered boards")
     def approve(self, request, queryset):
+        pending = queryset.filter(status=DiscoveredBoard.Status.PENDING)
+        workday_count = pending.filter(ats=JobSource.ATS.WORKDAY).count()
+        if workday_count > _MAX_WORKDAY_APPROVALS_PER_ACTION:
+            self.message_user(
+                request,
+                f"Selected {workday_count} Workday board(s), but Workday fetches "
+                f"can take up to two minutes each and run synchronously on this "
+                f"request -- approve at most {_MAX_WORKDAY_APPROVALS_PER_ACTION} "
+                "Workday boards per action. Please approve them in smaller batches.",
+                level=messages.ERROR,
+            )
+            return
+
         approved = 0
-        for board in queryset.filter(status=DiscoveredBoard.Status.PENDING):
+        for board in pending:
             try:
                 # A savepoint, not just a try/except: a failed INSERT (e.g. a
                 # concurrent approval of the same token racing us to
@@ -63,9 +81,11 @@ class DiscoveredBoardAdmin(admin.ModelAdmin):
                 # apps.jobs.tasks.discover_boards's own per-token savepoint.
                 with transaction.atomic():
                     outcome = register_job_source(
-                        board.board_token, employer_name=board.derived_employer_name
+                        board.board_token,
+                        employer_name=board.derived_employer_name,
+                        ats=board.ats,
                     )
-            except (GreenhouseUnavailable, GreenhouseParseError) as exc:
+            except (IngestionUnavailable, IngestionParseError) as exc:
                 self.message_user(
                     request,
                     f"{board.board_token}: could not approve, re-fetch failed ({exc})",

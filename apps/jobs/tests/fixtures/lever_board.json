@@ -1,0 +1,47 @@
+[
+  {
+    "id": "ac978161-6f46-4f6b-ad9e-a258e642751c",
+    "text": "Senior Backend Engineer",
+    "hostedUrl": "https://jobs.lever.co/acme/ac978161-6f46-4f6b-ad9e-a258e642751c",
+    "categories": {
+      "location": "Remote - United States",
+      "team": "Engineering",
+      "commitment": "Full-time"
+    },
+    "workplaceType": "remote",
+    "country": "US",
+    "createdAt": 1711403416463,
+    "descriptionPlain": "We use Python and Kubernetes.",
+    "description": "<div>We use <strong>Python</strong> and Kubernetes.</div>"
+  },
+  {
+    "id": "0bbfd4f4-41ff-4ec6-b73f-5200efd5d4d3",
+    "text": "Product Designer",
+    "hostedUrl": "https://jobs.lever.co/acme/0bbfd4f4-41ff-4ec6-b73f-5200efd5d4d3",
+    "categories": {
+      "location": "New York, NY",
+      "team": "Design",
+      "commitment": "Full-time"
+    },
+    "workplaceType": "onsite",
+    "country": "US",
+    "createdAt": 1711403300000,
+    "descriptionPlain": "Design delightful experiences.",
+    "description": "<div>Design delightful experiences.</div>"
+  },
+  {
+    "id": "fe2a8c69-49b7-405f-816c-a6c6f894399a",
+    "text": "Data Analyst",
+    "hostedUrl": "https://jobs.lever.co/acme/fe2a8c69-49b7-405f-816c-a6c6f894399a",
+    "categories": {
+      "location": "",
+      "team": "Data",
+      "commitment": "Full-time"
+    },
+    "workplaceType": null,
+    "country": null,
+    "createdAt": 1711403200000,
+    "descriptionPlain": "",
+    "description": ""
+  }
+]

@@ -1,24 +1,26 @@
-"""Greenhouse public Job Board API client.
+"""Ashby public Job Board API client.
 
 Pure HTTP + parsing, no database access. The live API returns a single
-non-paginated payload per board (``{"jobs": [...], "meta": {"total": N}}``),
-confirmed against boards-api.greenhouse.io — so ``fetch_jobs`` returns the full
-normalized list for a board in one call.
+non-paginated payload per board (``{"apiVersion": ..., "jobs": [...]}`` --
+confirmed against api.ashbyhq.com/posting-api/job-board/{token} — see the
+plan's execution note), so ``fetch_jobs`` returns the full normalized list
+for a board in one call. Mirrors ``greenhouse_client.py``'s retry/backoff
+shape exactly.
 """
 import time
 
 import requests
 
-from .exceptions import GreenhouseParseError, GreenhouseUnavailable
-from .normalizers import normalize_greenhouse_job
+from .exceptions import AshbyParseError, AshbyUnavailable
+from .normalizers import normalize_ashby_job
 
-BASE_URL = "https://boards-api.greenhouse.io/v1/boards"
+BASE_URL = "https://api.ashbyhq.com/posting-api/job-board"
 
 # Status codes worth retrying (transient upstream / rate limiting).
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
-class GreenhouseClient:
+class AshbyClient:
     def __init__(
         self,
         session=None,
@@ -38,19 +40,19 @@ class GreenhouseClient:
         """Return a list of normalized job dicts for ``board_token``.
 
         Raises:
-            GreenhouseUnavailable: network failure, retryable status exhausted,
+            AshbyUnavailable: network failure, retryable status exhausted,
                 or a non-retryable HTTP error.
-            GreenhouseParseError: the body is not the expected JSON shape.
+            AshbyParseError: the body is not the expected JSON shape.
         """
-        url = f"{BASE_URL}/{board_token}/jobs"
-        response = self._get_with_retry(url, params={"content": "true"})
+        url = f"{BASE_URL}/{board_token}"
+        response = self._get_with_retry(url)
         payload = self._parse_body(response)
-        raw_jobs = payload.get("jobs")
+        raw_jobs = payload.get("jobs") if isinstance(payload, dict) else None
         if not isinstance(raw_jobs, list):
-            raise GreenhouseParseError(
+            raise AshbyParseError(
                 f"Expected a 'jobs' list in the response, got {type(raw_jobs).__name__}"
             )
-        return [normalize_greenhouse_job(raw) for raw in raw_jobs]
+        return [normalize_ashby_job(raw) for raw in raw_jobs]
 
     # -- internals ---------------------------------------------------------
 
@@ -68,17 +70,17 @@ class GreenhouseClient:
                 if response.status_code < 400:
                     return response
                 if response.status_code not in _RETRYABLE_STATUS:
-                    raise GreenhouseUnavailable(
+                    raise AshbyUnavailable(
                         f"GET {url} failed with HTTP {response.status_code}"
                     )
-                last_exc = GreenhouseUnavailable(
+                last_exc = AshbyUnavailable(
                     f"GET {url} returned retryable HTTP {response.status_code}"
                 )
 
             if attempt < self.max_retries:
                 self._sleep(self._backoff_delay(attempt, response))
 
-        raise GreenhouseUnavailable(
+        raise AshbyUnavailable(
             f"GET {url} failed after {self.max_retries + 1} attempts"
         ) from last_exc
 
@@ -98,4 +100,4 @@ class GreenhouseClient:
         try:
             return response.json()
         except ValueError as exc:
-            raise GreenhouseParseError("Response body was not valid JSON") from exc
+            raise AshbyParseError("Response body was not valid JSON") from exc
