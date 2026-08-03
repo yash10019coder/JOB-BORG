@@ -157,13 +157,28 @@ class GreenhouseFormClient:
         self._validate_url(job_url)
 
         def _run(page):
-            page.goto(job_url, wait_until="domcontentloaded")
-            if self._challenge_detected(page):
-                raise GreenhouseFormChallenged(
-                    f"Bot-detection challenge present on {job_url}; inspect() "
-                    "never attempts to solve it, only submit() does."
-                )
-            return self._discover_schema(page, job_url)
+            try:
+                page.goto(job_url, wait_until="domcontentloaded")
+                if self._challenge_detected(page):
+                    raise GreenhouseFormChallenged(
+                        f"Bot-detection challenge present on {job_url}; inspect() "
+                        "never attempts to solve it, only submit() does."
+                    )
+                return self._discover_schema(page, job_url)
+            except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
+                raise
+            except Exception as exc:  # noqa: BLE001 -- convert to typed error
+                # A raw Playwright/browser error (navigation timeout, DNS
+                # failure, page crash, etc.) here would otherwise propagate
+                # past draft_for()'s GreenhouseFormError handlers straight
+                # to draft_auto_apply's catch-all, which persists no
+                # AutoApplyDraft row at all -- silently dropping the job
+                # with no trace in the review queue. Wrapping as a typed
+                # error lets drafting.py's existing handler persist an
+                # EXCLUDED row instead.
+                raise GreenhouseFormError(
+                    f"Could not load the application form at {job_url}: {exc}"
+                ) from exc
 
         return self._with_fresh_page(_run)
 
@@ -392,11 +407,31 @@ class GreenhouseFormClient:
                         f"Not all selections registered for multi-select field {label!r}."
                     )
             elif form_field.field_type == FILE:
-                control.set_input_files(str(value))
+                control.set_input_files(str(self._validated_file_path(value, label)))
             else:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
                 )
+
+    @staticmethod
+    def _validated_file_path(value: Any, label: str) -> Path:
+        """Resolve a FILE-field answer to a path Playwright may upload.
+
+        Answers for FILE fields are meant to originate only from
+        ``drafting.py`` (a Profile's own ``resume.path``), never from user
+        input -- ``edit_auto_apply_draft`` already refuses to let a user
+        overwrite one (see apps/web/views.py). This is the last line of
+        defense: without it, any bug or future code path that let a
+        non-existent or non-file value (e.g. a directory, or a typo'd path)
+        reach here would fail deep inside Playwright with an opaque error
+        instead of a typed, diagnosable one.
+        """
+        candidate = Path(str(value)).resolve()
+        if not candidate.is_file():
+            raise GreenhouseFormError(
+                f"File {value!r} for field {label!r} does not exist."
+            )
+        return candidate
 
     def _click_submit(self, page) -> None:
         submit_button = page.get_by_role("button", name="Submit", exact=False)

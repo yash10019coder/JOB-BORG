@@ -65,6 +65,44 @@ class SubmissionResult:
     confirmation_text: str = ""
 
 
+def schema_to_dict(schema: FormSchema) -> dict:
+    """Serialize a `FormSchema` for storage (e.g. `AutoApplyDraft.form_schema_snapshot`).
+
+    Plain-dict/list/str shape only, so it round-trips through a JSONField
+    without a custom encoder.
+    """
+    return {
+        "fields": [
+            {
+                "label": f.label,
+                "field_type": f.field_type,
+                "required": f.required,
+                "options": list(f.options),
+            }
+            for f in schema.fields
+        ]
+    }
+
+
+def schema_from_dict(data: dict | None) -> FormSchema | None:
+    """Inverse of `schema_to_dict`. Returns `None` for `None`/empty input so
+    callers can distinguish "no snapshot stored" (older draft, or drafted
+    before this field existed) from an empty schema."""
+    if not data:
+        return None
+    return FormSchema(
+        fields=tuple(
+            FormField(
+                label=f["label"],
+                field_type=f["field_type"],
+                required=f["required"],
+                options=tuple(f.get("options", ())),
+            )
+            for f in data.get("fields", [])
+        )
+    )
+
+
 def schema_matches(expected: FormSchema, actual: FormSchema) -> bool:
     """Whether ``actual`` (freshly re-inspected) still matches ``expected``.
 
