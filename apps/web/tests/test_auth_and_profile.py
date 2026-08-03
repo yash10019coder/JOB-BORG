@@ -1,10 +1,12 @@
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
 
 from apps.accounts.models import Profile
+from apps.accounts.tests.test_resume_parsing import make_pdf_bytes
 from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
 
 User = get_user_model()
@@ -170,6 +172,30 @@ class AuthProfileTests(TestCase):
         self.assertContains(resp, "error", status_code=200)
         profile = User.objects.get(username="carol").profile
         self.assertEqual(profile.target_tags, [])  # nothing saved
+
+    def test_resume_upload_via_profile_form_routes_through_set_resume(self):
+        user = User.objects.create_user(username="grace", password="pw")
+        self.client.force_login(user)
+        with mock.patch("apps.accounts.models.Profile.set_resume") as mock_set_resume:
+            resp = self.client.post(
+                reverse("profile"),
+                {
+                    "full_name": "", "headline": "",
+                    "phone": "+1 555-0100", "linkedin_url": "https://linkedin.com/in/grace",
+                    "target_titles": "", "target_tags": "",
+                    "target_locations": "", "excluded_employers": "",
+                    "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
+                    "is_active": "on",
+                    "resume": SimpleUploadedFile(
+                        "resume.pdf", make_pdf_bytes("Grace's resume"), content_type="application/pdf"
+                    ),
+                },
+            )
+        self.assertRedirects(resp, reverse("recommendations"), fetch_redirect_response=False)
+        mock_set_resume.assert_called_once()
+        profile = User.objects.get(username="grace").profile
+        self.assertEqual(profile.phone, "+1 555-0100")
+        self.assertEqual(profile.linkedin_url, "https://linkedin.com/in/grace")
 
     def test_user_cannot_edit_another_users_profile(self):
         alice = User.objects.create_user(username="alice", password="pw")
