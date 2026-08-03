@@ -201,6 +201,19 @@ def _friendly_draft_message(draft):
     return ""
 
 
+def _recommendations_redirect(request):
+    redirect_url = reverse("recommendations")
+    params = {}
+    if request.POST.get("all") == "1":
+        params["all"] = "1"
+    query = _clean_query(request.POST.get("q", ""))
+    if query:
+        params["q"] = query
+    if params:
+        redirect_url = f"{redirect_url}?{urlencode(params)}"
+    return redirect(redirect_url)
+
+
 @login_required
 @require_POST
 def trigger_auto_apply(request, job_id):
@@ -217,22 +230,29 @@ def trigger_auto_apply(request, job_id):
     if job.source_ats != JobSource.ATS.GREENHOUSE:
         return HttpResponseBadRequest("Auto-apply is only available for Greenhouse-sourced jobs.")
 
+    # A real application to this employer already exists for this job --
+    # re-triggering here would only ever race to a fresh AutoApplyDraft that
+    # itself has no way of knowing it should refuse to submit again, and
+    # nothing downstream of drafting checks this, so the guard has to live
+    # here, before the task is even enqueued.
+    already_applied = (
+        JobApplication.objects.filter(
+            user=request.user, job=job, status=JobApplication.Status.APPLIED
+        ).exists()
+        or AutoApplyDraft.objects.filter(
+            user=request.user, job=job, status=AutoApplyDraft.Status.APPLIED
+        ).exists()
+    )
+    if already_applied:
+        messages.info(request, "You've already applied to this job.")
+        return _recommendations_redirect(request)
+
     draft_auto_apply.delay(request.user.id, job.id)
     messages.info(
         request,
         "Drafting your application… check the auto-apply queue shortly for the result.",
     )
-
-    redirect_url = reverse("recommendations")
-    params = {}
-    if request.POST.get("all") == "1":
-        params["all"] = "1"
-    query = _clean_query(request.POST.get("q", ""))
-    if query:
-        params["q"] = query
-    if params:
-        redirect_url = f"{redirect_url}?{urlencode(params)}"
-    return redirect(redirect_url)
+    return _recommendations_redirect(request)
 
 
 @login_required

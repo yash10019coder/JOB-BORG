@@ -64,6 +64,14 @@ Add a new `apps/auto_apply` app that drafts and submits Greenhouse job applicati
 - Additional LLM provider implementations (OpenAI, etc.) behind the pluggable interface introduced in U4.
 - Additional CAPTCHA-solving provider implementations behind the pluggable interface introduced in U5.
 
+### Known Residuals (post-implementation code review)
+
+Three findings from the Tier-2 code review were consciously accepted rather than fixed in this slice, after the 5 P0s (schema-drift dead code, sweep-race duplicate-submission risk, arbitrary-file-path injection, unwrapped `inspect()` exceptions, unwired CAPTCHA solver) and the re-trigger-on-already-applied P0 were fixed and committed:
+
+- **Resume upload breaks under S3/remote storage.** `drafting.py`'s `_standard_field_value("resume", ...)` falls back to `profile.resume.name` when `.path` raises (no local filesystem path under a remote storage backend), but `GreenhouseFormClient._fill_answers`'s FILE branch still calls Playwright's `set_input_files()`, which requires a real local path — that fallback value will not work. A real fix needs `submit()` to accept file *bytes* (via `resume.open()`/`.read()`) and write them to a temp file for the upload, not a path handed straight through. Not fixed here: this repo's storage backend is filesystem-based by default (`config/settings/base.py`'s `STORAGES`, S3 only when `AWS_STORAGE_BUCKET_NAME` is set) and untriggered in the current deployment; revisit before ever enabling S3 storage for `Profile.resume`.
+- **Duplicate rendered field labels silently collapse.** `field_mapping.FormSchema.by_label()` and `drafting.py`'s field-classification both key on label text; a live Greenhouse form with two identically-labeled questions (seen in the wild, e.g. two "Please explain" free-text fields) will silently merge into one answer. Fixing this needs a schema/answer key change (e.g. label + ordinal index) that touches `FormSchema`, `answers_payload`, and the edit view together — deferred rather than done as a quick patch.
+- **`edit_auto_apply_draft` has no atomic status guard.** `send_auto_apply_draft` uses a `filter(...).update(...)` guard against a concurrent double-send; `edit_auto_apply_draft` does a plain `save()` with no equivalent guard against a concurrent Send request racing an Edit request for the same draft. Low real-world likelihood (requires two near-simultaneous requests from the same user) and no data-corruption outcome (worst case: an edit is silently lost or applied to an already-sending draft), so deferred rather than blocking this slice.
+
 ---
 
 ## Context & Research

@@ -92,6 +92,39 @@ class TriggerAutoApplyTests(AutoApplyViewsTestCase):
         self.assertEqual(response.status_code, 405)
         mock_task.delay.assert_not_called()
 
+    @mock.patch("apps.web.views.draft_auto_apply")
+    def test_trigger_refuses_to_re_apply_when_job_application_already_applied(self, mock_task):
+        """Regression test: a real JobApplication already exists in Applied
+        status for this (user, job) -- re-triggering must not enqueue a
+        second real submission to the same employer."""
+        job = self._job()
+        JobApplication.objects.create(
+            user=self.alice, job=job, status=JobApplication.Status.APPLIED
+        )
+        client = self._client_for(self.alice)
+
+        response = client.post(reverse("trigger_auto_apply", args=[job.id]), follow=True)
+
+        mock_task.delay.assert_not_called()
+        self.assertRedirects(response, reverse("recommendations"))
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("already applied" in m.lower() for m in messages))
+
+    @mock.patch("apps.web.views.draft_auto_apply")
+    def test_trigger_refuses_to_re_apply_when_draft_already_applied(self, mock_task):
+        """Same guard, but via an AutoApplyDraft already in Applied status
+        rather than the JobApplication directly -- both are checked since
+        either can exist independently of the other in edge cases."""
+        job = self._job()
+        self._draft(self.alice, job, status=AutoApplyDraft.Status.APPLIED)
+        client = self._client_for(self.alice)
+
+        response = client.post(reverse("trigger_auto_apply", args=[job.id]), follow=True)
+
+        mock_task.delay.assert_not_called()
+        messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("already applied" in m.lower() for m in messages))
+
 
 class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
     def test_queue_empty_renders_without_error(self):
