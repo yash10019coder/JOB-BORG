@@ -1,7 +1,7 @@
 ---
 title: Auto-Apply First Slice (Greenhouse Only)
 type: feat
-status: active
+status: completed
 date: 2026-08-02
 origin: docs/brainstorms/2026-08-02-auto-apply-greenhouse-slice-requirements.md
 deepened: 2026-08-02
@@ -640,6 +640,24 @@ resolve_answer(question, resume_text, profile):
 - New third-party dependencies: `playwright` (+ its browser binary install step, likely a Dockerfile change), `anthropic` SDK, a resume-text-extraction library (U1), a file-storage backend (e.g. `django-storages`, U1 — no `FileField`/media storage exists in this codebase today, so this is genuinely new infrastructure, not a reused pattern), and eventually a CAPTCHA-solving vendor SDK/HTTP client (U5, once one is chosen).
 - Worth monitoring post-launch (feeds `/ce-compound` candidates per the learnings-researcher's recommendation): real form-shape-mismatch rate, CAPTCHA-challenge/block rate, and LLM `needs_review` rate — these numbers determine whether residential proxies or additional CAPTCHA-solving investment are warranted sooner than "later." Note `inspect()` calls are not deduplicated across users triggering auto-apply on the same popular job, so the measured challenge rate may run higher than a single-user baseline once real traffic concentrates on a handful of jobs — worth a look if the challenge rate is surprisingly high, before assuming the automation itself is under-performing.
 - Before general rollout (beyond this slice's initial build/testing): resolve the encryption-at-rest and data-retention Open Questions above, and address the privacy-policy/consent gap for third-party LLM data transfer flagged in Scope Boundaries — none of these block building this slice, but all three become materially more important once real users' resumes and work-authorization answers are actually stored.
+
+---
+
+## Post-Deploy Monitoring & Validation
+
+**Watch in the first weeks of real traffic:**
+- Form-shape-mismatch rate (`AutoApplyDraft.reason_code=schema_mismatch`) — high rate signals `field_mapping.SUPPORTED_FIELD_TYPES` is too narrow for real Greenhouse boards, not just a rare edge case.
+- CAPTCHA/bot-detection challenge rate (`reason_code=captcha_challenged`) — this slice ships no working `CaptchaSolver` vendor, so every challenge currently fails closed; this number is the primary input for deciding whether to prioritize a CAPTCHA vendor or residential proxies sooner than planned.
+- LLM `needs_review` rate on drafted answers — unexpectedly high rate suggests the confidence threshold or evidence-grounding check needs tuning.
+- `submit_auto_apply_draft` timeout/`SENDING_TIMEOUT` recovery rate — validates whether `AUTO_APPLY_SENDING_TIMEOUT_SECONDS` and the Celery soft/hard time limits are sized correctly for real submission latency (including CAPTCHA round trips).
+- Any occurrence of the sweep-race log line (`"was no longer SENDING (likely reset by the staleness sweep...)"`) in `submit_auto_apply_draft` — an early signal the timeout is set too aggressively relative to real submission duration.
+
+**Manual verification before considering this slice fully validated in production:**
+- Trigger, review, edit, and send one real auto-apply end-to-end against a live (non-fixture) Greenhouse job posting, confirming the `JobApplication` row lands in `Applied` and the employer-side submission is genuinely received.
+- Confirm a re-trigger attempt on that same now-Applied job is correctly blocked (the P0 fix in this slice) rather than silently drafting a duplicate.
+- Confirm resume upload succeeds under this deployment's actual storage backend (filesystem by default; flagged as a known gap under S3 — see Known Residuals above).
+
+**Known residuals to revisit** (see Known Residuals above for detail): S3/remote-storage resume upload, duplicate rendered field labels colliding, and `edit_auto_apply_draft`'s missing atomic status guard.
 
 ---
 
