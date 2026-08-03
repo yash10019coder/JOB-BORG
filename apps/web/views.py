@@ -13,6 +13,7 @@ from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from apps.applications.models import JobApplication
+from apps.auto_apply.greenhouse_form.field_mapping import FILE
 from apps.auto_apply.models import AutoApplyDraft
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
@@ -280,7 +281,20 @@ def edit_auto_apply_draft(request, pk):
     while f"label__{index}" in request.POST:
         label = request.POST[f"label__{index}"]
         value_field = f"value__{index}"
-        if label in answers and value_field in request.POST:
+        if (
+            label in answers
+            and value_field in request.POST
+            # A file-backed answer's "value" is a server-side path (or
+            # storage key) that GreenhouseFormClient._fill_answers later
+            # passes straight to Playwright's set_input_files() at send
+            # time. Letting this endpoint overwrite it with an arbitrary
+            # user-supplied string would let a user point their own
+            # submission at any file readable by the Celery worker and
+            # have it uploaded to a real employer -- file-type answers are
+            # therefore never editable here, only re-derived from Profile
+            # by re-drafting.
+            and answers[label].get("field_type") != FILE
+        ):
             answers[label]["value"] = request.POST[value_field]
             answers[label]["needs_review"] = False
         index += 1

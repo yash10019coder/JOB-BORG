@@ -23,14 +23,26 @@ from django.utils import timezone
 from apps.applications.models import JobApplication
 from apps.jobs.models import Job
 
+from .captcha.base import get_solver
 from .greenhouse_form.client import GreenhouseFormClient
 from .greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
+from .greenhouse_form.field_mapping import schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
+
+# Bounds how long a single submit_auto_apply_draft run may take (browser
+# automation + a possible CAPTCHA-solve round trip) -- deliberately shorter
+# than AUTO_APPLY_SENDING_TIMEOUT_SECONDS so a task that's genuinely running
+# long gets killed by Celery before the staleness sweep would otherwise
+# reset its still-in-flight draft to FAILED out from under it.
+_SUBMIT_SOFT_TIME_LIMIT_SECONDS = max(
+    30, settings.AUTO_APPLY_SENDING_TIMEOUT_SECONDS - 60
+)
+_SUBMIT_TIME_LIMIT_SECONDS = _SUBMIT_SOFT_TIME_LIMIT_SECONDS + 30
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +107,11 @@ def draft_auto_apply(user_id, job_id):
     return draft.pk
 
 
-@shared_task(name="apps.auto_apply.submit_auto_apply_draft")
+@shared_task(
+    name="apps.auto_apply.submit_auto_apply_draft",
+    time_limit=_SUBMIT_TIME_LIMIT_SECONDS,
+    soft_time_limit=_SUBMIT_SOFT_TIME_LIMIT_SECONDS,
+)
 def submit_auto_apply_draft(draft_id):
     """Drive the real Greenhouse submission for a `SENDING` `AutoApplyDraft`.
 
@@ -160,10 +176,16 @@ def submit_auto_apply_draft(draft_id):
     # (see services/drafting.py); GreenhouseFormClient.submit() only wants
     # label -> value.
     answers = {label: entry.get("value") for label, entry in (draft.answers or {}).items()}
+    expected_schema = schema_from_dict(draft.form_schema_snapshot)
 
     form_client = GreenhouseFormClient()
     try:
-        form_client.submit(job.source_url, answers)
+        form_client.submit(
+            job.source_url,
+            answers,
+            expected_schema=expected_schema,
+            captcha_solver=get_solver(),
+        )
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)
@@ -190,9 +212,31 @@ def submit_auto_apply_draft(draft_id):
             job=draft.job,
             defaults={"status": JobApplication.Status.APPLIED},
         )
-        draft.job_application = job_application
-        draft.status = AutoApplyDraft.Status.APPLIED
-        draft.save(update_fields=["job_application", "status", "updated_at"])
+        # Guard against sweep_stale_auto_apply_drafts having reset this
+        # draft to FAILED (stuck-SENDING recovery) while this submission
+        # was still genuinely in flight, not actually stuck -- an
+        # unconditional save() here would silently overwrite that FAILED
+        # back to APPLIED, and worse, mask that the timeout was too
+        # aggressive relative to how long a real submission can take.
+        updated = AutoApplyDraft.objects.filter(
+            pk=draft.pk, status=AutoApplyDraft.Status.SENDING
+        ).update(
+            job_application=job_application,
+            status=AutoApplyDraft.Status.APPLIED,
+            updated_at=timezone.now(),
+        )
+
+    if not updated:
+        logger.warning(
+            "submit_auto_apply_draft(draft_id=%s): submission succeeded and "
+            "JobApplication %s -> Applied, but the draft was no longer "
+            "SENDING (likely reset by the staleness sweep while this "
+            "submission was still in flight) -- draft status left as-is; "
+            "JobApplication is the source of truth for the real outcome.",
+            draft_id,
+            job_application.pk,
+        )
+        return draft.pk
 
     logger.info(
         "submit_auto_apply_draft(draft_id=%s): submission succeeded; JobApplication %s -> Applied.",

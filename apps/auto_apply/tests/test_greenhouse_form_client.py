@@ -214,6 +214,26 @@ class GreenhouseFormClientTests(SimpleTestCase):
         with self.assertRaises(GreenhouseFormChallenged):
             client.inspect(JOB_URL)
 
+    # -- unexpected-error wrapping ------------------------------------------
+
+    def test_inspect_unexpected_error_is_wrapped_as_greenhouse_form_error(self):
+        """A raw, unexpected error (a Playwright/browser failure, or any
+        other bug) during inspect() must surface as a typed
+        GreenhouseFormError rather than propagating raw -- otherwise it
+        would skip past draft_for()'s GreenhouseFormError handlers straight
+        to draft_auto_apply's catch-all, which persists no AutoApplyDraft
+        row at all, silently dropping the job with no trace in the review
+        queue."""
+        client = self._client(_fixture_html("greenhouse_standard_form.html"))
+        with patch.object(
+            GreenhouseFormClient, "_discover_schema", side_effect=RuntimeError("boom")
+        ):
+            with self.assertRaises(GreenhouseFormError) as ctx:
+                client.inspect(JOB_URL)
+        self.assertIn("Could not load the application form", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormChallenged)
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormSchemaMismatch)
+
     def test_submit_challenge_with_no_solver_raises_challenged_without_filling(self):
         client = self._client(_fixture_html("greenhouse_challenge_form.html"))
         with patch.object(GreenhouseFormClient, "_fill_answers") as fill_mock:
@@ -348,3 +368,59 @@ class SchemaMatchesTests(SimpleTestCase):
         a = FormSchema(fields=(FormField("Email", TEXT, True), FormField("Phone", TEXT, False)))
         b = FormSchema(fields=(FormField("Email", TEXT, True),))
         self.assertFalse(schema_matches(a, b))
+
+
+class SchemaSerializationTests(SimpleTestCase):
+    """`schema_to_dict`/`schema_from_dict` round-trip -- this is what lets
+    `AutoApplyDraft.form_schema_snapshot` be passed back to `submit()` as
+    `expected_schema` at send time (a plain JSONField dict/list/str shape,
+    no custom encoder)."""
+
+    def test_round_trip_preserves_all_field_data(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import (
+            schema_from_dict,
+            schema_to_dict,
+        )
+
+        original = FormSchema(
+            fields=(
+                FormField("Email", TEXT, True),
+                FormField("Auth", SINGLE_SELECT, True, ("Yes", "No")),
+                FormField("Stack", MULTI_SELECT, False, ("Python", "Go")),
+            )
+        )
+
+        restored = schema_from_dict(schema_to_dict(original))
+
+        self.assertEqual(restored, original)
+
+    def test_none_and_empty_input_return_none(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import schema_from_dict
+
+        self.assertIsNone(schema_from_dict(None))
+        self.assertIsNone(schema_from_dict({}))
+
+
+class ValidatedFilePathTests(SimpleTestCase):
+    """Direct unit coverage of the FILE-field defense-in-depth check --
+    the last line of defense before a value reaches Playwright's
+    `set_input_files()`, in case a bug or future code path ever lets a
+    bad value get this far (the primary defense is that
+    `edit_auto_apply_draft` refuses to let a user edit a FILE-type
+    answer at all -- see apps/web/views.py)."""
+
+    def test_existing_file_path_is_returned_resolved(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+            resolved = GreenhouseFormClient._validated_file_path(tmp.name, "Resume/CV")
+        self.assertEqual(resolved, Path(tmp.name).resolve())
+
+    def test_nonexistent_path_raises_greenhouse_form_error(self):
+        with self.assertRaises(GreenhouseFormError):
+            GreenhouseFormClient._validated_file_path(
+                "/nonexistent/path/resume.pdf", "Resume/CV"
+            )
+
+    def test_directory_path_raises_greenhouse_form_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(GreenhouseFormError):
+                GreenhouseFormClient._validated_file_path(tmpdir, "Resume/CV")

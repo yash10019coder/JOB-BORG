@@ -26,7 +26,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
-from apps.auto_apply.greenhouse_form.field_mapping import FormField
+from apps.auto_apply.greenhouse_form.field_mapping import FormField, schema_to_dict
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
 from apps.auto_apply.models import AutoApplyDraft
@@ -164,6 +164,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "needs_review": False,
                 "category": "standard",
                 "reason": "profile",
+                "field_type": form_field.field_type,
             }
         elif form_field.required:
             unanswerable_required.append(form_field.label)
@@ -189,6 +190,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "needs_review": resolved_answer.needs_review,
             "category": resolved_answer.category,
             "reason": resolved_answer.reason,
+            "field_type": form_field.field_type,
         }
 
     if unanswerable_required:
@@ -207,12 +209,23 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         )
 
     return _persist_draft(
-        user, job, status=AutoApplyDraft.Status.DRAFTED, answers=answers_payload
+        user,
+        job,
+        status=AutoApplyDraft.Status.DRAFTED,
+        answers=answers_payload,
+        form_schema_snapshot=schema_to_dict(schema),
     )
 
 
 def _persist_draft(
-    user, job, *, status, answers=None, exclusion_reason=None, reason_code=None
+    user,
+    job,
+    *,
+    status,
+    answers=None,
+    exclusion_reason=None,
+    reason_code=None,
+    form_schema_snapshot=None,
 ) -> AutoApplyDraft | None:
     """Create the `AutoApplyDraft` row, treating a violation of the
     conditional unique constraint (`uniq_autoapplydraft_user_job_active`)
@@ -229,6 +242,7 @@ def _persist_draft(
                 answers=answers or {},
                 exclusion_reason=exclusion_reason,
                 reason_code=reason_code,
+                form_schema_snapshot=form_schema_snapshot,
             )
     except IntegrityError:
         logger.info(

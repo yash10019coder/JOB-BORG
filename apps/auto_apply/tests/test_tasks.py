@@ -210,7 +210,10 @@ class SubmitAutoApplyDraftSuccessTests(SubmitAutoApplyDraftTaskTestCase):
         # submit() must be called with plain label -> value, not the full
         # {value, needs_review, category, reason} answer-metadata dict.
         mock_client_cls.return_value.submit.assert_called_once_with(
-            self.job.source_url, {"First Name": "Alice", "Email": "alice@example.com"}
+            self.job.source_url,
+            {"First Name": "Alice", "Email": "alice@example.com"},
+            expected_schema=None,
+            captcha_solver=None,
         )
 
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
@@ -253,9 +256,12 @@ class SubmitAutoApplyDraftSuccessTests(SubmitAutoApplyDraftTaskTestCase):
         draft = self._make_draft()
 
         # Force the second write inside the atomic block to blow up after the
-        # JobApplication upsert has already happened in-transaction.
+        # JobApplication upsert has already happened in-transaction. The
+        # draft's status transition is now a `QuerySet.update()` (see
+        # tasks.py), not `AutoApplyDraft.save()`, so that's what must be
+        # patched to simulate the failure.
         with patch(
-            "apps.auto_apply.models.AutoApplyDraft.save",
+            "django.db.models.query.QuerySet.update",
             side_effect=RuntimeError("boom"),
         ):
             with self.assertRaises(RuntimeError):
@@ -266,6 +272,41 @@ class SubmitAutoApplyDraftSuccessTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertFalse(JobApplication.objects.filter(user=self.user, job=self.job).exists())
         draft.refresh_from_db()
         self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_draft_reset_by_sweep_mid_submission_leaves_status_alone(self, mock_client_cls):
+        """Regression test: if `sweep_stale_auto_apply_drafts` resets a
+        draft's status away from SENDING (stuck-SENDING recovery) while this
+        submission was still genuinely in flight, the success path's
+        conditional `.update(...pk=draft.pk, status=SENDING...)` must not
+        clobber that back to APPLIED -- the JobApplication write is still
+        the source of truth for the real outcome, but the draft itself
+        should be left exactly as the sweep left it."""
+        draft = self._make_draft()
+
+        def _race_then_succeed(*args, **kwargs):
+            # Simulate the sweep racing in and marking the draft FAILED
+            # (stuck-SENDING recovery) while this submit() call -- the slow,
+            # real browser-automation step -- is still in flight.
+            AutoApplyDraft.objects.filter(pk=draft.pk).update(
+                status=AutoApplyDraft.Status.FAILED,
+                error_message="Submission timed out / recovered from stuck SENDING state.",
+            )
+            return SubmissionResult(success=True)
+
+        mock_client_cls.return_value.submit.side_effect = _race_then_succeed
+
+        result = submit_auto_apply_draft(draft.pk)
+
+        self.assertEqual(result, draft.pk)
+        draft.refresh_from_db()
+        # Left as the sweep set it -- not clobbered back to APPLIED.
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        # But the JobApplication write itself still happened -- it's the
+        # source of truth for the real-world outcome regardless of the
+        # draft's bookkeeping status.
+        job_application = JobApplication.objects.get(user=self.user, job=self.job)
+        self.assertEqual(job_application.status, JobApplication.Status.APPLIED)
 
 
 class SubmitAutoApplyDraftStalenessTests(SubmitAutoApplyDraftTaskTestCase):

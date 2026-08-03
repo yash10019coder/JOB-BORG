@@ -113,6 +113,18 @@ class AutoApplyDraft(models.Model):
         help_text="Resolved per-question answer set, including confidence/needs_review metadata.",
     )
     answers_schema_version = models.IntegerField(default=1)
+    form_schema_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "The Greenhouse application-page FormSchema (see "
+            "apps.auto_apply.greenhouse_form.field_mapping) captured at "
+            "draft time. Passed back to GreenhouseFormClient.submit() as "
+            "expected_schema at send time so the schema-drift check can "
+            "actually run -- without this, drift detection has no "
+            "baseline to compare the live page against."
+        ),
+    )
     exclusion_reason = models.TextField(
         null=True,
         blank=True,
