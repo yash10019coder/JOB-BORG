@@ -19,6 +19,7 @@ WORKDIR /app
 COPY requirements/ requirements/
 ARG REQUIREMENTS=requirements/dev.txt
 RUN pip install -r ${REQUIREMENTS}
+RUN python -m playwright install --with-deps chromium
 
 COPY . .
 

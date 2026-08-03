@@ -60,7 +60,7 @@ def signup(request):
 def profile(request):
     instance = request.user.profile  # always the requesting user's own profile
     if request.method == "POST":
-        form = ProfileForm(request.POST, instance=instance)
+        form = ProfileForm(request.POST, request.FILES, instance=instance)
         if form.is_valid():
             form.save()  # Profile post-save signal -> debounced rematch
             return redirect("recommendations")

@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Your job search profile</h1>
 <p class="muted">Set your criteria — saving refreshes your recommendations.</p>
-<form method="post">
+<form method="post" enctype="multipart/form-data">
     {% csrf_token %}
     {{ form.as_p }}
     <button type="submit">Save profile</button>
