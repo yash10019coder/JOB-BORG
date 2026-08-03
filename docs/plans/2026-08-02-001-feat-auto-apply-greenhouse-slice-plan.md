@@ -143,6 +143,12 @@ Three findings from the Tier-2 code review were consciously accepted rather than
 - Do the new sensitive fields (`Profile.resume`/`resume_text`, `ExplicitAnswer.answer_text`, `AutoApplyDraft.answers`) require field-level encryption at rest, or is the app's existing DB-level storage posture considered sufficient?
 - Does account/profile deletion cascade-delete `resume`, `resume_text`, and all `ExplicitAnswer`/`AutoApplyDraft` rows? Is there a way for a user to purge just their resume or explicit answers without deleting their whole profile?
 
+### From 2026-08-03 review
+
+- **Arbitrary File Exfiltration via User-Editable Resume Path in Answers JSON** — U7 (Send flow, submit_auto_apply_draft task, and staleness sweep) / Known Residuals (P0, security-lens, confidence 100)
+
+  The plan specifies that file upload fields (like resumes) store a filesystem path inside AutoApplyDraft.answers, which is submitted directly to Playwright's set_input_files() during browser automation in U7. In U8, users are granted whole-draft edit access via POST to modify the stored answers JSON payload without field-type restriction or path verification. An attacker can edit the draft's answer payload to set the file path value to a sensitive server file (such as .env, /etc/passwd, or application source code) on the Celery worker. When the draft is sent, Playwright will attach and submit that local server file to an employer's Greenhouse form, resulting in arbitrary file exfiltration and severe credential / data leakage. Furthermore, this fails under S3 remote file storage where calling .path throws an exception.
+
 ---
 
 ## Output Structure
