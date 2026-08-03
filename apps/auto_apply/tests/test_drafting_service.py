@@ -240,6 +240,58 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
         self.assertEqual(llm_client.calls, [])
 
 
+class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):
+    """A required custom question the LLM couldn't answer *because the LLM
+    call itself failed* (vendor outage, billing lockout, etc.) must not
+    silently exclude the whole draft the same way a genuinely unanswerable
+    question does -- the user gets a chance to fill it in via the review
+    queue (U8) instead. Contrast with `RequiredQuestionUnanswerableTests`
+    (hard-excluded category, never reaches the LLM) and
+    `NoResumeUploadedTests` (LLM ran fine but had nothing to cite -- a real
+    content judgment, not an infra failure)."""
+
+    def _schema_with_required_custom_question(self):
+        return FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="How many years of Python experience do you have?",
+                    field_type=TEXT,
+                    required=True,
+                ),
+            )
+        )
+
+    def test_llm_call_raising_drafts_for_manual_review_instead_of_excluding(self):
+        schema = self._schema_with_required_custom_question()
+        form_client = FakeFormClient(schema=schema)
+        llm_client = FakeLLMClient(raises=RuntimeError("credit balance too low"))
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["How many years of Python experience do you have?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["reason"], "llm_call_failed")
+
+    def test_llm_response_missing_this_question_drafts_for_manual_review(self):
+        # FakeLLMClient.infer() silently omits any question id absent from
+        # answers_by_id -- exercises MISSING_LLM_RESPONSE (partial-response
+        # failure) rather than LLM_CALL_FAILED (whole-batch failure).
+        schema = self._schema_with_required_custom_question()
+        form_client = FakeFormClient(schema=schema)
+        llm_client = FakeLLMClient(answers_by_id={})
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["How many years of Python experience do you have?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["reason"], "missing_llm_response")
+
+
 class SchemaMismatchTests(DraftingServiceTestCase):
     def test_inspect_raising_schema_mismatch_produces_excluded_draft(self):
         form_client = FakeFormClient(

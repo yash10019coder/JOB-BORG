@@ -36,6 +36,19 @@ from . import answer_resolution
 
 logger = logging.getLogger(__name__)
 
+# Resolution reasons that mean "the LLM pipeline itself failed to produce a
+# response" (vendor error, billing lockout, malformed batch reply) as
+# opposed to a content judgment about the question (insufficient evidence,
+# ungrounded, low confidence) or a deliberate policy exclusion (hard-excluded
+# category). Required fields landing here are routed to the user for manual
+# completion (see the loop below) rather than excluding the whole draft.
+_LLM_INFRA_FAILURE_REASONS = frozenset(
+    {
+        llm_base.ResolutionReason.LLM_CALL_FAILED,
+        llm_base.ResolutionReason.MISSING_LLM_RESPONSE,
+    }
+)
+
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
 # so it never shadows "First Name"/"Last Name", which are matched by their
@@ -179,9 +192,27 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     for resolved_answer in resolved:
         form_field = fields_by_label[resolved_answer.question_id]
         if not resolved_answer.answer:
-            # Falsy covers both `None` (hard-excluded / LLM-call-failed /
+            # Falsy covers `None` (hard-excluded / LLM-infra-failure /
             # missing-response) and `""` (e.g. `insufficient_evidence=True`
             # with no answer text) -- neither is a real answer to submit.
+            # A *required* field with an LLM-infra-failure reason is
+            # special-cased below rather than falling into the generic
+            # unanswerable-required bucket.
+            if resolved_answer.reason in _LLM_INFRA_FAILURE_REASONS and form_field.required:
+                # The LLM pipeline itself broke (vendor outage, billing
+                # lockout, malformed batch response) -- that's not a
+                # judgment that this question is unanswerable, so don't
+                # exclude the whole draft over it. Leave a blank,
+                # needs_review placeholder the user can fill in via the
+                # review queue (U8's edit_auto_apply_draft) before sending.
+                answers_payload[form_field.label] = {
+                    "value": "",
+                    "needs_review": True,
+                    "category": resolved_answer.category,
+                    "reason": resolved_answer.reason,
+                    "field_type": form_field.field_type,
+                }
+                continue
             if form_field.required:
                 unanswerable_required.append(form_field.label)
             continue
