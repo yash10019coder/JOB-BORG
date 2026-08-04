@@ -17,4 +17,8 @@ urlpatterns = [
     path("auto-apply/queue/", views.auto_apply_queue, name="auto_apply_queue"),
     path("auto-apply/drafts/<int:pk>/answers/", views.edit_auto_apply_draft, name="edit_auto_apply_draft"),
     path("auto-apply/drafts/<int:pk>/send/", views.send_auto_apply_draft, name="send_auto_apply_draft"),
+    path("settings/email-credential/", views.email_inbox_credential, name="email_inbox_credential"),
+    path("settings/email-credential/delete/", views.delete_email_inbox_credential, name="delete_email_inbox_credential"),
 ]
+
+
