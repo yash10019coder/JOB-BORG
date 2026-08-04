@@ -19,17 +19,23 @@ FILE = "file"
 # a native `<select>`. Greenhouse renders Country, Location, and most custom
 # single-choice questions this way -- see client.py's `_fill_combobox()`.
 COMBOBOX_SELECT = "combobox_select"
+# A group of individual `<input type=checkbox>` elements sharing one
+# `<fieldset><legend>` (Greenhouse's standard multi-select-question markup;
+# distinct from a native `<select multiple>`, which is MULTI_SELECT). Each
+# checkbox's own `<label for>` becomes one entry in `options` -- see
+# client.py's `_checkbox_group_field()`/`_fill_checkbox_group()`.
+CHECKBOX_GROUP = "checkbox_group"
 
 # Every field type this slice knows how to fill. A *required* rendered field
 # whose type falls outside this set is unsupported and drafting/submission
 # must fail closed (GreenhouseFormSchemaMismatch) rather than skip it.
 SUPPORTED_FIELD_TYPES = frozenset(
-    {TEXT, TEXTAREA, SINGLE_SELECT, MULTI_SELECT, FILE, COMBOBOX_SELECT}
+    {TEXT, TEXTAREA, SINGLE_SELECT, MULTI_SELECT, FILE, COMBOBOX_SELECT, CHECKBOX_GROUP}
 )
 
 # Field types that carry a discrete option set (used for select/checkbox-group
 # controls); relevant for the option-set comparison in schema_matches().
-_OPTION_BEARING_TYPES = frozenset({SINGLE_SELECT, MULTI_SELECT})
+_OPTION_BEARING_TYPES = frozenset({SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP})
 
 
 @dataclass(frozen=True)
