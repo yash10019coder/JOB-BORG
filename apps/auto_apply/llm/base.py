@@ -112,6 +112,7 @@ class AnswerInferenceClient(Protocol):
 # ---------------------------------------------------------------------------
 CLIENT_REGISTRY: dict[str, tuple[str, str]] = {
     "anthropic": ("apps.auto_apply.llm.anthropic_client", "AnthropicAnswerInferenceClient"),
+    "nvidia": ("apps.auto_apply.llm.nvidia_client", "NvidiaAnswerInferenceClient"),
 }
 
 
