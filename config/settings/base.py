@@ -217,6 +217,12 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# Dedicated Celery queue for Playwright submission tasks (U7 / D1)
+CELERY_TASK_ROUTES = {
+    "apps.auto_apply.submit_auto_apply_draft": {"queue": "auto_apply_submit"},
+}
+
+
 # ---------------------------------------------------------------------------
 # JobBorg domain constants
 # ---------------------------------------------------------------------------
@@ -269,8 +275,9 @@ AUTO_APPLY_CAPTCHA_API_KEY = env("AUTO_APPLY_CAPTCHA_API_KEY", default="")
 # FAILED. Well beyond the expected "seconds to over a minute" submission
 # round trip (including a possible CAPTCHA-solve attempt).
 AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
-    "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", default=300
+    "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", default=600
 )
+
 
 # ---------------------------------------------------------------------------
 # Auto-apply: submission debug artifacts (apps.auto_apply.greenhouse_form)
