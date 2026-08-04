@@ -16,7 +16,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
 
 from django.test import SimpleTestCase
 
@@ -693,3 +694,112 @@ class ValidatedFilePathTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaises(GreenhouseFormError):
                 GreenhouseFormClient._validated_file_path(tmpdir, "Resume/CV")
+
+
+class EmailVerificationProviderIntegrationTests(SimpleTestCase):
+    def test_no_provider_raises_no_inbox_credentials(self):
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+        mock_page.locator.side_effect = lambda sel: (
+            MagicMock(count=lambda: 1)
+            if "code" in sel
+            else MagicMock(count=lambda: 0, inner_text=lambda: "enter your verification code")
+        )
+        status_reg = MagicMock()
+        status_reg.count.return_value = 0
+        mock_page.get_by_role.return_value = status_reg
+
+        with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
+            client._confirm_success(mock_page, provider=None)
+
+        self.assertEqual(cm.exception.outcome, VerificationOutcome.NO_INBOX_CREDENTIALS)
+
+    def test_provider_returns_found_code_types_and_confirms(self):
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        code_input = MagicMock()
+        submit_btn = MagicMock()
+        status_reg = MagicMock()
+        status_reg.count.return_value = 0
+
+        call_count = {"val": 0}
+
+        def mock_locator(sel):
+            if "code" in sel:
+                return MagicMock(count=lambda: 1 if call_count["val"] == 0 else 0, first=code_input)
+            if "button" in sel or "input[type='submit']" in sel:
+                return MagicMock(first=submit_btn)
+            if sel == "body":
+                if call_count["val"] == 0:
+                    return MagicMock(inner_text=lambda: "enter your verification code")
+                return MagicMock(inner_text=lambda: "Thank you for applying")
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = mock_locator
+        mock_page.get_by_role.return_value = status_reg
+
+        def on_click():
+            call_count["val"] = 1
+
+        submit_btn.click.side_effect = on_click
+
+        mock_provider = MagicMock()
+        from apps.auto_apply.email_verification.base import CodeLookupResult
+        mock_provider.get_code.return_value = CodeLookupResult(
+            outcome=VerificationOutcome.FOUND, code="654321"
+        )
+
+        result = client._confirm_success(
+            mock_page, provider=mock_provider, deadline_monotonic=time.monotonic() + 300
+        )
+        self.assertTrue(result.success)
+        code_input.fill.assert_called_with("654321")
+
+    def test_post_code_failure_suppresses_debug_artifacts(self):
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = GreenhouseFormClient(
+                context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
+            )
+            mock_page = MagicMock()
+
+            code_input = MagicMock()
+            submit_btn = MagicMock()
+            submit_btn.click.side_effect = Exception("Page crash during submit")
+            status_reg = MagicMock()
+            status_reg.count.return_value = 0
+
+            mock_page.locator.side_effect = lambda sel: (
+                MagicMock(count=lambda: 1, first=code_input)
+                if "code" in sel
+                else (
+                    MagicMock(first=submit_btn)
+                    if "button" in sel
+                    else MagicMock(count=lambda: 0, inner_text=lambda: "enter your verification code")
+                )
+            )
+            mock_page.get_by_role.return_value = status_reg
+
+            mock_provider = MagicMock()
+            from apps.auto_apply.email_verification.base import CodeLookupResult
+            mock_provider.get_code.return_value = CodeLookupResult(
+                outcome=VerificationOutcome.FOUND, code="654321"
+            )
+
+            with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
+                client._confirm_success(
+                    mock_page, provider=mock_provider, deadline_monotonic=time.monotonic() + 300
+                )
+
+
+            self.assertEqual(cm.exception.outcome, VerificationOutcome.CODE_REJECTED)
+            self.assertIsNone(cm.exception.debug_artifacts)
+            self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
+
+
