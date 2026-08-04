@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Simulates a real Greenhouse-style confirmation: the SPA replaces the
+    // form with a plain confirmation view carrying no explicit
+    // role="status" (or any other ARIA live-region role) -- only
+    // human-readable text. This is what live verification against a real
+    // Greenhouse board found: the ARIA role="status" assumption never
+    // matches in production, so the client must also recognize a
+    // confirmation by its wording alone.
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.getElementById('app-root').innerHTML =
+        '<h1>Thanks for applying!</h1><p>We have received your application and will be in touch soon.</p>';
+    });
+  </script>
+</body>
+</html>
