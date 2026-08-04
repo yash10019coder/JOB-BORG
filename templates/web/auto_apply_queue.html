@@ -23,8 +23,14 @@
         </p>
 
         {% if draft.friendly_message %}
-        <p class="muted" role="status">{{ draft.friendly_message }}</p>
+        <p class="muted" role="status">
+            {{ draft.friendly_message }}
+            {% if draft.reason_code == "no_inbox_credentials" or draft.reason_code == "inbox_auth_failed" %}
+            <br><a href="{% url 'email_inbox_credential' %}">Manage email verification settings &rarr;</a>
+            {% endif %}
+        </p>
         {% endif %}
+
 
         {% if draft.answers %}
         <form method="post" action="{% url 'edit_auto_apply_draft' draft.id %}">

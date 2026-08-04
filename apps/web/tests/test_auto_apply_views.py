@@ -348,3 +348,59 @@ class SendAutoApplyDraftTests(AutoApplyViewsTestCase):
         response = Client().post(reverse("send_auto_apply_draft", args=[draft.id]))
         self.assertEqual(response.status_code, 302)
         self.assertIn(reverse("login"), response.url)
+
+
+class NewVerificationReasonCodeMessageTests(AutoApplyQueueViewTests):
+
+    def test_new_reason_codes_render_friendly_messages_and_links(self):
+        job = self._job()
+        client = self._client_for(self.alice)
+
+        test_cases = [
+            (
+                AutoApplyDraft.ReasonCode.NO_INBOX_CREDENTIALS,
+                "This employer requires email verification. Connect an inbox credential in your settings.",
+                True,
+            ),
+            (
+                AutoApplyDraft.ReasonCode.VERIFICATION_CODE_TIMEOUT,
+                "Verification email did not arrive in time. Please try sending again.",
+                False,
+            ),
+            (
+                AutoApplyDraft.ReasonCode.INBOX_AUTH_FAILED,
+                "Could not log into your connected inbox (App Password may be revoked). Please update your credentials in settings.",
+                True,
+            ),
+            (
+                AutoApplyDraft.ReasonCode.INBOX_UNAVAILABLE,
+                "Could not reach your email provider. Please try sending again.",
+                False,
+            ),
+            (
+                AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS,
+                "Multiple verification emails arrived. Please try sending again.",
+                False,
+            ),
+            (
+                AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED,
+                "Verification code was rejected by the employer. Please try sending again.",
+                False,
+            ),
+        ]
+
+        for code, expected_msg, expects_settings_link in test_cases:
+            AutoApplyDraft.objects.all().delete()
+            draft = self._draft(
+                self.alice,
+                job,
+                status=AutoApplyDraft.Status.FAILED,
+                reason_code=code,
+            )
+            response = client.get(reverse("auto_apply_queue"))
+            self.assertEqual(response.status_code, 200)
+            content = response.content.decode()
+            self.assertIn(expected_msg, content)
+            if expects_settings_link:
+                self.assertIn(reverse("email_inbox_credential"), content)
+
