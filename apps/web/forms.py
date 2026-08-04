@@ -47,10 +47,15 @@ class ProfileForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Seed the CSV text inputs from the instance's stored lists.
+        # Seed the CSV text inputs from the instance's stored lists. Must go
+        # through `self.initial` (form-level), not `self.fields[field].initial`
+        # -- BaseModelForm.__init__ above already populated `self.initial`
+        # from `model_to_dict(instance)` with the raw JSONField list, and
+        # that takes precedence over `field.initial` when the widget resolves
+        # its value, silently discarding a field-level-only assignment here.
         if self.instance and self.instance.pk:
             for field in _LIST_FIELDS:
-                self.fields[field].initial = ", ".join(getattr(self.instance, field) or [])
+                self.initial[field] = ", ".join(getattr(self.instance, field) or [])
         # `resume` writes must route through `Profile.set_resume()` (the one
         # call site that resets `resume_text` and enqueues parsing) rather
         # than the plain field assignment ModelForm.save() would otherwise

@@ -62,6 +62,44 @@ class AuthProfileTests(TestCase):
         self.assertEqual(profile.min_salary, 120000)
         self.assertEqual(profile.remote_pref, Profile.RemotePref.REMOTE_ONLY)
 
+    def test_profile_form_renders_list_fields_as_plain_csv_not_repr(self):
+        user = User.objects.create_user(username="dave", password="pw")
+        profile = user.profile
+        profile.target_titles = ["Backend Engineer", "Platform Engineer"]
+        profile.save(update_fields=["target_titles"])
+        self.client.force_login(user)
+
+        resp = self.client.get(reverse("profile"))
+
+        self.assertContains(resp, "Backend Engineer, Platform Engineer")
+        self.assertNotContains(resp, "[&#x27;Backend Engineer&#x27;")
+
+    def test_profile_list_fields_survive_repeated_untouched_saves(self):
+        user = User.objects.create_user(username="erin", password="pw")
+        profile = user.profile
+        profile.target_titles = ["Backend Engineer", "Platform Engineer"]
+        profile.save(update_fields=["target_titles"])
+        self.client.force_login(user)
+
+        for _ in range(3):
+            resp = self.client.get(reverse("profile"))
+            rendered_value = resp.context["form"]["target_titles"].value()
+            self.client.post(
+                reverse("profile"),
+                {
+                    "full_name": "",
+                    "headline": "",
+                    "target_titles": rendered_value,
+                    "target_tags": "",
+                    "target_locations": "",
+                    "excluded_employers": "",
+                    "remote_pref": Profile.RemotePref.ANY,
+                },
+            )
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.target_titles, ["Backend Engineer", "Platform Engineer"])
+
     def test_target_locations_normalized_on_save(self):
         user = User.objects.create_user(username="carol", password="pw")
         self.client.force_login(user)
