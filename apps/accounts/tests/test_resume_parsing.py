@@ -1,4 +1,4 @@
-"""Tests for apps.accounts.resume_parsing -- text extraction + the
+"""Tests for apps.accounts.tasks -- text extraction + the
 parse_resume Celery task (see U1 of
 docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md).
 
@@ -14,7 +14,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
 from apps.accounts.models import Profile
-from apps.accounts.resume_parsing import (
+from apps.accounts.tasks import (
     extract_resume_text,
     extract_text_from_docx,
     extract_text_from_pdf,

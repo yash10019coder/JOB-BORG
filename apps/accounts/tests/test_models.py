@@ -120,7 +120,7 @@ class ProfileResumeFieldTests(TestCase):
         upload = SimpleUploadedFile(
             "resume.txt", b"Experienced engineer", content_type="text/plain"
         )
-        with mock.patch("apps.accounts.resume_parsing.parse_resume.delay") as mock_delay:
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as mock_delay:
             self.profile.set_resume(upload)
 
         self.profile.refresh_from_db()
@@ -134,7 +134,7 @@ class ProfileResumeFieldTests(TestCase):
         upload = SimpleUploadedFile(
             "resume.txt", b"Fresh resume content", content_type="text/plain"
         )
-        with mock.patch("apps.accounts.resume_parsing.parse_resume.delay"):
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"):
             self.profile.set_resume(upload)
 
         self.profile.refresh_from_db()
