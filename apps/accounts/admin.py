@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Profile
+from .models import EmailInboxCredential, Profile
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -41,3 +41,15 @@ class ProfileAdmin(admin.ModelAdmin):
             return
 
         super().save_model(request, obj, form, change)
+
+
+@admin.register(EmailInboxCredential)
+class EmailInboxCredentialAdmin(admin.ModelAdmin):
+    list_display = ("user", "email_address", "is_active", "last_error_code", "updated_at")
+    search_fields = ("user__username", "email_address")
+    # The ciphertext must never be renderable or editable in admin, not even
+    # as ciphertext -- a visible field invites a future "just show it
+    # decrypted" mistake. `exclude`, not `readonly_fields`, since even the
+    # ciphertext shouldn't render at all (contrast ProfileAdmin's
+    # `readonly_fields = ("resume_text",)`, which is fine to display).
+    exclude = ("app_password_encrypted",)
