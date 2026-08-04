@@ -210,6 +210,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 "First Name",
                 "Email",
                 "Are you authorized to work?",
+                "Favorite Country",
                 "Resume/CV",
                 "Cover Letter",
                 "Which languages do you know?",
@@ -234,6 +235,36 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(checkbox_field.field_type, CHECKBOX_GROUP)
         self.assertTrue(checkbox_field.required)
         self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
+
+    def test_submit_combobox_prefers_option_starting_with_typed_value(self):
+        # Reproduces what live verification against a real Greenhouse board
+        # (Alpaca) found: typing "India" into a phone country-code combobox
+        # matches both "India +91" and "British Indian Ocean Territory
+        # +246" as a substring, and clicking the first DOM match (rather
+        # than the one that *starts with* the typed value) silently
+        # selected the wrong country.
+        client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        resume_path = self._tmpdir / "resume.pdf"
+        resume_path.write_bytes(b"%PDF-1.4 fake resume")
+
+        submit_client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Are you authorized to work?": "Yes",
+                "Favorite Country": "India",
+                "Resume/CV": str(resume_path),
+                "Which languages do you know?": ["Python"],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("Selected country: India", result.confirmation_text)
 
     def test_submit_fills_combobox_and_distinct_file_fields(self):
         client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
@@ -287,6 +318,20 @@ class GreenhouseFormClientTests(SimpleTestCase):
         client = self._client(_fixture_html("greenhouse_challenge_form.html"))
         with self.assertRaises(GreenhouseFormChallenged):
             client.inspect(JOB_URL)
+
+    def test_inspect_invisible_recaptcha_badge_is_not_treated_as_challenged(self):
+        # Reproduces what live verification against a real Greenhouse board
+        # (Alpaca) found: reCAPTCHA v3/Enterprise's always-present
+        # background-scoring badge renders an iframe with `title=
+        # "reCAPTCHA"` -- matching the title-based half of
+        # `_challenge_detected()`'s selector -- even though its `src` marks
+        # it `size=invisible` (no interactive challenge, nothing blocking
+        # submission). A prior version excluded `size=invisible` only from
+        # the src-based selector clause, not the title-based one, so this
+        # badge still tripped a false GreenhouseFormChallenged.
+        client = self._client(_fixture_html("greenhouse_invisible_recaptcha_badge_form.html"))
+        schema = client.inspect(JOB_URL)
+        self.assertIn("First Name", schema.by_label())
 
     # -- unexpected-error wrapping ------------------------------------------
 

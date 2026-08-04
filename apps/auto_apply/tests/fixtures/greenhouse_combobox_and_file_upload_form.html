@@ -39,6 +39,28 @@
       </div>
 
       <!--
+        Reproduces the real Greenhouse phone country-code combobox, with
+        two options that both substring-match a search of "India" (one of
+        them, "British Indian Ocean Territory", only because it contains
+        the word "Indian") -- verified live against a real Greenhouse board
+        (Alpaca) that picking the first substring match rather than the one
+        that *starts with* the typed value silently selects the wrong
+        country.
+      -->
+      <div class="field">
+        <label id="fav_country-label" for="fav_country">Favorite Country</label>
+        <input
+          type="text"
+          id="fav_country"
+          role="combobox"
+          aria-labelledby="fav_country-label"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="fav_country-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <!--
         Reproduces the real Greenhouse file-upload widget: the actual
         <input type=file> is labelled "Attach" (generic, identical across
         both fields) via a visually-hidden <label>, while the
@@ -80,10 +102,9 @@
     // options; typing filters it; clicking an option selects it, updates
     // aria-invalid, and closes the menu -- mirrors the interaction
     // contract verified live against a real Greenhouse board.
-    (function () {
-      var input = document.getElementById('work_auth');
-      var listbox = document.getElementById('work_auth-listbox');
-      var options = ['Yes', 'No'];
+    function initCombobox(inputId, listboxId, options) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
 
       function render(filterText) {
         listbox.innerHTML = '';
@@ -111,12 +132,21 @@
         listbox.hidden = false;
         render(input.value);
       });
-    })();
+    }
+
+    initCombobox('work_auth', 'work_auth-listbox', ['Yes', 'No']);
+    // Order matches the real Alpaca page: the non-matching-prefix decoy
+    // renders *before* "India" in the filtered listbox, so a naive
+    // `options.first` pick (rather than a starts-with preference) would
+    // select the wrong one.
+    initCombobox('fav_country', 'fav_country-listbox', ['British Indian Ocean Territory', 'India']);
 
     document.getElementById('application-form').addEventListener('submit', function (e) {
       e.preventDefault();
+      var selectedCountry = document.getElementById('fav_country').dataset.value || '';
       document.body.innerHTML =
-        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+        '<div role="status">Thanks for applying! Your application was submitted successfully. ' +
+        'Selected country: ' + selectedCountry + '</div>';
     });
   </script>
 </body>
