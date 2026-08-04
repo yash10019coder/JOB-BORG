@@ -10,7 +10,7 @@ site instead. `CELERY_TASK_ALWAYS_EAGER` (test settings) makes `.delay()`
 run synchronously, so tasks are simply called directly here.
 """
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -97,6 +97,7 @@ class DraftAutoApplyEndToEndTests(DraftAutoApplyTaskTestCase):
         self.assertEqual(draft.answers["Last Name"]["value"], "Smith")
         self.assertEqual(draft.answers["Email"]["value"], "alice@example.com")
 
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
     @patch("apps.auto_apply.services.drafting.llm_base.get_client")
     @patch("apps.auto_apply.services.drafting.GreenhouseFormClient")
     def test_task_runs_via_delay_under_eager_celery(self, mock_form_client_cls, mock_get_client):
@@ -107,6 +108,7 @@ class DraftAutoApplyEndToEndTests(DraftAutoApplyTaskTestCase):
 
         self.assertEqual(AutoApplyDraft.objects.filter(user=self.user, job=self.job).count(), 1)
         self.assertIsNotNone(async_result.result)
+
 
 
 class DraftAutoApplyConcurrentTriggerTests(DraftAutoApplyTaskTestCase):
@@ -214,7 +216,11 @@ class SubmitAutoApplyDraftSuccessTests(SubmitAutoApplyDraftTaskTestCase):
             {"First Name": "Alice", "Email": "alice@example.com"},
             expected_schema=None,
             captcha_solver=None,
+            email_code_provider=None,
+            deadline_monotonic=ANY,
+
         )
+
 
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_existing_saved_job_application_is_upserted_to_applied(self, mock_client_cls):
