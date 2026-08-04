@@ -286,6 +286,22 @@ AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
 )
 
 # ---------------------------------------------------------------------------
+# Credential encryption (apps.accounts.crypto) -- at-rest encryption for
+# stored secrets (starting with the IMAP app password used to auto-solve
+# Greenhouse's post-submit email verification, see
+# docs/plans/2026-08-04-001-feat-auto-apply-greenhouse-email-verification-plan.md).
+# A list of urlsafe-base64 Fernet keys: the first encrypts, and
+# `MultiFernet` tries all of them in order when decrypting, so rotation is
+# "prepend a new key, keep the old one(s) until every ciphertext has been
+# re-encrypted." No default beyond an empty list, and deliberately NOT
+# derived from SECRET_KEY (which has an insecure dev default above) --
+# encrypt_secret()/decrypt_secret() raise ImproperlyConfigured if this is
+# unset, rather than silently using a weak key. Generate a key with
+# apps.accounts.crypto.generate_key().
+# ---------------------------------------------------------------------------
+CREDENTIAL_ENCRYPTION_KEYS = env.list("CREDENTIAL_ENCRYPTION_KEYS", default=[])
+
+# ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
 # ---------------------------------------------------------------------------
 CACHES = {
