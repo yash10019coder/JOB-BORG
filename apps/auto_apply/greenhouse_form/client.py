@@ -37,6 +37,7 @@ from .exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormVerificationFailed,
 )
 from .field_mapping import (
     CHECKBOX_GROUP,
@@ -92,6 +93,58 @@ _CONFIRMATION_TEXT_PATTERNS = (
     "we've received your application",
     "we have received your application",
     "your application was submitted",
+)
+
+# Selector for a "code-entry control" -- one of the two independent signals
+# `_verification_interstitial_detected()` requires (see below) to recognize
+# Greenhouse's post-submit email-verification interstitial.
+#
+# UNVERIFIED as of this unit: the plan's original report of this interstitial
+# was a screenshot only, and (per the plan's U5 execution note and Risks
+# section) a live capture of the real DOM is still pending -- these
+# selectors are a reasonable guess assembled from standard OTP-input
+# markup conventions, not a confirmed pattern against a real Greenhouse
+# board:
+#   - `autocomplete="one-time-code"` is the WHATWG-standardized attribute
+#     value browsers use to offer OTP autofill/suggestions.
+#   - `inputmode="numeric"` is the standard hint for a numeric-only virtual
+#     keyboard, which a 6-digit code field would plausibly carry.
+#   - `name`/`id`/`placeholder` containing "code" is a last-resort proxy for
+#     "a text/number input whose associated label matches a code-like
+#     pattern" -- matching by attribute rather than resolving each input's
+#     accessible label keeps this cheap, at the cost of also matching
+#     unrelated fields like "zip_code" (acceptable here only because this
+#     signal is never trusted alone -- see the confirming-copy requirement
+#     below).
+# Must be replaced/confirmed once a real interstitial page is captured.
+_VERIFICATION_CODE_INPUT_SELECTOR = (
+    'input[autocomplete="one-time-code" i], '
+    'input[inputmode="numeric" i], '
+    'input[type="text"][name*="code" i], '
+    'input[type="text"][id*="code" i], '
+    'input[type="text"][placeholder*="code" i], '
+    'input[type="number"][name*="code" i], '
+    'input[type="number"][id*="code" i], '
+    'input[type="number"][placeholder*="code" i]'
+)
+
+# The other independent signal `_verification_interstitial_detected()`
+# requires: confirming copy for the verification interstitial, mirroring
+# `_CONFIRMATION_TEXT_PATTERNS`'s multi-phrase, substring-match precedent
+# rather than a single regex. Deliberately overlaps in spirit with ordinary
+# success copy (e.g. "check your email") -- that's exactly why detection
+# requires this AND a code-entry control, not either alone; a single-signal
+# check here would be the same false-positive class as the reCAPTCHA-v3
+# background-scoring badge already fixed once in `_challenge_detected()`.
+_VERIFICATION_TEXT_PATTERNS = (
+    "verification code",
+    "we sent a code",
+    "we've sent a code",
+    "we have sent a code",
+    "check your email",
+    "confirm your email",
+    "enter the code",
+    "enter your code",
 )
 
 
@@ -238,6 +291,11 @@ class GreenhouseFormClient:
                 ``expected_schema``, or a required field is unsupported.
             GreenhouseFormSubmissionFailed: the form was submitted but no
                 success signal was found.
+            GreenhouseFormVerificationFailed: the form was submitted but
+                Greenhouse's post-submit email-verification interstitial
+                was detected instead of a success signal. As of this unit,
+                this is detection-only -- no code-entry/email-polling
+                recovery is attempted.
         """
         self._validate_url(job_url)
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
@@ -267,7 +325,11 @@ class GreenhouseFormClient:
                 self._fill_answers(page, schema_now, answers)
                 self._click_submit(page)
                 result = self._confirm_success(page)
-            except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
+            except (
+                GreenhouseFormChallenged,
+                GreenhouseFormSchemaMismatch,
+                GreenhouseFormVerificationFailed,
+            ):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
                 self._raise_with_debug_artifacts(
@@ -778,17 +840,40 @@ class GreenhouseFormClient:
         submit_button.first.click()
 
     def _confirm_success(self, page) -> SubmissionResult | None:
-        """Poll for a post-submit success signal until ``confirmation_timeout_ms``
-        elapses, checking every signal in ``_check_success_signal`` each pass
-        rather than waiting out a full timeout on one selector before trying
-        the next -- keeps the worst-case (genuine failure) wait bounded by a
-        single timeout budget instead of one per signal.
+        """Poll for a post-submit outcome until ``confirmation_timeout_ms``
+        elapses -- a three-way classifier (success / verification-required /
+        neither-yet) evaluated once per pass under this ONE shared deadline,
+        rather than a separate timeout per signal:
+
+        1. Success (``_check_success_signal``) -- checked first, every
+           pass. Success always wins a tie against the verification signal
+           below, so page copy that happens to overlap with verification
+           phrasing (e.g. a success page saying "check your email for next
+           steps") can never be misclassified as the interstitial.
+        2. The verification interstitial (``_verification_interstitial_detected``)
+           -- checked only when success didn't match this pass. Raises
+           immediately on detection rather than waiting out the rest of the
+           budget: unlike a genuine failure (which might still resolve to
+           success on a later pass, e.g. a slow redirect), the interstitial
+           is a stable, terminal page state once rendered.
+        3. Neither yet -- keep polling until the deadline, same as before.
+
+        Returns ``None`` (a plain "no signal found" -- ``submit()`` raises
+        ``GreenhouseFormSubmissionFailed``) when the deadline elapses with
+        neither classified.
         """
         deadline = time.monotonic() + (self.confirmation_timeout_ms / 1000)
         while True:
             result = self._check_success_signal(page)
             if result is not None:
                 return result
+            if self._verification_interstitial_detected(page):
+                self._raise_with_debug_artifacts(
+                    GreenhouseFormVerificationFailed,
+                    "Greenhouse verification-code interstitial detected; no "
+                    "verification-code provider configured",
+                    page,
+                )
             if time.monotonic() >= deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
@@ -813,6 +898,26 @@ class GreenhouseFormClient:
                 return SubmissionResult(success=True, confirmation_text=phrase)
 
         return None
+
+    @staticmethod
+    def _verification_interstitial_detected(page) -> bool:
+        """Detect Greenhouse's post-submit email-verification interstitial.
+
+        Requires BOTH of two independent signals -- a code-entry control
+        AND confirming copy -- never either alone. A lone numeric-shaped
+        input (a phone/zip/reference-number field) or lone "check your
+        email"-shaped copy (some genuine success confirmations use nearly
+        that phrase) is each independently plausible on an ordinary page;
+        only both together is a safe signal. This mirrors
+        ``_challenge_detected()``'s own precedent for exactly this class of
+        bug: that selector originally false-positived on reCAPTCHA v3's
+        always-present background-scoring badge before being narrowed.
+        """
+        code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
+        if code_input.count() == 0:
+            return False
+        body_text = page.locator("body").inner_text().lower()
+        return any(phrase in body_text for phrase in _VERIFICATION_TEXT_PATTERNS)
 
     # -- failure debugging --------------------------------------------------
 

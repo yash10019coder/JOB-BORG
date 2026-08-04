@@ -56,3 +56,20 @@ class GreenhouseFormSubmissionFailed(GreenhouseFormError):
     success signal never appears (rejected submission, validation error
     surfaced by the page, or an unrecognized post-submit state).
     """
+
+
+class GreenhouseFormVerificationFailed(GreenhouseFormError):
+    """Greenhouse's post-submit email-verification interstitial was detected.
+
+    Some Greenhouse boards email the candidate a 6-digit code after the
+    application form is submitted, which must be entered into a follow-up
+    form before the application is truly accepted. As of this unit,
+    ``submit()`` only *detects* this interstitial (a distinct, typed
+    outcome, never confused with success or with
+    ``GreenhouseFormSubmissionFailed``) -- it has not attempted any
+    recovery, since no code-entry/email-polling mechanism is wired up yet.
+    A later unit adds an ``outcome`` attribute here (one exception carrying
+    an outcome enum, covering the full detect/poll/enter/confirm taxonomy)
+    once that recovery flow exists; keep this minimal and correctly shaped
+    as a peer of ``GreenhouseFormChallenged`` until then.
+    """

@@ -13,6 +13,7 @@ To run these for real:
 """
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormVerificationFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP,
@@ -465,6 +467,133 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertIsNotNone(artifacts)
         self.assertTrue(Path(artifacts.screenshot_path).exists())
         self.assertTrue(Path(artifacts.accessibility_tree_path).exists())
+
+    # -- verification interstitial detection (U5) ---------------------------
+
+    def test_submit_verification_interstitial_raises_verification_failed(self):
+        # Happy path (U5 scope): a code-entry control (autocomplete=
+        # "one-time-code" + inputmode="numeric") AND confirming copy ("We
+        # sent a verification code...") are both present -> a distinct,
+        # typed outcome, not success and not GreenhouseFormSubmissionFailed.
+        client = self._client(_fixture_html("greenhouse_email_verification_form.html"))
+        with self.assertRaises(GreenhouseFormVerificationFailed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormSubmissionFailed)
+
+    def test_submit_normal_success_fixture_still_resolves_as_success(self):
+        # Regression guard: an ordinary success fixture must remain
+        # unaffected by the new verification-interstitial branch.
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Last Name": "Lovelace",
+                "Email": "ada@example.com",
+                "Phone": "555-0100",
+                "Resume/CV": str(self._resume_file()),
+                "Why do you want to work here?": "Because I love hard problems.",
+                "Are you legally authorized to work in the US?": "Yes",
+                "Which of the following technologies have you used professionally?": [
+                    "Python",
+                    "Go",
+                ],
+            },
+            expected_schema=schema,
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_success_wins_tie_against_verification_lookalike_signals(self):
+        # Tie-break: success copy overlapping a verification phrase ("check
+        # your email for next steps") PLUS a stray numeric input elsewhere
+        # on the page must still classify as success -- success is checked
+        # first, every pass.
+        client = self._client(
+            _fixture_html("greenhouse_success_with_verification_lookalike_form.html")
+        )
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_validation_error_page_unchanged_submission_failed(self):
+        # A genuine validation-error page (no verification markup at all)
+        # must keep raising the existing GreenhouseFormSubmissionFailed,
+        # unaffected by the new classifier branch.
+        client = self._client(
+            _fixture_html("greenhouse_submission_rejected_form.html"),
+            confirmation_timeout_ms=500,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+
+    def test_submit_numeric_input_without_verification_copy_is_submission_failed(self):
+        # A numeric-shaped input present with NO verification copy
+        # alongside it is only one of the two required signals -> falls
+        # through to the existing GreenhouseFormSubmissionFailed, exactly
+        # like the reCAPTCHA-v3 single-signal false positive this codebase
+        # already fixed once.
+        client = self._client(
+            _fixture_html("greenhouse_stray_numeric_input_no_verification_copy_form.html"),
+            confirmation_timeout_ms=500,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+
+    def test_submit_neither_signal_respects_single_shared_timeout_budget(self):
+        # Worst-case timing: a page matching neither success nor
+        # verification must still respect the EXISTING poll/timeout
+        # budget -- the verification check must not add a second, separate
+        # timeout on top of it.
+        client = self._client(
+            _fixture_html("greenhouse_submission_rejected_form.html"),
+            confirmation_timeout_ms=500,
+        )
+        start = time.monotonic()
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+        elapsed = time.monotonic() - start
+        # Generous upper bound: comfortably under 2x the configured
+        # confirmation_timeout_ms (which would indicate a second, separate
+        # wait being added for the verification check), with slack for
+        # real browser/navigation overhead.
+        self.assertLess(elapsed, 3.0)
 
     # -- hostname allowlist -------------------------------------------------
 
