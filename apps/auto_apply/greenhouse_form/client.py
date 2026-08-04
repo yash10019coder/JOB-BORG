@@ -71,6 +71,7 @@ _DEFAULT_CONFIRMATION_TIMEOUT_MS = 10_000
 _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
 _COMBOBOX_OPTION_TIMEOUT_MS = 5_000
+_SETTLE_TIMEOUT_MS = 5_000
 
 # Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
 # successful submission. Verified against a live Greenhouse board
@@ -183,7 +184,7 @@ class GreenhouseFormClient:
 
         def _run(page):
             try:
-                page.goto(job_url, wait_until="domcontentloaded")
+                self._goto_and_settle(page, job_url)
                 if self._challenge_detected(page):
                     raise GreenhouseFormChallenged(
                         f"Bot-detection challenge present on {job_url}; inspect() "
@@ -242,7 +243,7 @@ class GreenhouseFormClient:
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
 
         def _run(page):
-            page.goto(job_url, wait_until="domcontentloaded")
+            self._goto_and_settle(page, job_url)
 
             if self._challenge_detected(page):
                 self._attempt_captcha_solve(page, job_url, solver)
@@ -285,6 +286,42 @@ class GreenhouseFormClient:
 
         return self._with_fresh_page(_run)
 
+    # -- navigation ---------------------------------------------------------
+
+    @staticmethod
+    def _goto_and_settle(page, job_url: str) -> None:
+        """Navigate to `job_url` and give the page's JS framework a bounded
+        window to finish hydrating before any caller starts interacting
+        with it.
+
+        `wait_until="domcontentloaded"` alone resolves once the raw HTML is
+        parsed, but before frameworks like React finish hydrating. Verified
+        live against a real Greenhouse board (Alpaca, a Remix/React app)
+        that acting immediately -- clicking into a combobox field -- can
+        land while React is still hydrating a Suspense boundary around it,
+        throwing React's own internal error #426 ("Suspense boundary
+        received an update before it finished hydrating") and permanently
+        corrupting that widget's JS state for the rest of the page's life
+        (every subsequent interaction, any text, renders zero options from
+        then on).
+
+        `wait_until="networkidle"` on the initial `goto()` fixes this but
+        is unsafe as the *primary* wait condition: verified live, on the
+        same real page, that it can hang for the full navigation timeout
+        when some request never quiesces (an analytics beacon, a long-poll,
+        etc.) -- turning a working page into a hard failure. So `goto()`
+        itself still only waits for `domcontentloaded` (fast, always
+        resolves), and the network-idle wait afterward is capped at its own
+        short, independent timeout and treated as best-effort: if the page
+        never truly goes idle, proceeding anyway is still strictly better
+        than the pre-fix behavior of not waiting at all.
+        """
+        page.goto(job_url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_load_state("networkidle", timeout=_SETTLE_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001 -- best-effort settle, not a hard requirement
+            pass
+
     # -- URL validation ---------------------------------------------------
 
     def _validate_url(self, job_url: str) -> None:
@@ -312,8 +349,18 @@ class GreenhouseFormClient:
 
     @staticmethod
     def _challenge_detected(page) -> bool:
+        # Excludes `size=invisible` reCAPTCHA iframes: verified live against
+        # a real Greenhouse board (Alpaca) that its always-present
+        # background-scoring v3/Enterprise badge -- reCAPTCHA's own term
+        # for "no interactive challenge shown to the user" -- renders an
+        # iframe matching a plain `src*="recaptcha"` selector. Treating
+        # that as a blocking challenge would report every such board as
+        # challenged even though nothing is actually blocking submission;
+        # only an iframe *without* that marker (a real interactive
+        # checkbox/image challenge) should count.
         recaptcha_iframe = page.locator(
-            'iframe[src*="recaptcha" i], iframe[title*="recaptcha" i]'
+            'iframe[src*="recaptcha" i]:not([src*="size=invisible"]), '
+            'iframe[title*="recaptcha" i]:not([src*="size=invisible"])'
         )
         recaptcha_markup = page.locator(".g-recaptcha, #recaptcha, [data-sitekey]")
         return recaptcha_iframe.count() > 0 or recaptcha_markup.count() > 0
@@ -627,14 +674,38 @@ class GreenhouseFormClient:
         """
         control.click()
         control.fill(value)
-        option = page.get_by_role("option", name=value, exact=False)
+        options = page.get_by_role("option", name=value, exact=False)
         try:
-            option.first.wait_for(state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS)
+            options.first.wait_for(state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS)
         except Exception as exc:  # noqa: BLE001 -- convert to typed submission failure
             raise GreenhouseFormSubmissionFailed(
                 f"No matching option for {value!r} found in combobox field {label!r}."
             ) from exc
-        option.first.click()
+        self._best_option_match(options, value).click()
+
+    @staticmethod
+    def _best_option_match(options, value: str):
+        """Among every option whose text substring-matches `value`, prefer
+        one whose text *starts with* it.
+
+        Verified live against a real Greenhouse board (Alpaca): typing
+        "India" into the phone country-code combobox matches both "India
+        +91" and "British Indian Ocean Territory +246" -- both contain
+        "india" as a substring -- and picking `options.first` (DOM order)
+        landed on the wrong one. Only "India +91" starts with the typed
+        value, so that heuristic disambiguates correctly; falls back to the
+        first match when no option starts with it (e.g. mid-word answers).
+        """
+        count = options.count()
+        if count <= 1:
+            return options.first
+        needle = value.strip().lower()
+        for i in range(count):
+            candidate = options.nth(i)
+            text = (candidate.text_content() or "").strip().lower()
+            if text.startswith(needle):
+                return candidate
+        return options.first
 
     @staticmethod
     def _fill_checkbox_group(page, fieldset, value: Any, label: str) -> None:
