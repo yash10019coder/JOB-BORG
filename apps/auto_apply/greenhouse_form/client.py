@@ -39,6 +39,7 @@ from .exceptions import (
     GreenhouseFormSubmissionFailed,
 )
 from .field_mapping import (
+    COMBOBOX_SELECT,
     FILE,
     MULTI_SELECT,
     SINGLE_SELECT,
@@ -68,6 +69,7 @@ _DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000
 _DEFAULT_CONFIRMATION_TIMEOUT_MS = 10_000
 _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
+_COMBOBOX_OPTION_TIMEOUT_MS = 5_000
 
 # Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
 # successful submission. Verified against a live Greenhouse board
@@ -337,19 +339,40 @@ class GreenhouseFormClient:
 
     def _discover_schema(self, page, job_url: str) -> FormSchema:
         fields: list[FormField] = []
-        label_texts = [self._clean_label(t) for t in page.locator("form label").all_text_contents()]
-        for label_text in label_texts:
+        seen_control_ids: set[str] = set()
+        labels = page.locator("form label")
+        for i in range(labels.count()):
+            label_el = labels.nth(i)
+            label_text = self._clean_label(label_el.text_content() or "")
             if not label_text:
                 continue
-            control = page.get_by_label(label_text, exact=True)
-            if control.count() == 0:
+            control = self._resolve_control_for_label(page, label_el)
+            if control is None or control.count() == 0:
                 continue
             control = control.first
+            control_id = control.get_attribute("id") or ""
+            if control_id:
+                if control_id in seen_control_ids:
+                    # A second <label> pointing at a control already captured
+                    # (e.g. a stray duplicate `for`) -- not a new field.
+                    continue
+                seen_control_ids.add(control_id)
             field_type = self._classify_field_type(control)
+            if field_type == FILE:
+                # Greenhouse's file-upload widget labels the real <input
+                # type=file> with generic, indistinguishable text (both
+                # Resume/CV and Cover Letter render a visually-hidden
+                # <label>Attach</label>) -- the human-meaningful name lives
+                # on the surrounding group instead. Prefer it when present.
+                label_text = self._group_label_for(control) or label_text
             required = self._is_required(control)
-            options = self._extract_options(control, field_type)
+            options = self._extract_options(page, control, field_type)
             form_field = FormField(
-                label=label_text, field_type=field_type, required=required, options=options
+                label=label_text,
+                field_type=field_type,
+                required=required,
+                options=options,
+                control_id=control_id,
             )
             if required and not form_field.is_supported:
                 raise GreenhouseFormSchemaMismatch(
@@ -358,6 +381,52 @@ class GreenhouseFormClient:
                 )
             fields.append(form_field)
         return FormSchema(fields=tuple(fields))
+
+    @staticmethod
+    def _resolve_control_for_label(page, label_el):
+        """Resolve a `<label>` element's associated control.
+
+        Deliberately *not* `page.get_by_label(text, exact=True)`: verified
+        live against a real Greenhouse board that for a control carrying
+        both a native `for`/`id` association *and* `aria-labelledby` (its
+        react-select-style Country/Location/custom-select widgets), Playwright
+        matches `get_by_label(exact=True)` against the label's raw
+        textContent -- including its `aria-hidden="true"` required-asterisk
+        span -- rather than the ARIA-computed accessible name (which
+        correctly excludes it). Since `_clean_label()` always strips that
+        asterisk, the exact-text lookup silently matched zero elements for
+        every such field, and `_discover_schema()` dropped them from the
+        schema entirely. Resolving via the label's own `for`/id (or a
+        control nested directly inside it) sidesteps that text-matching
+        quirk altogether.
+        """
+        for_id = label_el.get_attribute("for")
+        if for_id:
+            control = page.locator(f'[id="{for_id}"]')
+            return control if control.count() > 0 else None
+        nested = label_el.locator("input, select, textarea")
+        return nested if nested.count() > 0 else None
+
+    @staticmethod
+    def _group_label_for(control):
+        """For a FILE control wrapped in a `role="group"` with its own
+        `aria-labelledby` (Greenhouse's upload widget), return that group's
+        label text -- the descriptive "Resume/CV"/"Cover Letter" name,
+        rather than the generic "Attach" text on the control's own
+        (visually-hidden) `<label>`. Returns `None` if no such group/label
+        is found, leaving the caller's original label text untouched.
+        """
+        group = control.locator("xpath=ancestor::*[@role='group'][@aria-labelledby][1]")
+        if group.count() == 0:
+            return None
+        labelledby_id = group.first.get_attribute("aria-labelledby")
+        if not labelledby_id:
+            return None
+        label_el = control.page.locator(f'[id="{labelledby_id}"]')
+        if label_el.count() == 0:
+            return None
+        text = GreenhouseFormClient._clean_label(label_el.first.text_content() or "")
+        return text or None
 
     @staticmethod
     def _clean_label(text: str) -> str:
@@ -375,6 +444,8 @@ class GreenhouseFormClient:
             input_type = control.get_attribute("type")
             if input_type == "file":
                 return FILE
+            if (control.get_attribute("role") or "").lower() == "combobox":
+                return COMBOBOX_SELECT
             if input_type in _TEXT_INPUT_TYPES:
                 return TEXT
             return input_type or "unknown"
@@ -388,11 +459,30 @@ class GreenhouseFormClient:
         return control.get_attribute("required") is not None
 
     @staticmethod
-    def _extract_options(control, field_type: str) -> tuple[str, ...]:
-        if field_type not in (SINGLE_SELECT, MULTI_SELECT):
-            return ()
-        raw_options = control.locator("option").all_text_contents()
-        return tuple(opt.strip() for opt in raw_options if opt.strip())
+    def _extract_options(page, control, field_type: str) -> tuple[str, ...]:
+        if field_type in (SINGLE_SELECT, MULTI_SELECT):
+            raw_options = control.locator("option").all_text_contents()
+            return tuple(opt.strip() for opt in raw_options if opt.strip())
+        if field_type == COMBOBOX_SELECT:
+            # Best-effort only: a click-driven listbox (react-select and
+            # similar) may show a default option set on open (small fixed
+            # lists like Yes/No), a huge static list (Country), or nothing
+            # at all until the user types (Location's geocoding search).
+            # An empty result here isn't an error -- fill-time
+            # `_fill_combobox()` re-derives options by typing the actual
+            # answer, which works regardless of what (if anything) shows on
+            # a bare open.
+            try:
+                control.click()
+                listbox = page.get_by_role("listbox")
+                listbox.first.wait_for(state="visible", timeout=1_000)
+                raw_options = listbox.first.get_by_role("option").all_text_contents()
+            except Exception:  # noqa: BLE001 -- no listbox on bare open is normal, not fatal
+                raw_options = []
+            finally:
+                page.keyboard.press("Escape")
+            return tuple(opt.strip() for opt in raw_options if opt.strip())
+        return ()
 
     # -- filling --------------------------------------------------------
 
@@ -410,7 +500,7 @@ class GreenhouseFormClient:
                 # confirmed exists.
                 continue
 
-            control = page.get_by_label(label, exact=True).first
+            control = self._locate_control(page, form_field, label)
 
             if form_field.field_type in (TEXT, TEXTAREA):
                 control.fill(str(value))
@@ -430,10 +520,48 @@ class GreenhouseFormClient:
                     )
             elif form_field.field_type == FILE:
                 control.set_input_files(str(self._validated_file_path(value, label)))
+            elif form_field.field_type == COMBOBOX_SELECT:
+                self._fill_combobox(page, control, str(value), label)
             else:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
                 )
+
+    @staticmethod
+    def _locate_control(page, form_field: FormField, label: str):
+        """Relocate the control a schema field was discovered from.
+
+        Prefers the `control_id` captured at discovery time (see
+        `_resolve_control_for_label()` for why label-text lookup alone is
+        unreliable); falls back to `get_by_label()` only for schemas
+        persisted before `control_id` existed.
+        """
+        if form_field.control_id:
+            control = page.locator(f'[id="{form_field.control_id}"]')
+            if control.count() > 0:
+                return control.first
+        return page.get_by_label(label, exact=True).first
+
+    def _fill_combobox(self, page, control, value: str, label: str) -> None:
+        """Fill a JS-driven combobox widget (react-select and similar):
+        click to open it, type the answer to filter its listbox, then click
+        the resulting matching option. Verified live against a real
+        Greenhouse board (Country/Location/custom-select questions) that
+        typing the target value reliably filters the listbox to a matching
+        option, and that clicking it -- not `.fill()` alone -- is what
+        actually registers the selection (the control's own `.value` stays
+        empty afterward; the widget tracks the choice elsewhere).
+        """
+        control.click()
+        control.fill(value)
+        option = page.get_by_role("option", name=value, exact=False)
+        try:
+            option.first.wait_for(state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 -- convert to typed submission failure
+            raise GreenhouseFormSubmissionFailed(
+                f"No matching option for {value!r} found in combobox field {label!r}."
+            ) from exc
+        option.first.click()
 
     @staticmethod
     def _validated_file_path(value: Any, label: str) -> Path:

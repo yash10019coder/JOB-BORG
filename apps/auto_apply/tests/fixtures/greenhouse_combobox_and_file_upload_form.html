@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse Country/Location/custom-select
+        widget: a text <input role="combobox"> associated via *both* a
+        native `for`/`id` label link *and* `aria-labelledby` pointing at
+        the same label, whose required-asterisk lives in a nested
+        `aria-hidden="true"` span (verified live: this combination is what
+        makes Playwright's get_by_label(exact=True) match against the
+        label's raw textContent -- asterisk included -- instead of the
+        ARIA-computed accessible name, which excludes it).
+      -->
+      <div class="field">
+        <label id="work_auth-label" for="work_auth">Are you authorized to work?<span aria-hidden="true">*</span></label>
+        <input
+          type="text"
+          id="work_auth"
+          role="combobox"
+          aria-labelledby="work_auth-label"
+          aria-required="true"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="work_auth-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse file-upload widget: the actual
+        <input type=file> is labelled "Attach" (generic, identical across
+        both fields) via a visually-hidden <label>, while the
+        human-meaningful name lives on the surrounding role="group"'s
+        aria-labelledby target instead.
+      -->
+      <div class="field" role="group" aria-labelledby="upload-label-resume">
+        <div id="upload-label-resume">Resume/CV<span aria-hidden="true">*</span></div>
+        <label class="visually-hidden" for="resume">Attach</label>
+        <input type="file" id="resume" aria-labelledby="upload-label-resume">
+      </div>
+      <div class="field" role="group" aria-labelledby="upload-label-cover_letter">
+        <div id="upload-label-cover_letter">Cover Letter</div>
+        <label class="visually-hidden" for="cover_letter">Attach</label>
+        <input type="file" id="cover_letter" aria-labelledby="upload-label-cover_letter">
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Minimal react-select-style combobox: click opens a listbox of fixed
+    // options; typing filters it; clicking an option selects it, updates
+    // aria-invalid, and closes the menu -- mirrors the interaction
+    // contract verified live against a real Greenhouse board.
+    (function () {
+      var input = document.getElementById('work_auth');
+      var listbox = document.getElementById('work_auth-listbox');
+      var options = ['Yes', 'No'];
+
+      function render(filterText) {
+        listbox.innerHTML = '';
+        var term = (filterText || '').toLowerCase();
+        options
+          .filter(function (o) { return o.toLowerCase().indexOf(term) !== -1; })
+          .forEach(function (o) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.textContent = o;
+            li.addEventListener('click', function () {
+              input.setAttribute('aria-invalid', 'false');
+              input.dataset.value = o;
+              listbox.hidden = true;
+            });
+            listbox.appendChild(li);
+          });
+      }
+
+      input.addEventListener('click', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+      input.addEventListener('input', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+    })();
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

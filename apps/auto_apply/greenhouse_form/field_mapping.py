@@ -14,11 +14,18 @@ TEXTAREA = "textarea"
 SINGLE_SELECT = "single_select"
 MULTI_SELECT = "multi_select"
 FILE = "file"
+# A JS-driven "combobox" widget (react-select and similar): a text `<input
+# role="combobox">` that opens a listbox of options on click/type rather than
+# a native `<select>`. Greenhouse renders Country, Location, and most custom
+# single-choice questions this way -- see client.py's `_fill_combobox()`.
+COMBOBOX_SELECT = "combobox_select"
 
 # Every field type this slice knows how to fill. A *required* rendered field
 # whose type falls outside this set is unsupported and drafting/submission
 # must fail closed (GreenhouseFormSchemaMismatch) rather than skip it.
-SUPPORTED_FIELD_TYPES = frozenset({TEXT, TEXTAREA, SINGLE_SELECT, MULTI_SELECT, FILE})
+SUPPORTED_FIELD_TYPES = frozenset(
+    {TEXT, TEXTAREA, SINGLE_SELECT, MULTI_SELECT, FILE, COMBOBOX_SELECT}
+)
 
 # Field types that carry a discrete option set (used for select/checkbox-group
 # controls); relevant for the option-set comparison in schema_matches().
@@ -41,6 +48,15 @@ class FormField:
     field_type: str
     required: bool
     options: tuple[str, ...] = field(default_factory=tuple)
+    # The rendered control's DOM `id`, captured at discovery time so
+    # `_fill_answers()` can relocate the exact same element directly rather
+    # than re-deriving it from `label` text -- see client.py's
+    # `_resolve_control_for_label()` for why label-text-based lookup alone
+    # is unreliable (ambiguous or empty for some real Greenhouse widgets).
+    # Empty string for schemas discovered before this field existed, or for
+    # a control with no `id` (label wraps it implicitly); callers fall back
+    # to label-based lookup in that case.
+    control_id: str = ""
 
     @property
     def is_supported(self) -> bool:
@@ -78,6 +94,7 @@ def schema_to_dict(schema: FormSchema) -> dict:
                 "field_type": f.field_type,
                 "required": f.required,
                 "options": list(f.options),
+                "control_id": f.control_id,
             }
             for f in schema.fields
         ]
@@ -97,6 +114,7 @@ def schema_from_dict(data: dict | None) -> FormSchema | None:
                 field_type=f["field_type"],
                 required=f["required"],
                 options=tuple(f.get("options", ())),
+                control_id=f.get("control_id", ""),
             )
             for f in data.get("fields", [])
         )

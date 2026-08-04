@@ -27,6 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormSubmissionFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    COMBOBOX_SELECT,
     FILE,
     MULTI_SELECT,
     SINGLE_SELECT,
@@ -185,6 +186,61 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(tech_stack.field_type, MULTI_SELECT)
         self.assertFalse(tech_stack.required)
         self.assertEqual(set(tech_stack.options), {"Python", "JavaScript", "Go", "Rust"})
+
+    # -- inspect(): react-select-style combobox + duplicate file labels ---
+
+    def test_inspect_discovers_combobox_and_disambiguates_file_labels(self):
+        # Reproduces what live verification against a real Greenhouse board
+        # found: get_by_label(exact=True) fails to resolve a control that
+        # carries both `for`/`id` *and* `aria-labelledby`, because it
+        # matches against the label's raw textContent (asterisk included)
+        # rather than the accessible name -- silently dropping the field
+        # from the schema. Also reproduces Greenhouse's file-upload widget,
+        # where both Resume/CV and Cover Letter's real <input type=file>
+        # are labelled identically ("Attach"), and the human-meaningful
+        # name lives on the surrounding group instead.
+        client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertEqual(
+            set(by_label),
+            {"First Name", "Email", "Are you authorized to work?", "Resume/CV", "Cover Letter"},
+        )
+
+        combobox_field = by_label["Are you authorized to work?"]
+        self.assertEqual(combobox_field.field_type, COMBOBOX_SELECT)
+        self.assertTrue(combobox_field.required)
+        self.assertEqual(set(combobox_field.options), {"Yes", "No"})
+
+        self.assertEqual(by_label["Resume/CV"].field_type, FILE)
+        self.assertEqual(by_label["Resume/CV"].control_id, "resume")
+        self.assertEqual(by_label["Cover Letter"].field_type, FILE)
+        self.assertEqual(by_label["Cover Letter"].control_id, "cover_letter")
+
+    def test_submit_fills_combobox_and_distinct_file_fields(self):
+        client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        resume_path = self._tmpdir / "resume.pdf"
+        resume_path.write_bytes(b"%PDF-1.4 fake resume")
+        cover_path = self._tmpdir / "cover.pdf"
+        cover_path.write_bytes(b"%PDF-1.4 fake cover letter")
+
+        submit_client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Are you authorized to work?": "Yes",
+                "Resume/CV": str(resume_path),
+                "Cover Letter": str(cover_path),
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
 
     # -- required unsupported field type ----------------------------------
 
