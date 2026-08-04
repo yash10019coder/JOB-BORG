@@ -20,7 +20,7 @@ def validate_resume_file(file):
     """Enforce the resume upload allowlist (U1) before the file is ever
     handed to the parsing task -- a storage/DoS control and a first line of
     defense against malicious uploads, independent of the parsing task's own
-    bounded time limit (see apps/accounts/resume_parsing.py).
+    bounded time limit (see apps/accounts/tasks.py).
     """
     max_size = getattr(settings, "RESUME_MAX_UPLOAD_SIZE_BYTES", 10 * 1024 * 1024)
     if file.size > max_size:
@@ -82,7 +82,7 @@ class Profile(models.Model):
     # Resume -- standard-field source for auto-apply drafting (see
     # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md U1).
     # `resume_text` is populated asynchronously by the `parse_resume` Celery
-    # task (apps/accounts/resume_parsing.py), explicitly enqueued from
+    # task (apps/accounts/tasks.py), explicitly enqueued from
     # `Profile.set_resume()` -- deliberately not a post_save signal, so the
     # trigger is visible at the call site rather than implicit. It stays
     # empty until parsing completes, or forever if no resume is uploaded or
@@ -148,7 +148,7 @@ class Profile(models.Model):
         self.save(update_fields=["resume", "resume_text", "updated_at"])
 
         if file:
-            from .resume_parsing import parse_resume
+            from .tasks import parse_resume
 
             parse_resume.delay(self.pk)
 
