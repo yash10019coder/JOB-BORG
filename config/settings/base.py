@@ -302,6 +302,19 @@ AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
 CREDENTIAL_ENCRYPTION_KEYS = env.list("CREDENTIAL_ENCRYPTION_KEYS", default=[])
 
 # ---------------------------------------------------------------------------
+# Auto-apply: IMAP inbox credential host allowlist (apps.accounts.models
+# EmailInboxCredential) -- mirrors the hostname-allowlist defense-in-depth
+# pattern already used for job_url navigation in
+# apps.auto_apply.greenhouse_form.client.DEFAULT_ALLOWED_HOSTNAMES. Only
+# Gmail-shaped consumer IMAP is validated for v1 (see the plan's Scope
+# Boundaries) -- room is left for Outlook/Yahoo etc., but they are
+# unvalidated and must not be advertised until tested live.
+# ---------------------------------------------------------------------------
+AUTO_APPLY_IMAP_ALLOWED_HOSTS = env.list(
+    "AUTO_APPLY_IMAP_ALLOWED_HOSTS", default=["imap.gmail.com"]
+)
+
+# ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
 # ---------------------------------------------------------------------------
 CACHES = {
