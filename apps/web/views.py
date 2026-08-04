@@ -186,7 +186,26 @@ _REASON_CODE_MESSAGES = {
     AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR: (
         "Something went wrong while submitting this application."
     ),
+    AutoApplyDraft.ReasonCode.NO_INBOX_CREDENTIALS: (
+        "This employer requires email verification. Connect an inbox credential in your settings."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_TIMEOUT: (
+        "Verification email did not arrive in time. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_AUTH_FAILED: (
+        "Could not log into your connected inbox (App Password may be revoked). Please update your credentials in settings."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_UNAVAILABLE: (
+        "Could not reach your email provider. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS: (
+        "Multiple verification emails arrived. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED: (
+        "Verification code was rejected by the employer. Please try sending again."
+    ),
 }
+
 _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
 _STALE_MESSAGE = "This job posting closed before we could apply."
 
