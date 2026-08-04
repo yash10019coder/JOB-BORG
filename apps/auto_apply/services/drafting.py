@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
@@ -134,7 +135,9 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             f"has source_ats={job.source_ats!r})."
         )
 
-    form_client = form_client or GreenhouseFormClient()
+    form_client = form_client or GreenhouseFormClient(
+        debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
+    )
     llm_client = llm_client or llm_base.get_client()
     profile = getattr(user, "profile", None)
     resume_text = getattr(profile, "resume_text", "") or ""
