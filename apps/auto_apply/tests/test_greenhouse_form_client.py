@@ -302,6 +302,27 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertIn("submitted successfully", result.confirmation_text.lower())
 
+    def test_submit_confirms_success_via_text_pattern_without_status_role(self):
+        # Reproduces what live verification against a real Greenhouse board
+        # found: the confirmation view carries no role="status" (or any
+        # other ARIA live-region role) at all, only human-readable text.
+        client = self._client(_fixture_html("greenhouse_confirmation_text_only_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_confirmation_text_only_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("thanks for applying", result.confirmation_text.lower())
+
     # -- submission failure + debug artifacts --------------------------------
 
     def test_submit_rejected_form_raises_submission_failed_with_debug_artifacts(self):

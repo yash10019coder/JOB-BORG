@@ -67,6 +67,28 @@ _TEXT_INPUT_TYPES = frozenset({"text", "email", "tel", "url", None, ""})
 _DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000
 _DEFAULT_CONFIRMATION_TIMEOUT_MS = 10_000
 _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
+_CONFIRMATION_POLL_INTERVAL_MS = 250
+
+# Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
+# successful submission. Verified against a live Greenhouse board
+# (job-boards.greenhouse.io) that an explicit ARIA role="status" element --
+# this client's original, sole success signal -- never appears on the real
+# page; its only live-region elements are role="log" utility spans used for
+# screen-reader announcements, not a confirmation banner. These phrases are
+# the fallback: specific, multi-word, and unambiguously positive, so an
+# error banner (e.g. "Something went wrong, please try again") can never
+# accidentally satisfy this check the way a bare "submitted"/"error"
+# presence-check could.
+_CONFIRMATION_TEXT_PATTERNS = (
+    "thank you for applying",
+    "thanks for applying",
+    "application submitted",
+    "application has been submitted",
+    "successfully submitted",
+    "we've received your application",
+    "we have received your application",
+    "your application was submitted",
+)
 
 
 # -- Pluggable CAPTCHA-solver interface --------------------------------------
@@ -440,15 +462,41 @@ class GreenhouseFormClient:
         submit_button.first.click()
 
     def _confirm_success(self, page) -> SubmissionResult | None:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        """Poll for a post-submit success signal until ``confirmation_timeout_ms``
+        elapses, checking every signal in ``_check_success_signal`` each pass
+        rather than waiting out a full timeout on one selector before trying
+        the next -- keeps the worst-case (genuine failure) wait bounded by a
+        single timeout budget instead of one per signal.
+        """
+        deadline = time.monotonic() + (self.confirmation_timeout_ms / 1000)
+        while True:
+            result = self._check_success_signal(page)
+            if result is not None:
+                return result
+            if time.monotonic() >= deadline:
+                return None
+            page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
 
-        confirmation = page.get_by_role("status")
-        try:
-            confirmation.first.wait_for(timeout=self.confirmation_timeout_ms)
-        except PlaywrightTimeoutError:
-            return None
-        text = confirmation.first.inner_text()
-        return SubmissionResult(success=True, confirmation_text=text)
+    def _check_success_signal(self, page) -> SubmissionResult | None:
+        # Signal 1: an explicit ARIA status live region, if the board
+        # renders one -- cheap and unambiguous when present.
+        status = page.get_by_role("status")
+        if status.count() > 0:
+            text = status.first.inner_text().strip()
+            if text:
+                return SubmissionResult(success=True, confirmation_text=text)
+
+        # Signal 2: known confirmation phrasing anywhere in the rendered
+        # page text. Only specific, positive multi-word phrases are
+        # matched -- never element presence/absence alone -- so this can't
+        # be tricked by an error banner that happens to render after
+        # submit (see _CONFIRMATION_TEXT_PATTERNS).
+        body_text = page.locator("body").inner_text().lower()
+        for phrase in _CONFIRMATION_TEXT_PATTERNS:
+            if phrase in body_text:
+                return SubmissionResult(success=True, confirmation_text=phrase)
+
+        return None
 
     # -- failure debugging --------------------------------------------------
 
