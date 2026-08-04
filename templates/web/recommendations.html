@@ -1,8 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Recommendations — JobBorg{% endblock %}
 {% block content %}
+{% if messages %}
+<ul class="messages muted" style="list-style:none; padding:0;">
+    {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+</ul>
+{% endif %}
 <div style="display:flex; align-items:baseline; gap:1rem;">
     <h1 style="flex:1;">{% if show_all %}All matches{% else %}Your recommendations{% endif %}</h1>
+    <a class="btn" href="{% url 'auto_apply_queue' %}">Auto-apply queue</a>
     {% if show_all %}
         <a class="btn" href="{% querystring all=None %}">Show recommended only</a>
     {% else %}

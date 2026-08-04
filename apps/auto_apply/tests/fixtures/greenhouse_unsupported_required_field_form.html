@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <!--
+        Greenhouse occasionally renders a native date picker for
+        "Earliest start date" -- a required field type this slice's
+        field_mapping.py doesn't support, so inspect() must fail closed
+        rather than silently drop it.
+      -->
+      <div class="field">
+        <label for="start_date">Earliest start date</label> <span aria-hidden="true">*</span>
+        <input type="date" id="start_date" name="start_date" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+</body>
+</html>

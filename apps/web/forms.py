@@ -33,6 +33,9 @@ class ProfileForm(forms.ModelForm):
         fields = [
             "full_name",
             "headline",
+            "phone",
+            "linkedin_url",
+            "resume",
             "target_titles",
             "target_tags",
             "target_locations",
@@ -44,10 +47,21 @@ class ProfileForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Seed the CSV text inputs from the instance's stored lists.
+        # Seed the CSV text inputs from the instance's stored lists. Must go
+        # through `self.initial` (form-level), not `self.fields[field].initial`
+        # -- BaseModelForm.__init__ above already populated `self.initial`
+        # from `model_to_dict(instance)` with the raw JSONField list, and
+        # that takes precedence over `field.initial` when the widget resolves
+        # its value, silently discarding a field-level-only assignment here.
         if self.instance and self.instance.pk:
             for field in _LIST_FIELDS:
-                self.fields[field].initial = ", ".join(getattr(self.instance, field) or [])
+                self.initial[field] = ", ".join(getattr(self.instance, field) or [])
+        # `resume` writes must route through `Profile.set_resume()` (the one
+        # call site that resets `resume_text` and enqueues parsing) rather
+        # than the plain field assignment ModelForm.save() would otherwise
+        # do -- stash the pre-edit value so save() can restore it before the
+        # normal save, then apply the change via set_resume() separately.
+        self._initial_resume = self.instance.resume if self.instance and self.instance.pk else None
 
     def _clean_list(self, field):
         return _split_csv(self.cleaned_data.get(field, ""))
@@ -65,11 +79,19 @@ class ProfileForm(forms.ModelForm):
         return self._clean_list("excluded_employers")
 
     def save(self, commit=True):
+        resume_changed = "resume" in self.changed_data
+        new_resume = self.cleaned_data.get("resume") if resume_changed else None
         instance = super().save(commit=False)
+        if resume_changed:
+            # Undo ModelForm's direct field assignment -- set_resume() below
+            # is the one call site allowed to actually change `resume`.
+            instance.resume = self._initial_resume
         instance.target_locations_normalized = normalize_target_locations(
             instance.target_locations
         )
         instance.target_locations_alias_version = CURRENT_LOCATION_ALIAS_VERSION
         if commit:
             instance.save()
+            if resume_changed:
+                instance.set_resume(new_resume)
         return instance

@@ -25,3 +25,19 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
+    readonly_fields = ("resume_text",)
+
+    def save_model(self, request, obj, form, change):
+        """The admin is a write path to `Profile.resume` too (see U1), so it
+        must trigger the same explicit parse -- there's no post_save signal
+        to fall back on. Routes through `Profile.set_resume()` for *every*
+        resume change (add or clear) so this stays the one call site that
+        actually mutates `resume`/`resume_text`, rather than a second,
+        divergent clear-path that bypasses `full_clean()`/the explicit-
+        trigger convention `set_resume()` exists to centralize.
+        """
+        if "resume" in form.changed_data:
+            obj.set_resume(obj.resume)
+            return
+
+        super().save_model(request, obj, form, change)
