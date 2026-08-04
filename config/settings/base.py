@@ -273,6 +273,19 @@ AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
 )
 
 # ---------------------------------------------------------------------------
+# Auto-apply: submission debug artifacts (apps.auto_apply.greenhouse_form)
+# ---------------------------------------------------------------------------
+# Directory where GreenhouseFormClient writes a screenshot + accessibility-
+# tree snapshot when a submission raises (rejection, schema mismatch, no
+# post-submit confirmation signal found). Empty by default -- opt-in via env
+# since these can capture PII (the applicant's own submitted answers) and
+# accumulate on disk; set to enable diagnosing real-world submission
+# failures after the fact instead of only from live-attached debugging.
+AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
+    "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=str(BASE_DIR / "media" / "auto_apply_debug")
+)
+
+# ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
 # ---------------------------------------------------------------------------
 CACHES = {

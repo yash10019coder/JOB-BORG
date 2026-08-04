@@ -178,7 +178,9 @@ def submit_auto_apply_draft(draft_id):
     answers = {label: entry.get("value") for label, entry in (draft.answers or {}).items()}
     expected_schema = schema_from_dict(draft.form_schema_snapshot)
 
-    form_client = GreenhouseFormClient()
+    form_client = GreenhouseFormClient(
+        debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
+    )
     try:
         form_client.submit(
             job.source_url,
