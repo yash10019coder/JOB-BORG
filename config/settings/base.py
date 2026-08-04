@@ -244,6 +244,7 @@ DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", d
 # ---------------------------------------------------------------------------
 AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+NVIDIA_API_KEY = env("NVIDIA_API_KEY", default="")
 # Secondary tiebreaker only -- consulted after the deterministic evidence-
 # groundedness check has already passed (see
 # apps/auto_apply/llm/base.py:resolve_answers).
