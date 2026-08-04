@@ -56,6 +56,22 @@
         <input type="file" id="cover_letter" aria-labelledby="upload-label-cover_letter">
       </div>
 
+      <!--
+        Reproduces Greenhouse's standard multi-select-question markup: a
+        <fieldset><legend> wrapping several individual checkboxes, each
+        with its own <label for> reading the *option* text ("Python"), not
+        the question -- distinct from a native <select multiple>.
+      -->
+      <fieldset class="field">
+        <legend>Which languages do you know?<span aria-hidden="true">*</span></legend>
+        <input type="checkbox" id="lang_python" required aria-required="true">
+        <label for="lang_python">Python</label>
+        <input type="checkbox" id="lang_go" required aria-required="true">
+        <label for="lang_go">Go</label>
+        <input type="checkbox" id="lang_rust" required aria-required="true">
+        <label for="lang_rust">Rust</label>
+      </fieldset>
+
       <button type="submit">Submit Application</button>
     </form>
   </main>

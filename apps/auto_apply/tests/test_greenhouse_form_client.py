@@ -27,6 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormSubmissionFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
     MULTI_SELECT,
@@ -205,7 +206,14 @@ class GreenhouseFormClientTests(SimpleTestCase):
         by_label = schema.by_label()
         self.assertEqual(
             set(by_label),
-            {"First Name", "Email", "Are you authorized to work?", "Resume/CV", "Cover Letter"},
+            {
+                "First Name",
+                "Email",
+                "Are you authorized to work?",
+                "Resume/CV",
+                "Cover Letter",
+                "Which languages do you know?",
+            },
         )
 
         combobox_field = by_label["Are you authorized to work?"]
@@ -217,6 +225,15 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(by_label["Resume/CV"].control_id, "resume")
         self.assertEqual(by_label["Cover Letter"].field_type, FILE)
         self.assertEqual(by_label["Cover Letter"].control_id, "cover_letter")
+
+        # Reproduces the real Blacksky Greenhouse board: individual
+        # checkboxes sharing a <fieldset><legend>, previously entirely
+        # unsupported (raised GreenhouseFormSchemaMismatch as required
+        # field type "checkbox").
+        checkbox_field = by_label["Which languages do you know?"]
+        self.assertEqual(checkbox_field.field_type, CHECKBOX_GROUP)
+        self.assertTrue(checkbox_field.required)
+        self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
 
     def test_submit_fills_combobox_and_distinct_file_fields(self):
         client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
@@ -236,6 +253,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 "Are you authorized to work?": "Yes",
                 "Resume/CV": str(resume_path),
                 "Cover Letter": str(cover_path),
+                "Which languages do you know?": ["Python", "Rust"],
             },
             expected_schema=schema,
         )

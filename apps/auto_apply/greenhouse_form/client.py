@@ -39,6 +39,7 @@ from .exceptions import (
     GreenhouseFormSubmissionFailed,
 )
 from .field_mapping import (
+    CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
     MULTI_SELECT,
@@ -350,6 +351,21 @@ class GreenhouseFormClient:
             if control is None or control.count() == 0:
                 continue
             control = control.first
+            if (control.get_attribute("type") or "").lower() == "checkbox":
+                # Greenhouse's standard multi-select-question markup: a
+                # <fieldset><legend> wrapping several individual checkboxes,
+                # each with its own <label for> reading the *option* text
+                # (e.g. "Python"), not the question. Handled as one group
+                # per <fieldset>, not one field per checkbox.
+                group_field = self._checkbox_group_field(page, control, seen_control_ids)
+                if group_field is not None:
+                    if group_field.required and not group_field.is_supported:
+                        raise GreenhouseFormSchemaMismatch(
+                            f"Required field {group_field.label!r} on {job_url} has "
+                            f"unsupported type {group_field.field_type!r}."
+                        )
+                    fields.append(group_field)
+                continue
             control_id = control.get_attribute("id") or ""
             if control_id:
                 if control_id in seen_control_ids:
@@ -427,6 +443,61 @@ class GreenhouseFormClient:
             return None
         text = GreenhouseFormClient._clean_label(label_el.first.text_content() or "")
         return text or None
+
+    @staticmethod
+    def _checkbox_group_field(page, control, seen_control_ids: set[str]) -> "FormField | None":
+        """Build one `FormField(field_type=CHECKBOX_GROUP)` for the whole
+        `<fieldset>` a checkbox belongs to, rather than treating each
+        checkbox as its own field. Returns `None` for a checkbox with no
+        enclosing `<fieldset>` (unrecognized markup) or one already
+        captured via an earlier checkbox in the same group.
+        """
+        fieldset = control.locator("xpath=ancestor::fieldset[1]")
+        if fieldset.count() == 0:
+            return None
+        fieldset = fieldset.first
+        fieldset_id = fieldset.get_attribute("id")
+        if not fieldset_id:
+            fieldset_id = f"gh-checkbox-group-{uuid.uuid4().hex[:8]}"
+            fieldset.evaluate("(el, id) => { el.id = id; }", fieldset_id)
+        if fieldset_id in seen_control_ids:
+            return None
+        seen_control_ids.add(fieldset_id)
+
+        legend = fieldset.locator("legend")
+        label_text = (
+            GreenhouseFormClient._clean_label(legend.first.text_content() or "")
+            if legend.count() > 0
+            else ""
+        )
+        if not label_text:
+            return None
+
+        checkboxes = fieldset.locator('input[type="checkbox"]')
+        options: list[str] = []
+        required = False
+        for i in range(checkboxes.count()):
+            checkbox = checkboxes.nth(i)
+            checkbox_id = checkbox.get_attribute("id") or ""
+            opt_label = ""
+            if checkbox_id:
+                opt_label_el = page.locator(f'label[for="{checkbox_id}"]')
+                if opt_label_el.count() > 0:
+                    opt_label = GreenhouseFormClient._clean_label(
+                        opt_label_el.first.text_content() or ""
+                    )
+            if opt_label:
+                options.append(opt_label)
+            if GreenhouseFormClient._is_required(checkbox):
+                required = True
+
+        return FormField(
+            label=label_text,
+            field_type=CHECKBOX_GROUP,
+            required=required,
+            options=tuple(options),
+            control_id=fieldset_id,
+        )
 
     @staticmethod
     def _clean_label(text: str) -> str:
@@ -522,6 +593,8 @@ class GreenhouseFormClient:
                 control.set_input_files(str(self._validated_file_path(value, label)))
             elif form_field.field_type == COMBOBOX_SELECT:
                 self._fill_combobox(page, control, str(value), label)
+            elif form_field.field_type == CHECKBOX_GROUP:
+                self._fill_checkbox_group(page, control, value, label)
             else:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
@@ -562,6 +635,50 @@ class GreenhouseFormClient:
                 f"No matching option for {value!r} found in combobox field {label!r}."
             ) from exc
         option.first.click()
+
+    @staticmethod
+    def _fill_checkbox_group(page, fieldset, value: Any, label: str) -> None:
+        """Check the boxes within `fieldset` whose own option label matches
+        an entry in `value` (a single answer or list of answers), mirroring
+        `_checkbox_group_field()`'s discovery-time option extraction.
+
+        Also strips `required`/`aria-required` from every checkbox we're
+        *not* checking. Verified live against a real Greenhouse board
+        (Blacksky) that it marks every individual checkbox in a "select all
+        that apply" group `required` -- unlike radio buttons, HTML gives no
+        way to express "at least one of this group" on checkboxes, so taken
+        at face value the browser's native constraint validation would
+        block Submit entirely unless literally every option is checked,
+        defeating the question's own "select all that apply" semantics.
+        We enforce the real intended constraint ourselves (every *requested*
+        option got checked, via the count comparison below) before ever
+        touching the DOM's native validation.
+        """
+        values = {str(v) for v in (value if isinstance(value, (list, tuple)) else [value])}
+        checkboxes = fieldset.locator('input[type="checkbox"]')
+        checked_count = 0
+        for i in range(checkboxes.count()):
+            checkbox = checkboxes.nth(i)
+            checkbox_id = checkbox.get_attribute("id") or ""
+            opt_label = ""
+            if checkbox_id:
+                opt_label_el = page.locator(f'label[for="{checkbox_id}"]')
+                if opt_label_el.count() > 0:
+                    opt_label = GreenhouseFormClient._clean_label(
+                        opt_label_el.first.text_content() or ""
+                    )
+            if opt_label in values:
+                checkbox.check()
+                checked_count += 1
+            else:
+                checkbox.evaluate(
+                    "el => { el.removeAttribute('required'); "
+                    "el.removeAttribute('aria-required'); }"
+                )
+        if checked_count != len(values):
+            raise GreenhouseFormSubmissionFailed(
+                f"Not all selections registered for checkbox-group field {label!r}."
+            )
 
     @staticmethod
     def _validated_file_path(value: Any, label: str) -> Path:
