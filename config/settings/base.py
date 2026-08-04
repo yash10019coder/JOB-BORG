@@ -315,6 +315,21 @@ AUTO_APPLY_IMAP_ALLOWED_HOSTS = env.list(
 )
 
 # ---------------------------------------------------------------------------
+# Auto-apply: Email verification code polling settings
+# (apps.auto_apply.email_verification)
+# ---------------------------------------------------------------------------
+AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS = env.int(
+    "AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS", default=180
+)
+AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS = env.int(
+    "AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS", default=4
+)
+AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST = env.list(
+    "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST", default=["greenhouse.io"]
+)
+
+
+# ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.
 # ---------------------------------------------------------------------------
 CACHES = {
