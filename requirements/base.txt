@@ -43,3 +43,8 @@ boto3==1.43.62
 # browser binary itself (not a pip package). See U3 of
 # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md.
 playwright==1.62.0
+# At-rest secret encryption (apps/accounts/crypto.py) -- MultiFernet wrapper
+# for stored credentials, starting with the IMAP app password used to
+# auto-solve Greenhouse's post-submit email verification. See U1 of
+# docs/plans/2026-08-04-001-feat-auto-apply-greenhouse-email-verification-plan.md.
+cryptography==46.0.3
