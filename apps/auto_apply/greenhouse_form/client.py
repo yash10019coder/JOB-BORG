@@ -24,12 +24,15 @@ Every ``inspect()``/``submit()`` call runs against a fresh, isolated
 Playwright browser context (no shared cookies/storage across calls),
 constructed via an injectable ``context_factory`` and torn down after use.
 """
+from datetime import datetime, timezone
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
+from apps.auto_apply.email_verification.base import EmailCodeProvider, VerificationOutcome
+
 
 from .exceptions import (
     DebugArtifacts,
@@ -208,6 +211,7 @@ class GreenhouseFormClient:
         *,
         context_factory: Callable[[], ContextHandle] | None = None,
         captcha_solver: CaptchaSolver | None = None,
+        email_code_provider: EmailCodeProvider | None = None,
         allowed_hostnames: frozenset[str] = DEFAULT_ALLOWED_HOSTNAMES,
         debug_artifact_dir: str | Path | None = None,
         navigation_timeout_ms: int = _DEFAULT_NAVIGATION_TIMEOUT_MS,
@@ -216,6 +220,7 @@ class GreenhouseFormClient:
     ):
         self._context_factory = context_factory or _default_context_factory
         self._default_captcha_solver = captcha_solver
+        self._default_email_code_provider = email_code_provider
         self.allowed_hostnames = frozenset(allowed_hostnames)
         self.debug_artifact_dir = Path(debug_artifact_dir) if debug_artifact_dir else None
         self.navigation_timeout_ms = navigation_timeout_ms
@@ -247,14 +252,6 @@ class GreenhouseFormClient:
             except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error
-                # A raw Playwright/browser error (navigation timeout, DNS
-                # failure, page crash, etc.) here would otherwise propagate
-                # past draft_for()'s GreenhouseFormError handlers straight
-                # to draft_auto_apply's catch-all, which persists no
-                # AutoApplyDraft row at all -- silently dropping the job
-                # with no trace in the review queue. Wrapping as a typed
-                # error lets drafting.py's existing handler persist an
-                # EXCLUDED row instead.
                 raise GreenhouseFormError(
                     f"Could not load the application form at {job_url}: {exc}"
                 ) from exc
@@ -268,45 +265,38 @@ class GreenhouseFormClient:
         *,
         expected_schema: FormSchema | None = None,
         captcha_solver: CaptchaSolver | None = None,
+        email_code_provider: EmailCodeProvider | None = None,
+        deadline_monotonic: float | None = None,
     ) -> SubmissionResult:
         """Fill and submit the application page at ``job_url``.
 
         Args:
-            answers: mapping of field label -> value to fill. For
-                ``single_select``/``multi_select`` fields, value is an
-                option label (or list of option labels for multi-select).
-            expected_schema: the schema this submission was drafted
-                against, if any. When given, the schema re-inspected on the
-                live page must match it (including option sets) or
-                ``GreenhouseFormSchemaMismatch`` is raised before any fill
-                is attempted.
-            captcha_solver: overrides the instance's default solver for
-                this call only.
+            answers: mapping of field label -> value to fill.
+            expected_schema: expected schema to match against.
+            captcha_solver: overrides instance default solver.
+            email_code_provider: overrides instance default provider.
+            deadline_monotonic: deadline timestamp (monotonic) for the submission.
 
         Raises:
             GreenhouseFormError: ``job_url`` isn't on the hostname allowlist.
-            GreenhouseFormChallenged: a challenge is present and no solver
-                is configured, or the configured solver fails/times out.
-            GreenhouseFormSchemaMismatch: the live schema doesn't match
-                ``expected_schema``, or a required field is unsupported.
-            GreenhouseFormSubmissionFailed: the form was submitted but no
-                success signal was found.
-            GreenhouseFormVerificationFailed: the form was submitted but
-                Greenhouse's post-submit email-verification interstitial
-                was detected instead of a success signal. As of this unit,
-                this is detection-only -- no code-entry/email-polling
-                recovery is attempted.
+            GreenhouseFormChallenged: challenge present and unsolvable.
+            GreenhouseFormSchemaMismatch: schema mismatch.
+            GreenhouseFormSubmissionFailed: submission failed.
+            GreenhouseFormVerificationFailed: email verification failed.
         """
         self._validate_url(job_url)
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
+        provider = (
+            email_code_provider
+            if email_code_provider is not None
+            else self._default_email_code_provider
+        )
 
         def _run(page):
             self._goto_and_settle(page, job_url)
 
             if self._challenge_detected(page):
                 self._attempt_captcha_solve(page, job_url, solver)
-                # Re-check: a "solved" challenge that didn't actually clear
-                # is still a challenge -- never proceed on faith.
                 if self._challenge_detected(page):
                     raise GreenhouseFormChallenged(
                         f"Challenge on {job_url} was not cleared after a solve attempt."
@@ -323,8 +313,14 @@ class GreenhouseFormClient:
 
             try:
                 self._fill_answers(page, schema_now, answers)
+                submitted_at = datetime.now(timezone.utc)
                 self._click_submit(page)
-                result = self._confirm_success(page)
+                result = self._confirm_success(
+                    page,
+                    provider=provider,
+                    submitted_at=submitted_at,
+                    deadline_monotonic=deadline_monotonic,
+                )
             except (
                 GreenhouseFormChallenged,
                 GreenhouseFormSchemaMismatch,
@@ -345,6 +341,7 @@ class GreenhouseFormClient:
                     page,
                 )
             return result
+
 
         return self._with_fresh_page(_run)
 
@@ -839,7 +836,15 @@ class GreenhouseFormClient:
             submit_button = page.locator('button[type="submit"], input[type="submit"]')
         submit_button.first.click()
 
-    def _confirm_success(self, page) -> SubmissionResult | None:
+    def _confirm_success(
+        self,
+        page,
+        *,
+        provider: EmailCodeProvider | None = None,
+        submitted_at: datetime | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> SubmissionResult | None:
+
         """Poll for a post-submit outcome until ``confirmation_timeout_ms``
         elapses -- a three-way classifier (success / verification-required /
         neither-yet) evaluated once per pass under this ONE shared deadline,
@@ -862,18 +867,79 @@ class GreenhouseFormClient:
         ``GreenhouseFormSubmissionFailed``) when the deadline elapses with
         neither classified.
         """
-        deadline = time.monotonic() + (self.confirmation_timeout_ms / 1000)
+        deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
+        )
         while True:
             result = self._check_success_signal(page)
             if result is not None:
                 return result
             if self._verification_interstitial_detected(page):
-                self._raise_with_debug_artifacts(
-                    GreenhouseFormVerificationFailed,
-                    "Greenhouse verification-code interstitial detected; no "
-                    "verification-code provider configured",
-                    page,
+                if provider is None:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        "Greenhouse verification-code interstitial detected; no provider configured",
+                        page,
+                        outcome=VerificationOutcome.NO_INBOX_CREDENTIALS,
+                    )
+
+                now = time.monotonic()
+                if deadline - now < 20.0:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        "Remaining budget too low for email verification polling",
+                        page,
+                        outcome=VerificationOutcome.CODE_TIMEOUT,
+                    )
+
+                since = submitted_at or datetime.now(timezone.utc)
+                try:
+                    lookup_res = provider.get_code(since=since, deadline_monotonic=deadline)
+                except Exception as exc:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        f"Email code provider raised an error: {exc}",
+                        page,
+                        outcome=VerificationOutcome.INBOX_UNAVAILABLE,
+                    )
+
+                if lookup_res.outcome != VerificationOutcome.FOUND or not lookup_res.code:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        f"Email verification failed with outcome: {lookup_res.outcome.value}",
+                        page,
+                        outcome=lookup_res.outcome,
+                    )
+
+                # R9: Code typed! Enter code and submit. Debug artifact capture MUST be suppressed
+                # on the post-code path so live OTP is never written to disk.
+                try:
+                    code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).first
+                    code_input.fill(lookup_res.code)
+                    submit_button = page.locator(
+                        "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
+                    ).first
+                    submit_button.click()
+                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+                except Exception as exc:
+                    # Post-code path: raise WITHOUT debug artifacts
+                    raise GreenhouseFormVerificationFailed(
+                        "Failed while submitting verification code",
+                        outcome=VerificationOutcome.CODE_REJECTED,
+                    ) from exc
+
+                post_code_check = self._check_success_signal(page)
+                if post_code_check is not None:
+                    return post_code_check
+
+                # Still on verification page: post-code path, raise WITHOUT debug artifacts
+                raise GreenhouseFormVerificationFailed(
+                    "Verification code entered but application success not confirmed",
+                    outcome=VerificationOutcome.CODE_REJECTED,
                 )
+
             if time.monotonic() >= deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
@@ -901,18 +967,7 @@ class GreenhouseFormClient:
 
     @staticmethod
     def _verification_interstitial_detected(page) -> bool:
-        """Detect Greenhouse's post-submit email-verification interstitial.
-
-        Requires BOTH of two independent signals -- a code-entry control
-        AND confirming copy -- never either alone. A lone numeric-shaped
-        input (a phone/zip/reference-number field) or lone "check your
-        email"-shaped copy (some genuine success confirmations use nearly
-        that phrase) is each independently plausible on an ordinary page;
-        only both together is a safe signal. This mirrors
-        ``_challenge_detected()``'s own precedent for exactly this class of
-        bug: that selector originally false-positived on reCAPTCHA v3's
-        always-present background-scoring badge before being narrowed.
-        """
+        """Detect Greenhouse's post-submit email-verification interstitial."""
         code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
         if code_input.count() == 0:
             return False
@@ -921,8 +976,13 @@ class GreenhouseFormClient:
 
     # -- failure debugging --------------------------------------------------
 
-    def _raise_with_debug_artifacts(self, exc_cls, message: str, page) -> None:
-        raise exc_cls(message, debug_artifacts=self._capture_debug_artifacts(page))
+    def _raise_with_debug_artifacts(
+        self, exc_cls, message: str, page, *, outcome: VerificationOutcome | None = None
+    ) -> None:
+        artifacts = self._capture_debug_artifacts(page)
+        if outcome is not None and issubclass(exc_cls, GreenhouseFormVerificationFailed):
+            raise exc_cls(message, outcome=outcome, debug_artifacts=artifacts)
+        raise exc_cls(message, debug_artifacts=artifacts)
 
     def _capture_debug_artifacts(self, page) -> DebugArtifacts | None:
         if self.debug_artifact_dir is None:
@@ -933,12 +993,10 @@ class GreenhouseFormClient:
             screenshot_path = self.debug_artifact_dir / f"{run_id}.png"
             tree_path = self.debug_artifact_dir / f"{run_id}-a11y.yaml"
             page.screenshot(path=str(screenshot_path), full_page=True)
-            # Playwright removed the legacy `page.accessibility` API; the
-            # ARIA-snapshot locator method is the current equivalent (a
-            # YAML-formatted serialization of the accessibility tree).
             tree_path.write_text(page.locator("body").aria_snapshot())
             return DebugArtifacts(
                 screenshot_path=str(screenshot_path), accessibility_tree_path=str(tree_path)
             )
         except Exception:  # noqa: BLE001 -- debug capture must never mask the real failure
             return None
+
