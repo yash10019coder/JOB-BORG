@@ -1,7 +1,7 @@
 ---
 title: Fix Greenhouse Field/Button Discovery Gaps and Historical Auto-Apply Failures
 type: fix
-status: active
+status: completed
 date: 2026-08-06
 ---
 
