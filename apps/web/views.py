@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
+from apps.accounts.models import EmailInboxCredential
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import FILE
 from apps.auto_apply.models import AutoApplyDraft
@@ -20,7 +21,8 @@ from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
 
-from .forms import ProfileForm
+from .forms import EmailInboxCredentialForm, ProfileForm
+
 
 RECOMMENDATIONS_PER_PAGE = 20
 
@@ -184,7 +186,26 @@ _REASON_CODE_MESSAGES = {
     AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR: (
         "Something went wrong while submitting this application."
     ),
+    AutoApplyDraft.ReasonCode.NO_INBOX_CREDENTIALS: (
+        "This employer requires email verification. Connect an inbox credential in your settings."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_TIMEOUT: (
+        "Verification email did not arrive in time. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_AUTH_FAILED: (
+        "Could not log into your connected inbox (App Password may be revoked). Please update your credentials in settings."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_UNAVAILABLE: (
+        "Could not reach your email provider. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS: (
+        "Multiple verification emails arrived. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED: (
+        "Verification code was rejected by the employer. Please try sending again."
+    ),
 }
+
 _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
 _STALE_MESSAGE = "This job posting closed before we could apply."
 
@@ -349,3 +370,49 @@ def send_auto_apply_draft(request, pk):
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")
     return redirect("auto_apply_queue")
+
+
+@login_required
+def email_inbox_credential(request):
+    """View and update stored IMAP inbox credentials."""
+    try:
+        credential = request.user.email_inbox_credential
+    except EmailInboxCredential.DoesNotExist:
+        credential = None
+
+    if request.method == "POST":
+        form = EmailInboxCredentialForm(request.POST, instance=credential)
+        if form.is_valid():
+            inst = form.save(commit=False)
+            inst.user = request.user
+            inst.save()
+            app_password = form.cleaned_data.get("app_password")
+            if app_password:
+                inst.set_app_password(app_password)
+            messages.success(request, "Inbox credentials updated and verified successfully.")
+            return redirect("email_inbox_credential")
+    else:
+        form = EmailInboxCredentialForm(instance=credential)
+
+    return render(
+        request,
+        "web/email_inbox_credential.html",
+        {
+            "form": form,
+            "credential": credential,
+        },
+    )
+
+
+@login_required
+@require_POST
+def delete_email_inbox_credential(request):
+    """Remove stored IMAP inbox credentials."""
+    try:
+        credential = request.user.email_inbox_credential
+        credential.delete()
+        messages.success(request, "Inbox credentials removed.")
+    except EmailInboxCredential.DoesNotExist:
+        pass
+    return redirect("email_inbox_credential")
+

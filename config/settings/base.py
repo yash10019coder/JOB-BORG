@@ -217,6 +217,12 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# Dedicated Celery queue for Playwright submission tasks (U7 / D1)
+CELERY_TASK_ROUTES = {
+    "apps.auto_apply.submit_auto_apply_draft": {"queue": "auto_apply_submit"},
+}
+
+
 # ---------------------------------------------------------------------------
 # JobBorg domain constants
 # ---------------------------------------------------------------------------
@@ -245,6 +251,13 @@ DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", d
 AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 NVIDIA_API_KEY = env("NVIDIA_API_KEY", default="")
+# Both provider SDKs default to a very long request timeout (minutes) when
+# none is given, and draft_auto_apply has no Celery time_limit of its own --
+# confirmed live that an unbounded NVIDIA NIM call can block a worker slot
+# indefinitely with no AutoApplyDraft ever created and no visible error.
+AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS = env.int(
+    "AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS", default=30
+)
 # Secondary tiebreaker only -- consulted after the deterministic evidence-
 # groundedness check has already passed (see
 # apps/auto_apply/llm/base.py:resolve_answers).
@@ -269,8 +282,9 @@ AUTO_APPLY_CAPTCHA_API_KEY = env("AUTO_APPLY_CAPTCHA_API_KEY", default="")
 # FAILED. Well beyond the expected "seconds to over a minute" submission
 # round trip (including a possible CAPTCHA-solve attempt).
 AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
-    "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", default=300
+    "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", default=600
 )
+
 
 # ---------------------------------------------------------------------------
 # Auto-apply: submission debug artifacts (apps.auto_apply.greenhouse_form)
@@ -284,6 +298,50 @@ AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
 AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
     "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=str(BASE_DIR / "media" / "auto_apply_debug")
 )
+
+# ---------------------------------------------------------------------------
+# Credential encryption (apps.accounts.crypto) -- at-rest encryption for
+# stored secrets (starting with the IMAP app password used to auto-solve
+# Greenhouse's post-submit email verification, see
+# docs/plans/2026-08-04-001-feat-auto-apply-greenhouse-email-verification-plan.md).
+# A list of urlsafe-base64 Fernet keys: the first encrypts, and
+# `MultiFernet` tries all of them in order when decrypting, so rotation is
+# "prepend a new key, keep the old one(s) until every ciphertext has been
+# re-encrypted." No default beyond an empty list, and deliberately NOT
+# derived from SECRET_KEY (which has an insecure dev default above) --
+# encrypt_secret()/decrypt_secret() raise ImproperlyConfigured if this is
+# unset, rather than silently using a weak key. Generate a key with
+# apps.accounts.crypto.generate_key().
+# ---------------------------------------------------------------------------
+CREDENTIAL_ENCRYPTION_KEYS = env.list("CREDENTIAL_ENCRYPTION_KEYS", default=[])
+
+# ---------------------------------------------------------------------------
+# Auto-apply: IMAP inbox credential host allowlist (apps.accounts.models
+# EmailInboxCredential) -- mirrors the hostname-allowlist defense-in-depth
+# pattern already used for job_url navigation in
+# apps.auto_apply.greenhouse_form.client.DEFAULT_ALLOWED_HOSTNAMES. Only
+# Gmail-shaped consumer IMAP is validated for v1 (see the plan's Scope
+# Boundaries) -- room is left for Outlook/Yahoo etc., but they are
+# unvalidated and must not be advertised until tested live.
+# ---------------------------------------------------------------------------
+AUTO_APPLY_IMAP_ALLOWED_HOSTS = env.list(
+    "AUTO_APPLY_IMAP_ALLOWED_HOSTS", default=["imap.gmail.com"]
+)
+
+# ---------------------------------------------------------------------------
+# Auto-apply: Email verification code polling settings
+# (apps.auto_apply.email_verification)
+# ---------------------------------------------------------------------------
+AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS = env.int(
+    "AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS", default=180
+)
+AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS = env.int(
+    "AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS", default=4
+)
+AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST = env.list(
+    "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST", default=["greenhouse.io"]
+)
+
 
 # ---------------------------------------------------------------------------
 # Cache — Redis-backed so the rematch debounce token is shared across workers.

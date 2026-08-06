@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name <span aria-hidden="true">*</span></label>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email <span aria-hidden="true">*</span></label>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV <span aria-hidden="true">*</span></label>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Regression guard: a numeric-shaped input alone, with no verification
+    // copy alongside it, must NOT trip the verification-interstitial
+    // classifier -- single-signal detection is exactly the false-positive
+    // class already fixed once in this codebase for reCAPTCHA v3's
+    // background-scoring badge. The stray input's name ("zip_code") even
+    // matches the client's own name-contains-"code" proxy selector, which
+    // is precisely why that signal alone must never be sufficient.
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var err = document.createElement('div');
+      err.setAttribute('role', 'alert');
+      err.textContent = 'Something went wrong. Please try again.';
+      document.body.appendChild(err);
+      var stray = document.createElement('input');
+      stray.type = 'text';
+      stray.inputMode = 'numeric';
+      stray.name = 'zip_code';
+      document.body.appendChild(stray);
+    });
+  </script>
+</body>
+</html>

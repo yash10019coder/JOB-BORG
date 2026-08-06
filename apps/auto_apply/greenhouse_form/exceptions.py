@@ -5,6 +5,10 @@ client, callers never see raw Playwright exceptions) even though this client
 drives a browser instead of an HTTP session.
 """
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from apps.auto_apply.email_verification.base import VerificationOutcome
 
 
 @dataclass
@@ -29,30 +33,33 @@ class GreenhouseFormError(Exception):
 
 
 class GreenhouseFormChallenged(GreenhouseFormError):
-    """A bot-detection challenge (e.g. reCAPTCHA) blocked automation.
-
-    Raised whenever a challenge is detected and either no ``CaptchaSolver``
-    is configured, or the configured solver's ``solve()`` call fails,
-    raises, or times out. Fail-closed by design -- this client never
-    attempts to bypass a challenge by any other means.
-    """
+    """A bot-detection challenge (e.g. reCAPTCHA) blocked automation."""
 
 
 class GreenhouseFormSchemaMismatch(GreenhouseFormError):
-    """The rendered form doesn't match what this client can safely drive.
-
-    Raised both when ``inspect()`` finds a *required* field whose type
-    isn't in ``field_mapping.SUPPORTED_FIELD_TYPES``, and when ``submit()``
-    finds the freshly re-inspected schema no longer matches the schema a
-    submission was drafted against (including option-set drift on select
-    fields) -- filling with a stale field mapping is never attempted.
-    """
+    """The rendered form doesn't match what this client can safely drive."""
 
 
 class GreenhouseFormSubmissionFailed(GreenhouseFormError):
-    """The form was filled and submitted but success could not be confirmed.
+    """The form was filled and submitted but success could not be confirmed."""
 
-    Raised when the Submit control is clicked but the expected post-submit
-    success signal never appears (rejected submission, validation error
-    surfaced by the page, or an unrecognized post-submit state).
-    """
+
+class GreenhouseFormVerificationFailed(GreenhouseFormError):
+    """Greenhouse's post-submit email-verification interstitial was detected or failed verification."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        outcome: "VerificationOutcome | None" = None,
+        debug_artifacts: DebugArtifacts | None = None,
+    ):
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+
+        if outcome is None:
+            outcome = VerificationOutcome.NO_INBOX_CREDENTIALS
+
+        self.outcome = outcome
+        if message is None:
+            message = f"Email verification failed: {self.outcome.value}"
+        super().__init__(message, debug_artifacts=debug_artifacts)

@@ -6,90 +6,90 @@ BLE001`) so a failure never crashes the worker, and `transaction.atomic()`
 around single-row writes (handled inside `services.drafting._persist_draft`
 for the draft create, and inline in `submit_auto_apply_draft` below for the
 `JobApplication` upsert + draft status write).
-
-`draft_auto_apply` (U6) was the first task added to this file. U7 adds
-`submit_auto_apply_draft` (the Send flow) and `sweep_stale_auto_apply_drafts`
-(the Celery Beat staleness/stuck-SENDING sweep).
 """
+from datetime import timedelta, datetime, timezone
 import logging
-from datetime import timedelta
+import time
 
 from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import transaction
-from django.utils import timezone
+from django.utils import timezone as django_timezone
 
 from apps.applications.models import JobApplication
 from apps.jobs.models import Job
 
 from .captcha.base import get_solver
+from .checks import _SUBMIT_HARD_KILL_SECONDS
+from .email_verification.base import VerificationOutcome
+from .email_verification.imap_provider import build_email_code_provider
 from .greenhouse_form.client import GreenhouseFormClient
 from .greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
+    GreenhouseFormVerificationFailed,
 )
 from .greenhouse_form.field_mapping import schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
-# Bounds how long a single submit_auto_apply_draft run may take (browser
-# automation + a possible CAPTCHA-solve round trip) -- deliberately shorter
-# than AUTO_APPLY_SENDING_TIMEOUT_SECONDS so a task that's genuinely running
-# long gets killed by Celery before the staleness sweep would otherwise
-# reset its still-in-flight draft to FAILED out from under it.
-_SUBMIT_SOFT_TIME_LIMIT_SECONDS = max(
-    30, settings.AUTO_APPLY_SENDING_TIMEOUT_SECONDS - 60
-)
-_SUBMIT_TIME_LIMIT_SECONDS = _SUBMIT_SOFT_TIME_LIMIT_SECONDS + 30
+# Hard kill limit for Celery (D1). Single source of truth lives in
+# apps.auto_apply.checks (imported above) since it's a lightweight module
+# with no heavy transitive imports -- checks.py's own system check enforces
+# this stays strictly greater than AUTO_APPLY_SENDING_TIMEOUT_SECONDS.
+_SWEEP_SAFETY_MARGIN_SECONDS = 60
+
+# Backstop for draft_auto_apply: Playwright inspection is independently
+# bounded (see client.py's goto/settle/combobox timeouts), and the LLM call
+# is bounded by AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS -- this is a pure
+# kill switch in case both bounds are somehow bypassed, not the operative
+# budget. Confirmed live: with no limit at all, an unbounded LLM client
+# timeout let a single draft_auto_apply invocation hang indefinitely,
+# occupying a worker slot with no AutoApplyDraft ever created.
+_DRAFT_HARD_KILL_SECONDS = 180
 
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
 
-def _reason_code_for(exc: GreenhouseFormError) -> str:
-    """Map a submission-time exception to `AutoApplyDraft.ReasonCode`.
+def _submit_budget_seconds() -> float:
+    """Compute current submission time budget from settings at call time (D1)."""
+    sending_timeout = getattr(settings, "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", 600)
+    return max(30.0, float(sending_timeout) - _SWEEP_SAFETY_MARGIN_SECONDS)
 
-    Used instead of substring-matching `str(exc)` later in the UI layer
-    (`apps/web/views.py`) -- the exception type is already the structured
-    signal; discarding it into free text and re-deriving it from prose
-    elsewhere would let the two drift out of sync silently.
-    """
+
+def _reason_code_for(exc: GreenhouseFormError) -> str:
+    """Map a submission-time exception to `AutoApplyDraft.ReasonCode`."""
     if isinstance(exc, GreenhouseFormChallenged):
         return AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED
     if isinstance(exc, GreenhouseFormSchemaMismatch):
         return AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH
+    if isinstance(exc, GreenhouseFormVerificationFailed):
+        outcome = getattr(exc, "outcome", None)
+        outcome_map = {
+            VerificationOutcome.NO_INBOX_CREDENTIALS: AutoApplyDraft.ReasonCode.NO_INBOX_CREDENTIALS,
+            VerificationOutcome.CODE_TIMEOUT: AutoApplyDraft.ReasonCode.VERIFICATION_CODE_TIMEOUT,
+            VerificationOutcome.INBOX_AUTH_FAILED: AutoApplyDraft.ReasonCode.INBOX_AUTH_FAILED,
+            VerificationOutcome.INBOX_UNAVAILABLE: AutoApplyDraft.ReasonCode.INBOX_UNAVAILABLE,
+            VerificationOutcome.CODE_AMBIGUOUS: AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS,
+            VerificationOutcome.CODE_REJECTED: AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED,
+        }
+        return outcome_map.get(outcome, AutoApplyDraft.ReasonCode.SUBMISSION_FAILED)
     return AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
 
 
-@shared_task(name="apps.auto_apply.draft_auto_apply")
+@shared_task(name="apps.auto_apply.draft_auto_apply", time_limit=_DRAFT_HARD_KILL_SECONDS)
 def draft_auto_apply(user_id, job_id):
-    """Draft an auto-apply attempt for `user_id` applying to `job_id`.
-
-    Thin wrapper around `services.drafting.draft_for` -- the actual
-    orchestration (schema inspection, standard-field fill, answer
-    resolution, exclusion-vs-drafted decision, and the `AutoApplyDraft`
-    create itself) lives there so it stays independently testable without a
-    Celery task boundary.
-
-    Follows `apps/jobs/tasks.py`'s per-item isolation posture: any failure
-    (a `GreenhouseFormError` `draft_for` didn't already turn into an
-    `EXCLUDED` row, an unexpected exception, etc.) is caught and logged
-    rather than raised, so one bad draft trigger never surfaces as a noisy
-    Celery retry storm -- even though, unlike the ingestion sweep, this
-    task only ever processes one (user, job) pair per invocation.
-
-    Returns the created `AutoApplyDraft`'s id, or `None` if drafting was a
-    no-op (a concurrent duplicate trigger, see `draft_for`) or the task hit
-    an unhandled error.
-    """
+    """Draft an auto-apply attempt for `user_id` applying to `job_id`."""
     try:
         user = User.objects.select_related("profile").get(pk=user_id)
         job = Job.objects.get(pk=job_id)
         draft = draft_for(user, job)
-    except Exception:  # noqa: BLE001 -- one failed draft trigger must not crash the worker
+    except Exception:  # noqa: BLE001
         logger.exception(
             "draft_auto_apply failed for user_id=%s job_id=%s", user_id, job_id
         )
@@ -109,34 +109,10 @@ def draft_auto_apply(user_id, job_id):
 
 @shared_task(
     name="apps.auto_apply.submit_auto_apply_draft",
-    time_limit=_SUBMIT_TIME_LIMIT_SECONDS,
-    soft_time_limit=_SUBMIT_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=_SUBMIT_HARD_KILL_SECONDS,
 )
 def submit_auto_apply_draft(draft_id):
-    """Drive the real Greenhouse submission for a `SENDING` `AutoApplyDraft`.
-
-    The Send view (U8) is responsible for the atomic `DRAFTED -> SENDING`
-    guard before enqueueing this task -- this task assumes it's normally
-    only ever invoked on a `SENDING` draft, but defensively no-ops (log +
-    return) if that's not what it finds on load, e.g. a crashed-worker/
-    lost-enqueue case already recovered by `sweep_stale_auto_apply_drafts`,
-    rather than assuming the precondition still holds.
-
-    On success: `JobApplication` is upserted to `Applied` via
-    `update_or_create` (deliberately not `get_or_create` -- a `JobApplication`
-    row for this (user, job) may already exist in `Saved`/`Dismissed` status
-    from the user's prior manual action, and `get_or_create` would silently
-    leave that pre-existing row's status untouched), linked onto
-    `draft.job_application`, and `draft.status` becomes `APPLIED` -- all in
-    one `transaction.atomic()` block so it's all-or-nothing.
-
-    On any `GreenhouseFormError`: `draft.status` becomes `FAILED` with
-    `error_message` populated from the exception; `JobApplication` is left
-    untouched (R14).
-
-    Returns the draft's id, or `None` if the draft no longer exists or
-    wasn't `SENDING` on load.
-    """
+    """Drive the real Greenhouse submission for a `SENDING` `AutoApplyDraft`."""
     try:
         draft = AutoApplyDraft.objects.select_related("user", "job").get(pk=draft_id)
     except AutoApplyDraft.DoesNotExist:
@@ -154,12 +130,6 @@ def submit_auto_apply_draft(draft_id):
 
     job = draft.job
 
-    # Lazy half of R15's staleness handling: a best-effort guard, not a
-    # guarantee -- the browser automation (and possible CAPTCHA-solve round
-    # trip) that follows can itself take real time, so a job can still close
-    # in the gap between this check and the submission actually landing.
-    # The proactive sweep (`sweep_stale_auto_apply_drafts`) is the other
-    # half of the mitigation, not a full fix for the race.
     if job.status != Job.Status.OPEN:
         draft.status = AutoApplyDraft.Status.STALE
         draft.save(update_fields=["status", "updated_at"])
@@ -172,22 +142,49 @@ def submit_auto_apply_draft(draft_id):
         )
         return draft.pk
 
-    # `draft.answers` holds label -> {value, needs_review, category, reason}
-    # (see services/drafting.py); GreenhouseFormClient.submit() only wants
-    # label -> value.
     answers = {label: entry.get("value") for label, entry in (draft.answers or {}).items()}
     expected_schema = schema_from_dict(draft.form_schema_snapshot)
+
+    budget = _submit_budget_seconds()
+    deadline = time.monotonic() + budget
+
+    provider = build_email_code_provider(draft.user)
+
+    lock_key = f"auto_apply:verification_lock:{draft.user_id}"
+    acquired_lock = False
+    if provider is not None:
+        acquired_lock = bool(cache.add(lock_key, "1", timeout=int(budget)))
+        if not acquired_lock:
+            logger.warning(
+                "submit_auto_apply_draft(draft_id=%s): could not acquire verification lock for user_id=%s.",
+                draft_id,
+                draft.user_id,
+            )
+            draft.status = AutoApplyDraft.Status.FAILED
+            draft.error_message = "Another application for your account is currently waiting for email verification."
+            draft.reason_code = AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS
+            draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
+            return draft.pk
 
     form_client = GreenhouseFormClient(
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
     )
     try:
-        form_client.submit(
-            job.source_url,
-            answers,
-            expected_schema=expected_schema,
-            captcha_solver=get_solver(),
-        )
+        try:
+            form_client.submit(
+                job.source_url,
+                answers,
+                expected_schema=expected_schema,
+                captcha_solver=get_solver(),
+                email_code_provider=provider,
+                deadline_monotonic=deadline,
+            )
+        finally:
+            if acquired_lock:
+                try:
+                    cache.delete(lock_key)
+                except Exception:
+                    pass
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)
@@ -197,7 +194,7 @@ def submit_auto_apply_draft(draft_id):
             "submit_auto_apply_draft(draft_id=%s): submission failed: %s", draft_id, exc
         )
         return draft.pk
-    except Exception:  # noqa: BLE001 -- an unexpected failure must not crash the worker
+    except Exception:  # noqa: BLE001
         logger.exception(
             "submit_auto_apply_draft(draft_id=%s): unexpected error during submission.",
             draft_id,
@@ -214,27 +211,18 @@ def submit_auto_apply_draft(draft_id):
             job=draft.job,
             defaults={"status": JobApplication.Status.APPLIED},
         )
-        # Guard against sweep_stale_auto_apply_drafts having reset this
-        # draft to FAILED (stuck-SENDING recovery) while this submission
-        # was still genuinely in flight, not actually stuck -- an
-        # unconditional save() here would silently overwrite that FAILED
-        # back to APPLIED, and worse, mask that the timeout was too
-        # aggressive relative to how long a real submission can take.
         updated = AutoApplyDraft.objects.filter(
             pk=draft.pk, status=AutoApplyDraft.Status.SENDING
         ).update(
             job_application=job_application,
             status=AutoApplyDraft.Status.APPLIED,
-            updated_at=timezone.now(),
+            updated_at=django_timezone.now(),
         )
 
     if not updated:
         logger.warning(
             "submit_auto_apply_draft(draft_id=%s): submission succeeded and "
-            "JobApplication %s -> Applied, but the draft was no longer "
-            "SENDING (likely reset by the staleness sweep while this "
-            "submission was still in flight) -- draft status left as-is; "
-            "JobApplication is the source of truth for the real outcome.",
+            "JobApplication %s -> Applied, but the draft was no longer SENDING.",
             draft_id,
             job_application.pk,
         )
@@ -250,29 +238,14 @@ def submit_auto_apply_draft(draft_id):
 
 @shared_task(name="apps.auto_apply.sweep_stale_auto_apply_drafts")
 def sweep_stale_auto_apply_drafts():
-    """Celery Beat task -- the proactive half of R15, plus stuck-`SENDING`
-    recovery.
-
-    Two independent sweeps, both cheap bulk `.update()` calls (mirroring
-    `apps/locations`' `sweep_stale_locations` no-op-until-needed cadence):
-
-    1. `DRAFTED` drafts whose `Job.status` has flipped to `CLOSED` are
-       transitioned to `STALE` (R15's proactive half; `submit_auto_apply_draft`
-       is the lazy send-time half).
-    2. `SENDING` drafts older than `AUTO_APPLY_SENDING_TIMEOUT_SECONDS` are
-       reset to `FAILED` with a "timed out / recovered from stuck state"
-       `error_message` -- covers a worker crash or a lost task-enqueue that
-       would otherwise leave a draft permanently stuck in `SENDING`.
-
-    Returns a stats dict with both counts.
-    """
+    """Celery Beat task for staleness & stuck SENDING recovery."""
     stale_count = AutoApplyDraft.objects.filter(
         status=AutoApplyDraft.Status.DRAFTED,
         job__status=Job.Status.CLOSED,
-    ).update(status=AutoApplyDraft.Status.STALE, updated_at=timezone.now())
+    ).update(status=AutoApplyDraft.Status.STALE, updated_at=django_timezone.now())
 
     timeout_seconds = settings.AUTO_APPLY_SENDING_TIMEOUT_SECONDS
-    cutoff = timezone.now() - timedelta(seconds=timeout_seconds)
+    cutoff = django_timezone.now() - timedelta(seconds=timeout_seconds)
     recovered_count = AutoApplyDraft.objects.filter(
         status=AutoApplyDraft.Status.SENDING,
         updated_at__lt=cutoff,
@@ -280,7 +253,7 @@ def sweep_stale_auto_apply_drafts():
         status=AutoApplyDraft.Status.FAILED,
         error_message="Submission timed out / recovered from stuck SENDING state.",
         reason_code=AutoApplyDraft.ReasonCode.SENDING_TIMEOUT,
-        updated_at=timezone.now(),
+        updated_at=django_timezone.now(),
     )
 
     stats = {"stale": stale_count, "recovered_sending": recovered_count}

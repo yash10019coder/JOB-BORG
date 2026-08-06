@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Reproduces the real captured verification interstitial (see
+    // 1785860486-8e3b8ab2-a11y.yaml): 8 separate single-character
+    // <input maxlength="1"> boxes, NOT one input holding the whole code --
+    // the shape `_fill_verification_code()`'s multi-box path must handle.
+    // Each box carries inputmode="numeric" so the existing
+    // `_VERIFICATION_CODE_INPUT_SELECTOR`-based interstitial *detection*
+    // (unchanged by this fix -- only the fill mechanism is new) still
+    // fires via its count()>0 check.
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var boxesHtml = '';
+      for (var i = 0; i < 8; i++) {
+        boxesHtml += '<input type="text" class="otp-box" maxlength="1" inputmode="numeric" ' +
+          'data-idx="' + i + '" autocomplete="off">';
+      }
+      document.getElementById('app-root').innerHTML =
+        '<h1>Verify your email</h1>' +
+        '<p>We sent a verification code to your email. Enter it below to ' +
+        'complete your application.</p>' +
+        '<form id="verification-form">' +
+        '  <div class="field" id="otp-container">' + boxesHtml + '</div>' +
+        '  <button type="submit">Confirm</button>' +
+        '</form>';
+
+      var boxes = document.querySelectorAll('.otp-box');
+      document.getElementById('verification-form').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var entered = Array.prototype.map.call(boxes, function (b) { return b.value; }).join('');
+        if (entered === '87654321') {
+          document.getElementById('app-root').innerHTML =
+            '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+        } else {
+          document.getElementById('app-root').innerHTML =
+            '<p>Invalid code, please try again.</p>' + document.getElementById('app-root').innerHTML;
+        }
+      });
+    });
+  </script>
+</body>
+</html>

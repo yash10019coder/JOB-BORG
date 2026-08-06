@@ -77,6 +77,13 @@ class AutoApplyDraft(models.Model):
         SUBMISSION_FAILED = "submission_failed", "Submission rejected"
         SENDING_TIMEOUT = "sending_timeout", "Submission timed out"
         UNEXPECTED_ERROR = "unexpected_error", "Unexpected error"
+        NO_INBOX_CREDENTIALS = "no_inbox_credentials", "No inbox credentials connected"
+        VERIFICATION_CODE_TIMEOUT = "verification_code_timeout", "Verification email timed out"
+        INBOX_AUTH_FAILED = "inbox_auth_failed", "Inbox authentication failed"
+        INBOX_UNAVAILABLE = "inbox_unavailable", "Inbox connection unavailable"
+        VERIFICATION_CODE_AMBIGUOUS = "verification_code_ambiguous", "Multiple verification codes found"
+        VERIFICATION_CODE_REJECTED = "verification_code_rejected", "Verification code rejected"
+
 
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.

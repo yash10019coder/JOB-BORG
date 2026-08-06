@@ -8,6 +8,9 @@ import os
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
+
+from .crypto import encrypt_secret
 
 
 def resume_upload_path(instance, filename):
@@ -154,3 +157,100 @@ class Profile(models.Model):
 
     def __str__(self):
         return f"Profile<{self.user.username}>"
+
+
+class EmailInboxCredential(models.Model):
+    """One per-user IMAP inbox credential, used exclusively to auto-solve
+    Greenhouse's post-submit email verification step (see
+    docs/plans/2026-08-04-001-feat-auto-apply-greenhouse-email-verification-plan.md).
+
+    The stored app password is the highest-value secret this product holds
+    (see the plan's Security Assessment), so this model deliberately has
+    exactly two mutators -- `set_app_password()` and `mark_auth_failed()` --
+    and no other write path is expected to touch `app_password_encrypted`,
+    `is_active`, `last_error_code`, or `last_error_at`.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="email_inbox_credential",
+    )
+
+    email_address = models.EmailField()
+    imap_host = models.CharField(max_length=255)
+    imap_port = models.PositiveIntegerField(default=993)
+
+    # Fernet ciphertext (see apps.accounts.crypto) -- never plaintext, never
+    # decrypted implicitly. Fernet ciphertext is non-deterministic (a random
+    # IV per encryption), so this column can NEVER be used as a DB lookup key
+    # -- no `.filter(app_password_encrypted=...)`/`.get(app_password_encrypted=...)`
+    # anywhere, and deliberately no `db_index`.
+    app_password_encrypted = models.TextField()
+
+    is_active = models.BooleanField(default=True)
+
+    # A short code (e.g. "inbox_auth_failed"), NOT a message -- IMAP server
+    # error text can echo back the username/password attempt, so raw
+    # exception text must never be stored here.
+    last_error_code = models.CharField(max_length=32, blank=True, default="")
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    last_error_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        super().clean()
+
+        allowed_hosts = getattr(settings, "AUTO_APPLY_IMAP_ALLOWED_HOSTS", [])
+        if self.imap_host not in allowed_hosts:
+            raise ValidationError(
+                f"IMAP host {self.imap_host!r} is not on the allowed host "
+                f"list {sorted(allowed_hosts)}."
+            )
+
+        # TLS-only, per the plan's scope boundaries -- 993 is the IMAPS port;
+        # nothing else is accepted.
+        if self.imap_port != 993:
+            raise ValidationError(
+                f"IMAP port must be 993 (TLS-only); got {self.imap_port!r}."
+            )
+
+    def set_app_password(self, raw_password: str) -> None:
+        """Encrypt and store a new app password, reactivating the credential.
+
+        Strips whitespace from `raw_password` first: Google renders Gmail
+        app passwords with spaces for readability (`"abcd efgh ijkl mnop"`),
+        and every user's first paste attempt fails without stripping them --
+        a known real-world gotcha, not speculative.
+
+        This is the one call site every write path to `app_password_encrypted`
+        should go through (the credential-connect view once it exists in
+        apps/web, mirroring `Profile.set_resume()`'s idiom) -- deliberately
+        not a `post_save` signal, so the trigger stays visible here instead
+        of implicit.
+        """
+        stripped = "".join(raw_password.split())
+        self.app_password_encrypted = encrypt_secret(stripped)
+        self.is_active = True
+        self.last_error_code = ""
+        self.save(
+            update_fields=["app_password_encrypted", "is_active", "last_error_code", "updated_at"]
+        )
+
+    def mark_auth_failed(self, error_code: str) -> None:
+        """Deactivate the credential after a genuine IMAP auth rejection.
+
+        This is the ONLY method in the whole codebase allowed to set
+        `is_active=False` (R7) -- a transient/unreachable IMAP failure must
+        NOT call this and must NOT deactivate the credential; only a
+        confirmed auth rejection (revoked/wrong app password) does.
+        """
+        self.is_active = False
+        self.last_error_code = error_code
+        self.last_error_at = timezone.now()
+        self.save(update_fields=["is_active", "last_error_code", "last_error_at", "updated_at"])
+
+    def __str__(self):
+        return f"EmailInboxCredential<{self.user.username}>"

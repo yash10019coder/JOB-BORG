@@ -77,7 +77,8 @@ class AnthropicAnswerInferenceClient:
         # `client` is injectable for tests -- never make a real API call
         # from a test; construct with a fake/mock client instead.
         self._client = client or anthropic.Anthropic(
-            api_key=api_key or settings.ANTHROPIC_API_KEY
+            api_key=api_key or settings.ANTHROPIC_API_KEY,
+            timeout=settings.AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS,
         )
 
     def infer(

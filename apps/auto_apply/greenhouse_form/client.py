@@ -24,12 +24,15 @@ Every ``inspect()``/``submit()`` call runs against a fresh, isolated
 Playwright browser context (no shared cookies/storage across calls),
 constructed via an injectable ``context_factory`` and torn down after use.
 """
+from datetime import datetime, timezone
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
+from apps.auto_apply.email_verification.base import EmailCodeProvider, VerificationOutcome
+
 
 from .exceptions import (
     DebugArtifacts,
@@ -37,6 +40,7 @@ from .exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormVerificationFailed,
 )
 from .field_mapping import (
     CHECKBOX_GROUP,
@@ -92,6 +96,70 @@ _CONFIRMATION_TEXT_PATTERNS = (
     "we've received your application",
     "we have received your application",
     "your application was submitted",
+)
+
+# Selector for a "code-entry control" -- one of the two independent signals
+# `_verification_interstitial_detected()` requires (see below) to recognize
+# Greenhouse's post-submit email-verification interstitial.
+#
+# UNVERIFIED as of this unit: the plan's original report of this interstitial
+# was a screenshot only, and (per the plan's U5 execution note and Risks
+# section) a live capture of the real DOM is still pending -- these
+# selectors are a reasonable guess assembled from standard OTP-input
+# markup conventions, not a confirmed pattern against a real Greenhouse
+# board:
+#   - `autocomplete="one-time-code"` is the WHATWG-standardized attribute
+#     value browsers use to offer OTP autofill/suggestions.
+#   - `inputmode="numeric"` is the standard hint for a numeric-only virtual
+#     keyboard, which a 6-digit code field would plausibly carry.
+#   - `name`/`id`/`placeholder` containing "code" is a last-resort proxy for
+#     "a text/number input whose associated label matches a code-like
+#     pattern" -- matching by attribute rather than resolving each input's
+#     accessible label keeps this cheap, at the cost of also matching
+#     unrelated fields like "zip_code" (acceptable here only because this
+#     signal is never trusted alone -- see the confirming-copy requirement
+#     below).
+# Must be replaced/confirmed once a real interstitial page is captured.
+_VERIFICATION_CODE_INPUT_SELECTOR = (
+    'input[autocomplete="one-time-code" i], '
+    'input[inputmode="numeric" i], '
+    'input[type="text"][name*="code" i], '
+    'input[type="text"][id*="code" i], '
+    'input[type="text"][placeholder*="code" i], '
+    'input[type="number"][name*="code" i], '
+    'input[type="number"][id*="code" i], '
+    'input[type="number"][placeholder*="code" i]'
+)
+
+# Fallback shape for the verification code fill (not detection -- see
+# `_fill_verification_code()`): confirmed live via a captured
+# accessibility-tree dump (1785860486-8e3b8ab2-a11y.yaml) that Greenhouse's
+# real verification interstitial can render N separate single-character
+# `<input maxlength="1">` boxes rather than one input holding the whole
+# code. `_VERIFICATION_CODE_INPUT_SELECTOR` above still matches each box
+# individually (they carry `inputmode="numeric"`), so interstitial
+# *detection* is unaffected -- only the *fill* step needs to distribute one
+# character per box instead of filling a single control with the whole
+# string.
+_VERIFICATION_CODE_BOX_SELECTOR = 'input[maxlength="1"]'
+
+# The other independent signal `_verification_interstitial_detected()`
+# requires: confirming copy for the verification interstitial, mirroring
+# `_CONFIRMATION_TEXT_PATTERNS`'s multi-phrase, substring-match precedent
+# rather than a single regex. Deliberately overlaps in spirit with ordinary
+# success copy (e.g. "check your email") -- that's exactly why detection
+# requires this AND a code-entry control, not either alone; a single-signal
+# check here would be the same false-positive class as the reCAPTCHA-v3
+# background-scoring badge already fixed once in `_challenge_detected()`.
+_VERIFICATION_TEXT_PATTERNS = (
+    "verification code",
+    "we sent a code",
+    "we've sent a code",
+    "we have sent a code",
+    "check your email",
+    "confirm your email",
+    "enter the code",
+    "enter your code",
 )
 
 
@@ -155,6 +223,7 @@ class GreenhouseFormClient:
         *,
         context_factory: Callable[[], ContextHandle] | None = None,
         captcha_solver: CaptchaSolver | None = None,
+        email_code_provider: EmailCodeProvider | None = None,
         allowed_hostnames: frozenset[str] = DEFAULT_ALLOWED_HOSTNAMES,
         debug_artifact_dir: str | Path | None = None,
         navigation_timeout_ms: int = _DEFAULT_NAVIGATION_TIMEOUT_MS,
@@ -163,6 +232,7 @@ class GreenhouseFormClient:
     ):
         self._context_factory = context_factory or _default_context_factory
         self._default_captcha_solver = captcha_solver
+        self._default_email_code_provider = email_code_provider
         self.allowed_hostnames = frozenset(allowed_hostnames)
         self.debug_artifact_dir = Path(debug_artifact_dir) if debug_artifact_dir else None
         self.navigation_timeout_ms = navigation_timeout_ms
@@ -194,14 +264,6 @@ class GreenhouseFormClient:
             except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error
-                # A raw Playwright/browser error (navigation timeout, DNS
-                # failure, page crash, etc.) here would otherwise propagate
-                # past draft_for()'s GreenhouseFormError handlers straight
-                # to draft_auto_apply's catch-all, which persists no
-                # AutoApplyDraft row at all -- silently dropping the job
-                # with no trace in the review queue. Wrapping as a typed
-                # error lets drafting.py's existing handler persist an
-                # EXCLUDED row instead.
                 raise GreenhouseFormError(
                     f"Could not load the application form at {job_url}: {exc}"
                 ) from exc
@@ -215,40 +277,38 @@ class GreenhouseFormClient:
         *,
         expected_schema: FormSchema | None = None,
         captcha_solver: CaptchaSolver | None = None,
+        email_code_provider: EmailCodeProvider | None = None,
+        deadline_monotonic: float | None = None,
     ) -> SubmissionResult:
         """Fill and submit the application page at ``job_url``.
 
         Args:
-            answers: mapping of field label -> value to fill. For
-                ``single_select``/``multi_select`` fields, value is an
-                option label (or list of option labels for multi-select).
-            expected_schema: the schema this submission was drafted
-                against, if any. When given, the schema re-inspected on the
-                live page must match it (including option sets) or
-                ``GreenhouseFormSchemaMismatch`` is raised before any fill
-                is attempted.
-            captcha_solver: overrides the instance's default solver for
-                this call only.
+            answers: mapping of field label -> value to fill.
+            expected_schema: expected schema to match against.
+            captcha_solver: overrides instance default solver.
+            email_code_provider: overrides instance default provider.
+            deadline_monotonic: deadline timestamp (monotonic) for the submission.
 
         Raises:
             GreenhouseFormError: ``job_url`` isn't on the hostname allowlist.
-            GreenhouseFormChallenged: a challenge is present and no solver
-                is configured, or the configured solver fails/times out.
-            GreenhouseFormSchemaMismatch: the live schema doesn't match
-                ``expected_schema``, or a required field is unsupported.
-            GreenhouseFormSubmissionFailed: the form was submitted but no
-                success signal was found.
+            GreenhouseFormChallenged: challenge present and unsolvable.
+            GreenhouseFormSchemaMismatch: schema mismatch.
+            GreenhouseFormSubmissionFailed: submission failed.
+            GreenhouseFormVerificationFailed: email verification failed.
         """
         self._validate_url(job_url)
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
+        provider = (
+            email_code_provider
+            if email_code_provider is not None
+            else self._default_email_code_provider
+        )
 
         def _run(page):
             self._goto_and_settle(page, job_url)
 
             if self._challenge_detected(page):
                 self._attempt_captcha_solve(page, job_url, solver)
-                # Re-check: a "solved" challenge that didn't actually clear
-                # is still a challenge -- never proceed on faith.
                 if self._challenge_detected(page):
                     raise GreenhouseFormChallenged(
                         f"Challenge on {job_url} was not cleared after a solve attempt."
@@ -265,9 +325,19 @@ class GreenhouseFormClient:
 
             try:
                 self._fill_answers(page, schema_now, answers)
-                self._click_submit(page)
-                result = self._confirm_success(page)
-            except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
+                submitted_at = datetime.now(timezone.utc)
+                self._click_submit(page, schema_now)
+                result = self._confirm_success(
+                    page,
+                    provider=provider,
+                    submitted_at=submitted_at,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except (
+                GreenhouseFormChallenged,
+                GreenhouseFormSchemaMismatch,
+                GreenhouseFormVerificationFailed,
+            ):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
                 self._raise_with_debug_artifacts(
@@ -283,6 +353,7 @@ class GreenhouseFormClient:
                     page,
                 )
             return result
+
 
         return self._with_fresh_page(_run)
 
@@ -443,7 +514,91 @@ class GreenhouseFormClient:
                     f"type {field_type!r}."
                 )
             fields.append(form_field)
+
+        fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
         return FormSchema(fields=tuple(fields))
+
+    @staticmethod
+    def _discover_aria_labelledby_only_fields(
+        page, job_url: str, seen_control_ids: set[str]
+    ) -> list[FormField]:
+        """Second discovery pass for controls with no `<label>` at all.
+
+        Verified live against real Greenhouse boards (Alpaca EEO/demographic
+        questions -- Gender, Hispanic/Latino, Veteran Status, Disability
+        Status -- plus custom Yes/No eligibility questions and the Location
+        (City) field): these render as a bare text node (a plain `<div>`/
+        `<span>`, not a `<label>`) immediately followed by a
+        `role="combobox"` element whose accessible name comes from
+        `aria-labelledby` pointing at that text node. The primary
+        `_discover_schema()` loop starts from `page.locator("form label")`,
+        so these controls never enter it at all -- not misclassified, just
+        structurally invisible. Confirmed as the direct cause of historical
+        `AutoApplyDraft` failures: required comboboxes left `[invalid]` with
+        "This field is required", and `_fill_combobox()` raising "No
+        matching option for '' found in combobox field 'Location (City)'"
+        because no answer was ever mapped to a field discovery never found.
+
+        Skips any control already captured by the label-based pass (by
+        `control_id`) and any control where an `aria-labelledby` target is
+        itself a real `<label>` element -- that shape is already handled by
+        `_resolve_control_for_label()`'s own `for`/nested-control lookup and
+        is not this pattern.
+        """
+        fields: list[FormField] = []
+        candidates = page.locator("form [aria-labelledby]")
+        for i in range(candidates.count()):
+            control = candidates.nth(i)
+            tag_name = control.evaluate("el => el.tagName").upper()
+            if tag_name not in ("INPUT", "SELECT", "TEXTAREA"):
+                continue
+            control_type = (control.get_attribute("type") or "").lower()
+            if control_type in ("file", "checkbox"):
+                # Already discoverable via a real <label> (file) or a
+                # <fieldset><legend> (checkbox group) in the pass above.
+                continue
+            control_id = control.get_attribute("id") or ""
+            if control_id and control_id in seen_control_ids:
+                continue
+
+            labelledby_ids = (control.get_attribute("aria-labelledby") or "").split()
+            if not labelledby_ids:
+                continue
+            label_parts: list[str] = []
+            references_a_label_element = False
+            for labelledby_id in labelledby_ids:
+                ref = page.locator(f'[id="{labelledby_id}"]')
+                if ref.count() == 0:
+                    continue
+                if ref.first.evaluate("el => el.tagName").upper() == "LABEL":
+                    references_a_label_element = True
+                    break
+                label_parts.append(ref.first.text_content() or "")
+            if references_a_label_element:
+                continue
+            label_text = GreenhouseFormClient._clean_label(" ".join(label_parts))
+            if not label_text:
+                continue
+
+            if control_id:
+                seen_control_ids.add(control_id)
+            field_type = GreenhouseFormClient._classify_field_type(control)
+            required = GreenhouseFormClient._is_required(control)
+            options = GreenhouseFormClient._extract_options(page, control, field_type)
+            form_field = FormField(
+                label=label_text,
+                field_type=field_type,
+                required=required,
+                options=options,
+                control_id=control_id,
+            )
+            if required and not form_field.is_supported:
+                raise GreenhouseFormSchemaMismatch(
+                    f"Required field {label_text!r} on {job_url} has unsupported "
+                    f"type {field_type!r}."
+                )
+            fields.append(form_field)
+        return fields
 
     @staticmethod
     def _resolve_control_for_label(page, label_el):
@@ -771,24 +926,185 @@ class GreenhouseFormClient:
             )
         return candidate
 
-    def _click_submit(self, page) -> None:
+    def _click_submit(self, page, schema: FormSchema | None = None) -> None:
         submit_button = page.get_by_role("button", name="Submit", exact=False)
         if submit_button.count() == 0:
             submit_button = page.locator('button[type="submit"], input[type="submit"]')
-        submit_button.first.click()
+        submit_button = submit_button.first
 
-    def _confirm_success(self, page) -> SubmissionResult | None:
-        """Poll for a post-submit success signal until ``confirmation_timeout_ms``
-        elapses, checking every signal in ``_check_success_signal`` each pass
-        rather than waiting out a full timeout on one selector before trying
-        the next -- keeps the worst-case (genuine failure) wait bounded by a
-        single timeout budget instead of one per signal.
+        if self._is_button_disabled(submit_button):
+            # Confirmed live (8/10 historical `submission_failed` rows):
+            # clicking a client-side-disabled Submit is a silent no-op --
+            # the page never navigates, so the poll in `_confirm_success()`
+            # eventually times out with the opaque "No post-submit success
+            # signal found" message, with no indication of which field
+            # actually blocked it. Raising here, before the no-op click,
+            # gives a diagnostic error naming the still-invalid/empty
+            # required fields instead.
+            blocking = self._blocking_required_fields(page, schema) if schema is not None else []
+            detail = f" Still-invalid or empty required fields: {', '.join(blocking)}." if blocking else ""
+            raise GreenhouseFormSubmissionFailed(
+                f"Submit button is disabled; the click would be a silent no-op.{detail}"
+            )
+
+        submit_button.click()
+
+    @staticmethod
+    def _is_button_disabled(button) -> bool:
+        try:
+            if button.is_disabled():
+                return True
+        except Exception:  # noqa: BLE001 -- treat an unresolvable check as "not disabled"
+            pass
+        return (button.get_attribute("aria-disabled") or "").lower() == "true"
+
+    @staticmethod
+    def _blocking_required_fields(page, schema: FormSchema) -> list[str]:
+        """Best-effort: which required fields still look empty/invalid.
+
+        Cheap re-check against the already-discovered schema -- an empty
+        native value, or `aria-invalid="true"` on the resolved control,
+        marks that field as a likely blocker. Never raises: any field whose
+        current state can't be read is simply omitted from the list rather
+        than failing the diagnostic itself.
+
+        The empty-native-value check is skipped for `COMBOBOX_SELECT`:
+        `_fill_combobox()`'s own docstring notes that after a successful
+        fill "the control's own `.value` stays empty afterward; the widget
+        tracks the choice elsewhere" -- so every required combobox would
+        otherwise be misreported as still-blocking even when correctly
+        answered (caught in code review: this defeated the whole point of
+        the diagnostic for exactly the field type this fix's first change,
+        aria-labelledby-only comboboxes, targets). `aria-invalid` is still
+        checked for comboboxes since the widget itself maintains that
+        attribute.
         """
-        deadline = time.monotonic() + (self.confirmation_timeout_ms / 1000)
+        blocking: list[str] = []
+        for field in schema.fields:
+            if not field.required or not field.control_id:
+                continue
+            control = page.locator(f'[id="{field.control_id}"]')
+            if control.count() == 0:
+                continue
+            control = control.first
+            if (control.get_attribute("aria-invalid") or "").lower() == "true":
+                blocking.append(field.label)
+                continue
+            if field.field_type == COMBOBOX_SELECT:
+                continue
+            try:
+                if control.input_value() == "":
+                    blocking.append(field.label)
+            except Exception:  # noqa: BLE001 -- e.g. a fieldset/select with no input_value()
+                continue
+        return blocking
+
+    def _confirm_success(
+        self,
+        page,
+        *,
+        provider: EmailCodeProvider | None = None,
+        submitted_at: datetime | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> SubmissionResult | None:
+
+        """Poll for a post-submit outcome until ``confirmation_timeout_ms``
+        elapses -- a three-way classifier (success / verification-required /
+        neither-yet) evaluated once per pass under this ONE shared deadline,
+        rather than a separate timeout per signal:
+
+        1. Success (``_check_success_signal``) -- checked first, every
+           pass. Success always wins a tie against the verification signal
+           below, so page copy that happens to overlap with verification
+           phrasing (e.g. a success page saying "check your email for next
+           steps") can never be misclassified as the interstitial.
+        2. The verification interstitial (``_verification_interstitial_detected``)
+           -- checked only when success didn't match this pass. Raises
+           immediately on detection rather than waiting out the rest of the
+           budget: unlike a genuine failure (which might still resolve to
+           success on a later pass, e.g. a slow redirect), the interstitial
+           is a stable, terminal page state once rendered.
+        3. Neither yet -- keep polling until the deadline, same as before.
+
+        Returns ``None`` (a plain "no signal found" -- ``submit()`` raises
+        ``GreenhouseFormSubmissionFailed``) when the deadline elapses with
+        neither classified.
+        """
+        deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
+        )
         while True:
             result = self._check_success_signal(page)
             if result is not None:
                 return result
+            if self._verification_interstitial_detected(page):
+                if provider is None:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        "Greenhouse verification-code interstitial detected; no provider configured",
+                        page,
+                        outcome=VerificationOutcome.NO_INBOX_CREDENTIALS,
+                    )
+
+                now = time.monotonic()
+                if deadline - now < 20.0:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        "Remaining budget too low for email verification polling",
+                        page,
+                        outcome=VerificationOutcome.CODE_TIMEOUT,
+                    )
+
+                since = submitted_at or datetime.now(timezone.utc)
+                try:
+                    lookup_res = provider.get_code(since=since, deadline_monotonic=deadline)
+                except Exception as exc:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        f"Email code provider raised an error: {exc}",
+                        page,
+                        outcome=VerificationOutcome.INBOX_UNAVAILABLE,
+                    )
+
+                if lookup_res.outcome != VerificationOutcome.FOUND or not lookup_res.code:
+                    self._raise_with_debug_artifacts(
+                        GreenhouseFormVerificationFailed,
+                        f"Email verification failed with outcome: {lookup_res.outcome.value}",
+                        page,
+                        outcome=lookup_res.outcome,
+                    )
+
+                # R9: Code typed! Enter code and submit. Debug artifact capture MUST be suppressed
+                # on the post-code path so live OTP is never written to disk -- this covers the
+                # success check too (not just fill/submit): a Playwright race right after a
+                # submit-triggered navigation (e.g. "execution context was destroyed") must not
+                # escape this suppression and capture a screenshot of the just-typed code.
+                try:
+                    self._fill_verification_code(page, lookup_res.code)
+                    submit_button = page.locator(
+                        "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
+                    ).first
+                    submit_button.click()
+                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+                    post_code_check = self._check_success_signal(page)
+                except Exception as exc:
+                    # Post-code path: raise WITHOUT debug artifacts
+                    raise GreenhouseFormVerificationFailed(
+                        "Failed while submitting verification code",
+                        outcome=VerificationOutcome.CODE_REJECTED,
+                    ) from exc
+
+                if post_code_check is not None:
+                    return post_code_check
+
+                # Still on verification page: post-code path, raise WITHOUT debug artifacts
+                raise GreenhouseFormVerificationFailed(
+                    "Verification code entered but application success not confirmed",
+                    outcome=VerificationOutcome.CODE_REJECTED,
+                )
+
             if time.monotonic() >= deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
@@ -814,10 +1130,70 @@ class GreenhouseFormClient:
 
         return None
 
+    @staticmethod
+    def _fill_verification_code(page, code: str) -> None:
+        """Fill Greenhouse's verification-code control.
+
+        Handles both shapes confirmed to occur live: a single input holding
+        the whole code (the originally assumed shape), and N separate
+        single-character `<input maxlength="1">` boxes (confirmed via a
+        captured accessibility-tree dump -- see
+        `_VERIFICATION_CODE_BOX_SELECTOR`'s comment). Prefers the
+        single-input path when it resolves to exactly one control so the
+        already-verified single-input behavior is unchanged.
+        """
+        single = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
+        if single.count() == 1:
+            single.first.fill(code)
+            return
+
+        # Check the multi-box shape BEFORE falling back to "any single
+        # match" below: caught in code review, each box also carries
+        # `inputmode="numeric"` and therefore matches
+        # `_VERIFICATION_CODE_INPUT_SELECTOR` too, so `single.count()` is
+        # >0 for a genuine multi-box UI. Checking box shape first, and
+        # raising explicitly on a length mismatch, avoids silently
+        # stuffing the whole multi-character code into box #1 alone via
+        # the old single-input fallback.
+        boxes = page.locator(_VERIFICATION_CODE_BOX_SELECTOR)
+        box_count = boxes.count()
+        if box_count >= 2:
+            if box_count == len(code):
+                for i, char in enumerate(code):
+                    boxes.nth(i).fill(char)
+                return
+            raise RuntimeError(
+                f"Verification code length ({len(code)}) does not match the "
+                f"multi-box control's box count ({box_count})."
+            )
+
+        if single.count() > 0:
+            single.first.fill(code)
+            return
+
+        raise RuntimeError(
+            "No verification-code input control found (neither a single "
+            "input nor a matching set of single-character boxes)."
+        )
+
+    @staticmethod
+    def _verification_interstitial_detected(page) -> bool:
+        """Detect Greenhouse's post-submit email-verification interstitial."""
+        code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
+        if code_input.count() == 0:
+            return False
+        body_text = page.locator("body").inner_text().lower()
+        return any(phrase in body_text for phrase in _VERIFICATION_TEXT_PATTERNS)
+
     # -- failure debugging --------------------------------------------------
 
-    def _raise_with_debug_artifacts(self, exc_cls, message: str, page) -> None:
-        raise exc_cls(message, debug_artifacts=self._capture_debug_artifacts(page))
+    def _raise_with_debug_artifacts(
+        self, exc_cls, message: str, page, *, outcome: VerificationOutcome | None = None
+    ) -> None:
+        artifacts = self._capture_debug_artifacts(page)
+        if outcome is not None and issubclass(exc_cls, GreenhouseFormVerificationFailed):
+            raise exc_cls(message, outcome=outcome, debug_artifacts=artifacts)
+        raise exc_cls(message, debug_artifacts=artifacts)
 
     def _capture_debug_artifacts(self, page) -> DebugArtifacts | None:
         if self.debug_artifact_dir is None:
@@ -828,12 +1204,10 @@ class GreenhouseFormClient:
             screenshot_path = self.debug_artifact_dir / f"{run_id}.png"
             tree_path = self.debug_artifact_dir / f"{run_id}-a11y.yaml"
             page.screenshot(path=str(screenshot_path), full_page=True)
-            # Playwright removed the legacy `page.accessibility` API; the
-            # ARIA-snapshot locator method is the current equivalent (a
-            # YAML-formatted serialization of the accessibility tree).
             tree_path.write_text(page.locator("body").aria_snapshot())
             return DebugArtifacts(
                 screenshot_path=str(screenshot_path), accessibility_tree_path=str(tree_path)
             )
         except Exception:  # noqa: BLE001 -- debug capture must never mask the real failure
             return None
+
