@@ -22,6 +22,7 @@ from apps.applications.models import JobApplication
 from apps.jobs.models import Job
 
 from .captcha.base import get_solver
+from .checks import _SUBMIT_HARD_KILL_SECONDS
 from .email_verification.base import VerificationOutcome
 from .email_verification.imap_provider import build_email_code_provider
 from .greenhouse_form.client import GreenhouseFormClient
@@ -35,8 +36,10 @@ from .greenhouse_form.field_mapping import schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
-# Hard kill limit for Celery (D1)
-_SUBMIT_HARD_KILL_SECONDS = 900
+# Hard kill limit for Celery (D1). Single source of truth lives in
+# apps.auto_apply.checks (imported above) since it's a lightweight module
+# with no heavy transitive imports -- checks.py's own system check enforces
+# this stays strictly greater than AUTO_APPLY_SENDING_TIMEOUT_SECONDS.
 _SWEEP_SAFETY_MARGIN_SECONDS = 60
 
 # Backstop for draft_auto_apply: Playwright inspection is independently

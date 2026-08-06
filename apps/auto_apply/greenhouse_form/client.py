@@ -914,7 +914,10 @@ class GreenhouseFormClient:
                     )
 
                 # R9: Code typed! Enter code and submit. Debug artifact capture MUST be suppressed
-                # on the post-code path so live OTP is never written to disk.
+                # on the post-code path so live OTP is never written to disk -- this covers the
+                # success check too (not just fill/submit): a Playwright race right after a
+                # submit-triggered navigation (e.g. "execution context was destroyed") must not
+                # escape this suppression and capture a screenshot of the just-typed code.
                 try:
                     code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).first
                     code_input.fill(lookup_res.code)
@@ -923,6 +926,7 @@ class GreenhouseFormClient:
                     ).first
                     submit_button.click()
                     page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+                    post_code_check = self._check_success_signal(page)
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -930,7 +934,6 @@ class GreenhouseFormClient:
                         outcome=VerificationOutcome.CODE_REJECTED,
                     ) from exc
 
-                post_code_check = self._check_success_signal(page)
                 if post_code_check is not None:
                     return post_code_check
 
