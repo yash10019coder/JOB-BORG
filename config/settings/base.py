@@ -251,6 +251,13 @@ DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", d
 AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 NVIDIA_API_KEY = env("NVIDIA_API_KEY", default="")
+# Both provider SDKs default to a very long request timeout (minutes) when
+# none is given, and draft_auto_apply has no Celery time_limit of its own --
+# confirmed live that an unbounded NVIDIA NIM call can block a worker slot
+# indefinitely with no AutoApplyDraft ever created and no visible error.
+AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS = env.int(
+    "AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS", default=30
+)
 # Secondary tiebreaker only -- consulted after the deterministic evidence-
 # groundedness check has already passed (see
 # apps/auto_apply/llm/base.py:resolve_answers).

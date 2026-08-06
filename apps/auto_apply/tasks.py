@@ -39,6 +39,15 @@ from .services.drafting import draft_for
 _SUBMIT_HARD_KILL_SECONDS = 900
 _SWEEP_SAFETY_MARGIN_SECONDS = 60
 
+# Backstop for draft_auto_apply: Playwright inspection is independently
+# bounded (see client.py's goto/settle/combobox timeouts), and the LLM call
+# is bounded by AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS -- this is a pure
+# kill switch in case both bounds are somehow bypassed, not the operative
+# budget. Confirmed live: with no limit at all, an unbounded LLM client
+# timeout let a single draft_auto_apply invocation hang indefinitely,
+# occupying a worker slot with no AutoApplyDraft ever created.
+_DRAFT_HARD_KILL_SECONDS = 180
+
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
@@ -70,7 +79,7 @@ def _reason_code_for(exc: GreenhouseFormError) -> str:
     return AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
 
 
-@shared_task(name="apps.auto_apply.draft_auto_apply")
+@shared_task(name="apps.auto_apply.draft_auto_apply", time_limit=_DRAFT_HARD_KILL_SECONDS)
 def draft_auto_apply(user_id, job_id):
     """Draft an auto-apply attempt for `user_id` applying to `job_id`."""
     try:

@@ -98,6 +98,7 @@ class NvidiaAnswerInferenceClient:
         self._client = client or openai.OpenAI(
             base_url=NVIDIA_BASE_URL,
             api_key=api_key or settings.NVIDIA_API_KEY,
+            timeout=settings.AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS,
         )
 
     def infer(

@@ -9,6 +9,7 @@ structured-output parsing).
 """
 import json
 from types import SimpleNamespace
+from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 
@@ -27,6 +28,23 @@ class GetClientNvidiaRegistrationTests(SimpleTestCase):
         with override_settings(AUTO_APPLY_LLM_PROVIDER="nvidia"):
             client = get_client(client=object())
         self.assertIsInstance(client, NvidiaAnswerInferenceClient)
+
+
+class NvidiaClientConstructionTests(SimpleTestCase):
+    """A real (unfaked) OpenAI client must never be built with no request
+    timeout -- the SDK's default (minutes) leaves draft_auto_apply able to
+    hang forever on a slow/unresponsive NIM call, with no Celery time_limit
+    to kill it either. Confirmed live: a real inference call against
+    integrate.api.nvidia.com blocked for 5+ minutes with nothing bounding
+    it, silently preventing any AutoApplyDraft from ever being created."""
+
+    def test_real_client_is_constructed_with_an_explicit_timeout(self):
+        with mock.patch("apps.auto_apply.llm.nvidia_client.openai.OpenAI") as mock_openai:
+            NvidiaAnswerInferenceClient(api_key="key")
+        _, kwargs = mock_openai.call_args
+        self.assertIn("timeout", kwargs)
+        self.assertIsNotNone(kwargs["timeout"])
+        self.assertLessEqual(kwargs["timeout"], 60)
 
 
 def _chat_response(content):
