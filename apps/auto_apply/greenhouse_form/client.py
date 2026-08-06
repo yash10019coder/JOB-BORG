@@ -131,6 +131,18 @@ _VERIFICATION_CODE_INPUT_SELECTOR = (
     'input[type="number"][placeholder*="code" i]'
 )
 
+# Fallback shape for the verification code fill (not detection -- see
+# `_fill_verification_code()`): confirmed live via a captured
+# accessibility-tree dump (1785860486-8e3b8ab2-a11y.yaml) that Greenhouse's
+# real verification interstitial can render N separate single-character
+# `<input maxlength="1">` boxes rather than one input holding the whole
+# code. `_VERIFICATION_CODE_INPUT_SELECTOR` above still matches each box
+# individually (they carry `inputmode="numeric"`), so interstitial
+# *detection* is unaffected -- only the *fill* step needs to distribute one
+# character per box instead of filling a single control with the whole
+# string.
+_VERIFICATION_CODE_BOX_SELECTOR = 'input[maxlength="1"]'
+
 # The other independent signal `_verification_interstitial_detected()`
 # requires: confirming copy for the verification interstitial, mirroring
 # `_CONFIRMATION_TEXT_PATTERNS`'s multi-phrase, substring-match precedent
@@ -314,7 +326,7 @@ class GreenhouseFormClient:
             try:
                 self._fill_answers(page, schema_now, answers)
                 submitted_at = datetime.now(timezone.utc)
-                self._click_submit(page)
+                self._click_submit(page, schema_now)
                 result = self._confirm_success(
                     page,
                     provider=provider,
@@ -502,7 +514,91 @@ class GreenhouseFormClient:
                     f"type {field_type!r}."
                 )
             fields.append(form_field)
+
+        fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
         return FormSchema(fields=tuple(fields))
+
+    @staticmethod
+    def _discover_aria_labelledby_only_fields(
+        page, job_url: str, seen_control_ids: set[str]
+    ) -> list[FormField]:
+        """Second discovery pass for controls with no `<label>` at all.
+
+        Verified live against real Greenhouse boards (Alpaca EEO/demographic
+        questions -- Gender, Hispanic/Latino, Veteran Status, Disability
+        Status -- plus custom Yes/No eligibility questions and the Location
+        (City) field): these render as a bare text node (a plain `<div>`/
+        `<span>`, not a `<label>`) immediately followed by a
+        `role="combobox"` element whose accessible name comes from
+        `aria-labelledby` pointing at that text node. The primary
+        `_discover_schema()` loop starts from `page.locator("form label")`,
+        so these controls never enter it at all -- not misclassified, just
+        structurally invisible. Confirmed as the direct cause of historical
+        `AutoApplyDraft` failures: required comboboxes left `[invalid]` with
+        "This field is required", and `_fill_combobox()` raising "No
+        matching option for '' found in combobox field 'Location (City)'"
+        because no answer was ever mapped to a field discovery never found.
+
+        Skips any control already captured by the label-based pass (by
+        `control_id`) and any control where an `aria-labelledby` target is
+        itself a real `<label>` element -- that shape is already handled by
+        `_resolve_control_for_label()`'s own `for`/nested-control lookup and
+        is not this pattern.
+        """
+        fields: list[FormField] = []
+        candidates = page.locator("form [aria-labelledby]")
+        for i in range(candidates.count()):
+            control = candidates.nth(i)
+            tag_name = control.evaluate("el => el.tagName").upper()
+            if tag_name not in ("INPUT", "SELECT", "TEXTAREA"):
+                continue
+            control_type = (control.get_attribute("type") or "").lower()
+            if control_type in ("file", "checkbox"):
+                # Already discoverable via a real <label> (file) or a
+                # <fieldset><legend> (checkbox group) in the pass above.
+                continue
+            control_id = control.get_attribute("id") or ""
+            if control_id and control_id in seen_control_ids:
+                continue
+
+            labelledby_ids = (control.get_attribute("aria-labelledby") or "").split()
+            if not labelledby_ids:
+                continue
+            label_parts: list[str] = []
+            references_a_label_element = False
+            for labelledby_id in labelledby_ids:
+                ref = page.locator(f'[id="{labelledby_id}"]')
+                if ref.count() == 0:
+                    continue
+                if ref.first.evaluate("el => el.tagName").upper() == "LABEL":
+                    references_a_label_element = True
+                    break
+                label_parts.append(ref.first.text_content() or "")
+            if references_a_label_element:
+                continue
+            label_text = GreenhouseFormClient._clean_label(" ".join(label_parts))
+            if not label_text:
+                continue
+
+            if control_id:
+                seen_control_ids.add(control_id)
+            field_type = GreenhouseFormClient._classify_field_type(control)
+            required = GreenhouseFormClient._is_required(control)
+            options = GreenhouseFormClient._extract_options(page, control, field_type)
+            form_field = FormField(
+                label=label_text,
+                field_type=field_type,
+                required=required,
+                options=options,
+                control_id=control_id,
+            )
+            if required and not form_field.is_supported:
+                raise GreenhouseFormSchemaMismatch(
+                    f"Required field {label_text!r} on {job_url} has unsupported "
+                    f"type {field_type!r}."
+                )
+            fields.append(form_field)
+        return fields
 
     @staticmethod
     def _resolve_control_for_label(page, label_el):
@@ -830,11 +926,65 @@ class GreenhouseFormClient:
             )
         return candidate
 
-    def _click_submit(self, page) -> None:
+    def _click_submit(self, page, schema: FormSchema | None = None) -> None:
         submit_button = page.get_by_role("button", name="Submit", exact=False)
         if submit_button.count() == 0:
             submit_button = page.locator('button[type="submit"], input[type="submit"]')
-        submit_button.first.click()
+        submit_button = submit_button.first
+
+        if self._is_button_disabled(submit_button):
+            # Confirmed live (8/10 historical `submission_failed` rows):
+            # clicking a client-side-disabled Submit is a silent no-op --
+            # the page never navigates, so the poll in `_confirm_success()`
+            # eventually times out with the opaque "No post-submit success
+            # signal found" message, with no indication of which field
+            # actually blocked it. Raising here, before the no-op click,
+            # gives a diagnostic error naming the still-invalid/empty
+            # required fields instead.
+            blocking = self._blocking_required_fields(page, schema) if schema is not None else []
+            detail = f" Still-invalid or empty required fields: {', '.join(blocking)}." if blocking else ""
+            raise GreenhouseFormSubmissionFailed(
+                f"Submit button is disabled; the click would be a silent no-op.{detail}"
+            )
+
+        submit_button.click()
+
+    @staticmethod
+    def _is_button_disabled(button) -> bool:
+        try:
+            if button.is_disabled():
+                return True
+        except Exception:  # noqa: BLE001 -- treat an unresolvable check as "not disabled"
+            pass
+        return (button.get_attribute("aria-disabled") or "").lower() == "true"
+
+    @staticmethod
+    def _blocking_required_fields(page, schema: FormSchema) -> list[str]:
+        """Best-effort: which required fields still look empty/invalid.
+
+        Cheap re-check against the already-discovered schema -- an empty
+        native value, or `aria-invalid="true"` on the resolved control,
+        marks that field as a likely blocker. Never raises: any field whose
+        current state can't be read is simply omitted from the list rather
+        than failing the diagnostic itself.
+        """
+        blocking: list[str] = []
+        for field in schema.fields:
+            if not field.required or not field.control_id:
+                continue
+            control = page.locator(f'[id="{field.control_id}"]')
+            if control.count() == 0:
+                continue
+            control = control.first
+            if (control.get_attribute("aria-invalid") or "").lower() == "true":
+                blocking.append(field.label)
+                continue
+            try:
+                if control.input_value() == "":
+                    blocking.append(field.label)
+            except Exception:  # noqa: BLE001 -- e.g. a fieldset/select with no input_value()
+                continue
+        return blocking
 
     def _confirm_success(
         self,
@@ -919,8 +1069,7 @@ class GreenhouseFormClient:
                 # submit-triggered navigation (e.g. "execution context was destroyed") must not
                 # escape this suppression and capture a screenshot of the just-typed code.
                 try:
-                    code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).first
-                    code_input.fill(lookup_res.code)
+                    self._fill_verification_code(page, lookup_res.code)
                     submit_button = page.locator(
                         "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
                     ).first
@@ -967,6 +1116,38 @@ class GreenhouseFormClient:
                 return SubmissionResult(success=True, confirmation_text=phrase)
 
         return None
+
+    @staticmethod
+    def _fill_verification_code(page, code: str) -> None:
+        """Fill Greenhouse's verification-code control.
+
+        Handles both shapes confirmed to occur live: a single input holding
+        the whole code (the originally assumed shape), and N separate
+        single-character `<input maxlength="1">` boxes (confirmed via a
+        captured accessibility-tree dump -- see
+        `_VERIFICATION_CODE_BOX_SELECTOR`'s comment). Prefers the
+        single-input path when it resolves to exactly one control so the
+        already-verified single-input behavior is unchanged.
+        """
+        single = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
+        if single.count() == 1:
+            single.first.fill(code)
+            return
+
+        boxes = page.locator(_VERIFICATION_CODE_BOX_SELECTOR)
+        if boxes.count() == len(code):
+            for i, char in enumerate(code):
+                boxes.nth(i).fill(char)
+            return
+
+        if single.count() > 0:
+            single.first.fill(code)
+            return
+
+        raise RuntimeError(
+            "No verification-code input control found (neither a single "
+            "input nor a matching set of single-character boxes)."
+        )
 
     @staticmethod
     def _verification_interstitial_detected(page) -> bool:

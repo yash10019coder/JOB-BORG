@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse EEO/demographic question markup
+        (Gender, Hispanic/Latino, Veteran Status, Disability Status) and
+        custom Yes/No eligibility questions, verified against real captured
+        accessibility-tree dumps: a bare text node (not a <label>)
+        immediately followed by a role="combobox" input whose accessible
+        name comes purely from aria-labelledby pointing at that text node.
+        No <label> element exists anywhere in this markup, so the
+        label-based discovery pass never finds it.
+      -->
+      <div class="field">
+        <div id="gender-label">Gender</div>
+        <input
+          type="text"
+          id="gender"
+          role="combobox"
+          aria-labelledby="gender-label"
+          aria-required="true"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="gender-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <div class="field">
+        <div id="location-label">Location (City)</div>
+        <input
+          type="text"
+          id="location"
+          role="combobox"
+          aria-labelledby="location-label"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="location-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    function initCombobox(inputId, listboxId, options) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+
+      function render(filterText) {
+        listbox.innerHTML = '';
+        var term = (filterText || '').toLowerCase();
+        options
+          .filter(function (o) { return o.toLowerCase().indexOf(term) !== -1; })
+          .forEach(function (o) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.textContent = o;
+            li.addEventListener('click', function () {
+              input.setAttribute('aria-invalid', 'false');
+              input.dataset.value = o;
+              listbox.hidden = true;
+            });
+            listbox.appendChild(li);
+          });
+      }
+
+      input.addEventListener('click', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+      input.addEventListener('input', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+    }
+
+    initCombobox('gender', 'gender-listbox', ['Male', 'Female', 'Decline to self-identify']);
+    initCombobox('location', 'location-listbox', ['New York, NY']);
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

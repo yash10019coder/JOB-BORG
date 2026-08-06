@@ -239,6 +239,57 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(checkbox_field.required)
         self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
 
+    # -- inspect()/submit(): aria-labelledby-only combobox (no <label>) ---
+
+    def test_inspect_discovers_aria_labelledby_only_combobox_fields(self):
+        # Reproduces real captured accessibility-tree evidence (Alpaca EEO
+        # questions, Location (City)): a bare text node -- not a <label> --
+        # followed by a role="combobox" input whose accessible name comes
+        # purely from aria-labelledby. The label-based discovery pass never
+        # finds these; this is the direct fix for "many fields remain
+        # unfilled".
+        client = self._client(_fixture_html("greenhouse_aria_labelledby_only_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertEqual(set(by_label), {"First Name", "Gender", "Location (City)"})
+
+        gender_field = by_label["Gender"]
+        self.assertEqual(gender_field.field_type, COMBOBOX_SELECT)
+        self.assertTrue(gender_field.required)
+        self.assertEqual(set(gender_field.options), {"Male", "Female", "Decline to self-identify"})
+
+        location_field = by_label["Location (City)"]
+        self.assertEqual(location_field.field_type, COMBOBOX_SELECT)
+        self.assertFalse(location_field.required)
+
+    def test_inspect_does_not_double_count_labelled_and_aria_labelledby_field(self):
+        # Regression guard for the de-dup path: a field discoverable via a
+        # real <label for=...> (which also happens to carry aria-labelledby,
+        # like the existing combobox_and_file_upload fixture) must be
+        # counted exactly once, not once per discovery pass.
+        client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        matches = [f for f in schema.fields if f.label == "Are you authorized to work?"]
+        self.assertEqual(len(matches), 1)
+
+    def test_submit_fills_aria_labelledby_only_combobox_fields(self):
+        client = self._client(_fixture_html("greenhouse_aria_labelledby_only_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_aria_labelledby_only_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Gender": "Female",
+                "Location (City)": "New York, NY",
+            },
+            expected_schema=schema,
+        )
+        self.assertTrue(result.success)
+
     def test_submit_combobox_prefers_option_starting_with_typed_value(self):
         # Reproduces what live verification against a real Greenhouse board
         # (Alpaca) found: typing "India" into a phone country-code combobox
@@ -445,6 +496,37 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertIn("thanks for applying", result.confirmation_text.lower())
 
+    # -- disabled Submit button diagnostic -----------------------------------
+
+    def test_submit_disabled_button_raises_diagnostic_naming_blocking_field(self):
+        # Confirmed live (8/10 historical `submission_failed` rows): a
+        # client-side-disabled Submit makes the click a silent no-op, which
+        # previously surfaced only as the opaque "No post-submit success
+        # signal found" after the full poll budget elapsed. Leaving the
+        # required combobox unanswered keeps the fixture's Submit disabled.
+        client = self._client(
+            _fixture_html("greenhouse_disabled_submit_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            client.submit(JOB_URL, {"First Name": "Ada"})
+
+        message = str(ctx.exception)
+        self.assertIn("disabled", message.lower())
+        self.assertIn("Are you eligible to work in this location?", message)
+
+    def test_submit_enabled_button_after_all_required_fields_filled_proceeds(self):
+        # Regression guard: once every required field is answered, Submit
+        # becomes enabled and the click proceeds exactly as before.
+        client = self._client(_fixture_html("greenhouse_disabled_submit_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Are you eligible to work in this location?": "Yes",
+            },
+        )
+        self.assertTrue(result.success)
+
     # -- submission failure + debug artifacts --------------------------------
 
     def test_submit_rejected_form_raises_submission_failed_with_debug_artifacts(self):
@@ -487,6 +569,31 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 },
             )
         self.assertNotIsInstance(ctx.exception, GreenhouseFormSubmissionFailed)
+
+    def test_submit_verification_multibox_code_fills_each_box_and_confirms(self):
+        # Reproduces real captured evidence (1785860486-8e3b8ab2-a11y.yaml):
+        # the verification code control is 8 separate single-character
+        # boxes, not one input holding the whole code. A provider returning
+        # an 8-character code must have each character distributed to the
+        # correct box, not typed entirely into the first one.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="87654321")
+
+        client = self._client(_fixture_html("greenhouse_email_verification_multibox_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            email_code_provider=_FakeProvider(),
+            deadline_monotonic=time.monotonic() + 60,
+        )
+        self.assertTrue(result.success)
 
     def test_submit_normal_success_fixture_still_resolves_as_success(self):
         # Regression guard: an ordinary success fixture must remain
