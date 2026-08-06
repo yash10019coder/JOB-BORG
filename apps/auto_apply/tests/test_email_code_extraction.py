@@ -72,6 +72,20 @@ class ExtractionLogicTests(SimpleTestCase):
         code = extract_code_from_text(subject, body)
         self.assertEqual(code, "XJ4K9P2Q")
 
+    def test_bare_verify_earlier_in_text_does_not_win_over_the_real_code(self):
+        """Regression test for a code-review finding (mechanically verified):
+        re.search takes the leftmost trigger-phrase match. A bare "verify"
+        occurring earlier in the text than the real "verification code"
+        phrase could previously make an unrelated adjacent alphanumeric
+        token (e.g. a reference number) win over the real code."""
+        subject = "Your Greenhouse verification code"
+        body = (
+            "Please verify: your reference number REQ998877 was recorded. "
+            "Your verification code is 654321."
+        )
+        code = extract_code_from_text(subject, body)
+        self.assertEqual(code, "654321")
+
     def test_plain_words_near_phrasing_are_not_mistaken_for_a_code(self):
         """The real Alpaca copy itself contains "confirm" and "human" right
         next to the code -- neither has a digit, so the digit-required

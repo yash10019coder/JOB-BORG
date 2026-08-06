@@ -802,4 +802,51 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             self.assertIsNone(cm.exception.debug_artifacts)
             self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
 
+    def test_post_code_success_check_exception_also_suppresses_debug_artifacts(self):
+        """Regression test for a code-review finding (P0, adversarial):
+        the post-code success check (after code fill+click succeed) sat
+        outside the try/except that suppresses debug artifacts, so an
+        exception from THAT call (e.g. a Playwright "execution context
+        destroyed" navigation race) could escape and capture a screenshot
+        with the just-typed OTP still on screen -- exactly what R9 forbids."""
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = GreenhouseFormClient(
+                context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
+            )
+            mock_page = MagicMock()
+
+            code_input = MagicMock()
+            submit_btn = MagicMock()
+            mock_page.locator.side_effect = lambda sel: (
+                MagicMock(count=lambda: 1, first=code_input)
+                if "code" in sel
+                else MagicMock(first=submit_btn)
+            )
+
+            mock_provider = MagicMock()
+            from apps.auto_apply.email_verification.base import CodeLookupResult
+            mock_provider.get_code.return_value = CodeLookupResult(
+                outcome=VerificationOutcome.FOUND, code="654321"
+            )
+
+            with patch.object(
+                client,
+                "_check_success_signal",
+                side_effect=[None, Exception("execution context was destroyed")],
+            ), patch.object(
+                client, "_verification_interstitial_detected", return_value=True
+            ):
+                with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
+                    client._confirm_success(
+                        mock_page,
+                        provider=mock_provider,
+                        deadline_monotonic=time.monotonic() + 300,
+                    )
+
+            self.assertEqual(cm.exception.outcome, VerificationOutcome.CODE_REJECTED)
+            self.assertIsNone(cm.exception.debug_artifacts)
+            self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
+
 

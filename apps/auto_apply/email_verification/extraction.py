@@ -21,8 +21,16 @@ CONTEXTUAL_PHRASING_PATTERNS = [
 # judgment call: alphanumeric, 6-10 chars, at least one digit required to
 # avoid matching a plain English word sitting next to the trigger phrasing
 # (the real copy itself contains "confirm"/"human" immediately adjacent).
+#
+# Deliberately does NOT include bare "verification"/"verify" as trigger
+# phrases here (unlike CONTEXTUAL_PHRASING_PATTERNS above, which does, since
+# that only gates whether extraction is attempted at all). re.search takes
+# the leftmost trigger match in the whole text -- a code-review finding
+# confirmed live that a bare "verify" occurring earlier than the real
+# "verification code" phrase let an unrelated adjacent token (e.g. a
+# reference number) win over the real code.
 CONTEXTUAL_CODE_REGEX = re.compile(
-    r"(?:verification\s+code|security\s+code|confirmation\s+code|verification|verify)"
+    r"(?:verification\s+code|security\s+code|confirmation\s+code)"
     r"[^0-9\n]{0,25}\b((?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,10})\b",
     re.IGNORECASE,
 )

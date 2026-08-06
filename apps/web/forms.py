@@ -180,12 +180,3 @@ class EmailInboxCredentialForm(forms.ModelForm):
 
         return cleaned_data
 
-    def save(self, commit=True):
-        instance = super().save(commit=False)
-        app_password = self.cleaned_data.get("app_password")
-        if commit:
-            instance.save()
-            if app_password:
-                instance.set_app_password(app_password)
-        return instance
-
