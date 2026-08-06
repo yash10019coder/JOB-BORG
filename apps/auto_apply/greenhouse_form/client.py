@@ -967,6 +967,17 @@ class GreenhouseFormClient:
         marks that field as a likely blocker. Never raises: any field whose
         current state can't be read is simply omitted from the list rather
         than failing the diagnostic itself.
+
+        The empty-native-value check is skipped for `COMBOBOX_SELECT`:
+        `_fill_combobox()`'s own docstring notes that after a successful
+        fill "the control's own `.value` stays empty afterward; the widget
+        tracks the choice elsewhere" -- so every required combobox would
+        otherwise be misreported as still-blocking even when correctly
+        answered (caught in code review: this defeated the whole point of
+        the diagnostic for exactly the field type this fix's first change,
+        aria-labelledby-only comboboxes, targets). `aria-invalid` is still
+        checked for comboboxes since the widget itself maintains that
+        attribute.
         """
         blocking: list[str] = []
         for field in schema.fields:
@@ -978,6 +989,8 @@ class GreenhouseFormClient:
             control = control.first
             if (control.get_attribute("aria-invalid") or "").lower() == "true":
                 blocking.append(field.label)
+                continue
+            if field.field_type == COMBOBOX_SELECT:
                 continue
             try:
                 if control.input_value() == "":
@@ -1134,11 +1147,25 @@ class GreenhouseFormClient:
             single.first.fill(code)
             return
 
+        # Check the multi-box shape BEFORE falling back to "any single
+        # match" below: caught in code review, each box also carries
+        # `inputmode="numeric"` and therefore matches
+        # `_VERIFICATION_CODE_INPUT_SELECTOR` too, so `single.count()` is
+        # >0 for a genuine multi-box UI. Checking box shape first, and
+        # raising explicitly on a length mismatch, avoids silently
+        # stuffing the whole multi-character code into box #1 alone via
+        # the old single-input fallback.
         boxes = page.locator(_VERIFICATION_CODE_BOX_SELECTOR)
-        if boxes.count() == len(code):
-            for i, char in enumerate(code):
-                boxes.nth(i).fill(char)
-            return
+        box_count = boxes.count()
+        if box_count >= 2:
+            if box_count == len(code):
+                for i, char in enumerate(code):
+                    boxes.nth(i).fill(char)
+                return
+            raise RuntimeError(
+                f"Verification code length ({len(code)}) does not match the "
+                f"multi-box control's box count ({box_count})."
+            )
 
         if single.count() > 0:
             single.first.fill(code)

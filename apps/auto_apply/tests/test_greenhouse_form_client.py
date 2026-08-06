@@ -527,6 +527,24 @@ class GreenhouseFormClientTests(SimpleTestCase):
         )
         self.assertTrue(result.success)
 
+    def test_submit_disabled_button_diagnostic_does_not_blame_a_correctly_filled_combobox(self):
+        # Regression test for a code-review finding (P0/P2, correctness +
+        # adversarial agreement): _fill_combobox() never leaves a native
+        # value on the control (the widget tracks the choice elsewhere --
+        # see its own docstring), so a naive input_value()=="" check would
+        # misreport every correctly-answered combobox as still-blocking.
+        # Here the combobox IS answered but First Name is left blank, so
+        # the real blocker is First Name -- the combobox must not appear.
+        client = self._client(
+            _fixture_html("greenhouse_disabled_submit_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            client.submit(JOB_URL, {"Are you eligible to work in this location?": "Yes"})
+
+        message = str(ctx.exception)
+        self.assertIn("First Name", message)
+        self.assertNotIn("Are you eligible to work in this location?", message)
+
     # -- submission failure + debug artifacts --------------------------------
 
     def test_submit_rejected_form_raises_submission_failed_with_debug_artifacts(self):
@@ -594,6 +612,34 @@ class GreenhouseFormClientTests(SimpleTestCase):
             deadline_monotonic=time.monotonic() + 60,
         )
         self.assertTrue(result.success)
+
+    def test_submit_verification_multibox_length_mismatch_raises_code_rejected(self):
+        # Regression test for a code-review finding (P1, adversarial +
+        # testing agreement): every multi-box character input also matches
+        # `_VERIFICATION_CODE_INPUT_SELECTOR` (each carries
+        # inputmode="numeric"), so a naive fallback would silently stuff a
+        # too-short/too-long code into box #1 alone instead of raising.
+        # The fixture has 8 boxes; a 6-character code must raise a typed
+        # verification failure, not misfill.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+
+        client = self._client(_fixture_html("greenhouse_email_verification_multibox_form.html"))
+        with self.assertRaises(GreenhouseFormVerificationFailed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+                email_code_provider=_FakeProvider(),
+                deadline_monotonic=time.monotonic() + 60,
+            )
+        self.assertEqual(ctx.exception.outcome, VerificationOutcome.CODE_REJECTED)
 
     def test_submit_normal_success_fixture_still_resolves_as_success(self):
         # Regression guard: an ordinary success fixture must remain
