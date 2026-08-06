@@ -11,6 +11,7 @@ Two layers are exercised:
   by a fake so no network call is ever made.
 """
 from types import SimpleNamespace
+from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 
@@ -274,6 +275,22 @@ class GetClientRegistryTests(SimpleTestCase):
         with override_settings(AUTO_APPLY_LLM_PROVIDER="some-unregistered-vendor"):
             with self.assertRaises(ValueError):
                 get_client()
+
+
+class AnthropicClientConstructionTests(SimpleTestCase):
+    """Parity with NvidiaClientConstructionTests: a real (unfaked) Anthropic
+    SDK client must never be built with no request timeout -- the same
+    silent-indefinite-hang failure mode confirmed live for the NVIDIA
+    provider applies here too, since draft_auto_apply has no Celery
+    time_limit to fall back on."""
+
+    def test_real_client_is_constructed_with_an_explicit_timeout(self):
+        with mock.patch("apps.auto_apply.llm.anthropic_client.anthropic.Anthropic") as mock_anthropic:
+            AnthropicAnswerInferenceClient(api_key="key")
+        _, kwargs = mock_anthropic.call_args
+        self.assertIn("timeout", kwargs)
+        self.assertIsNotNone(kwargs["timeout"])
+        self.assertLessEqual(kwargs["timeout"], 60)
 
 
 # ---------------------------------------------------------------------------
