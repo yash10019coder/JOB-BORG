@@ -12,13 +12,22 @@ CONTEXTUAL_PHRASING_PATTERNS = [
     r"\benter\s+(?:the\s+)?code\b",
 ]
 
-# Strict contextual regex looking specifically for verification/security code phrasing near 6 digits
+# Strict contextual regex looking for verification/security code phrasing
+# near a 6-10 character alphanumeric token containing at least one digit.
+# Confirmed live (Alpaca job 6113944004) that Greenhouse's real interstitial
+# asks for an "8-character code", not a bare 6-digit OTP -- a digits-only
+# \d{6} regex can never match it. The exact charset actually used is still
+# unconfirmed (no real verification email has been captured), so this is a
+# judgment call: alphanumeric, 6-10 chars, at least one digit required to
+# avoid matching a plain English word sitting next to the trigger phrasing
+# (the real copy itself contains "confirm"/"human" immediately adjacent).
 CONTEXTUAL_CODE_REGEX = re.compile(
-    r"(?:verification\s+code|security\s+code|confirmation\s+code|verification|verify)[^0-9\n]{0,25}\b(\d{6})\b",
+    r"(?:verification\s+code|security\s+code|confirmation\s+code|verification|verify)"
+    r"[^0-9\n]{0,25}\b((?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,10})\b",
     re.IGNORECASE,
 )
 
-BARE_SIX_DIGIT_REGEX = re.compile(r"\b(\d{6})\b")
+BARE_CODE_REGEX = re.compile(r"\b((?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,10})\b")
 
 
 def is_sender_allowed(sender_header: str, allowlist: list[str]) -> bool:
@@ -88,13 +97,13 @@ def extract_code_from_text(subject: str, body: str) -> str | None:
     if match:
         return match.group(1)
 
-    # Fallback: if contextual phrasing is present, find 6-digit numbers.
-    six_digits = BARE_SIX_DIGIT_REGEX.findall(combined_text)
-    unique_codes = set(six_digits)
+    # Fallback: if contextual phrasing is present, find 6-10 char codes.
+    bare_codes = BARE_CODE_REGEX.findall(combined_text)
+    unique_codes = set(bare_codes)
 
-    # If exactly one unique 6-digit code exists, return it
+    # If exactly one unique candidate code exists, return it
     if len(unique_codes) == 1:
-        return six_digits[0]
+        return bare_codes[0]
 
     return None
 

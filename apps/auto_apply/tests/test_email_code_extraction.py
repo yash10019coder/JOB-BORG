@@ -55,6 +55,36 @@ class ExtractionLogicTests(SimpleTestCase):
         code = extract_code_from_text(subject, body)
         self.assertEqual(code, "654321")
 
+    def test_eight_character_alphanumeric_code_extracted(self):
+        """Regression test for a real, live Greenhouse interstitial (Alpaca,
+        job 6113944004) whose on-page copy reads "enter the 8-character
+        code" -- the prior 6-digit-only regex could never match this. The
+        exact code shown here is synthetic (no real verification email was
+        ever captured for this posting); the length/charset assumption
+        (alphanumeric, contains at least one digit) is a judgment call
+        pending a real captured email, not a confirmed fact."""
+        subject = "Your Greenhouse verification code"
+        body = (
+            "A verification code was sent to you. To submit your "
+            "application, enter the 8-character code to confirm you're a "
+            "human. Security code: XJ4K9P2Q"
+        )
+        code = extract_code_from_text(subject, body)
+        self.assertEqual(code, "XJ4K9P2Q")
+
+    def test_plain_words_near_phrasing_are_not_mistaken_for_a_code(self):
+        """The real Alpaca copy itself contains "confirm" and "human" right
+        next to the code -- neither has a digit, so the digit-required
+        pattern must not grab them as a false code when the real code is
+        genuinely absent from the text."""
+        subject = "Your Greenhouse verification code"
+        body = (
+            "A verification code was sent to you. To submit your "
+            "application, enter the code to confirm you're a human."
+        )
+        code = extract_code_from_text(subject, body)
+        self.assertIsNone(code)
+
 
 class EvaluateEmailCandidateTests(SimpleTestCase):
     def test_disallowed_sender_ignored(self):
