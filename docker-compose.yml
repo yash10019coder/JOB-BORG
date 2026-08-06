@@ -47,7 +47,12 @@ services:
   worker:
     build: .
     # -E emits task events so celery-exporter can scrape task metrics.
-    command: celery -A config worker -l info -E
+    # -Q lists every queue this worker consumes: "default" plus
+    # "auto_apply_submit" (CELERY_TASK_ROUTES in config/settings/base.py
+    # routes submit_auto_apply_draft there). Without listing it explicitly,
+    # Celery only consumes the default queue and submissions queue forever
+    # unconsumed -- confirmed live via `redis-cli llen auto_apply_submit`.
+    command: celery -A config worker -l info -E -Q default,auto_apply_submit
     env_file: .env
     volumes:
       - .:/app
