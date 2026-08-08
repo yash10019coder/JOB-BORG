@@ -123,6 +123,8 @@ class StandardFieldsOnlyTests(DraftingServiceTestCase):
         )
         for field_answer in draft.answers.values():
             self.assertFalse(field_answer["needs_review"])
+        self.assertTrue(draft.answers["First Name"]["required"])
+        self.assertFalse(draft.answers["Phone"]["required"])
 
 
 class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
@@ -156,6 +158,7 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         self.assertEqual(sponsorship_answer["value"], "No, I do not require sponsorship.")
         self.assertFalse(sponsorship_answer["needs_review"])
         self.assertEqual(sponsorship_answer["reason"], "explicit_answer")
+        self.assertTrue(sponsorship_answer["required"])
 
 
 class LLMInferableQuestionTests(DraftingServiceTestCase):
@@ -217,7 +220,15 @@ class LLMInferableQuestionTests(DraftingServiceTestCase):
 
 
 class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
-    def test_required_question_with_no_explicit_and_no_confident_llm_answer_excludes(self):
+    """A required custom question the LLM can never answer (a hard-excluded
+    category, with no ExplicitAnswer on file) no longer excludes the whole
+    draft -- it floats up as a blank, needs_review, required placeholder for
+    a human to answer via the review queue instead. Contrast with
+    `RequiredQuestionLLMFailureTests` (LLM infra failure -- same treatment,
+    different `reason`) and `NoResumeUploadedTests` (LLM ran fine but had
+    nothing to cite)."""
+
+    def test_required_hard_excluded_question_with_no_explicit_answer_drafts_for_manual_review(self):
         schema = FormSchema(
             fields=STANDARD_ONLY_SCHEMA.fields
             + (
@@ -233,10 +244,12 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
 
         draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
 
-        self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED)
-        self.assertIsNotNone(draft.exclusion_reason)
-        self.assertIn("salary expectations", draft.exclusion_reason)
-        self.assertEqual(draft.answers, {})
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["What are your salary expectations?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
+        self.assertEqual(entry["reason"], "hard_excluded_category")
         self.assertEqual(llm_client.calls, [])
 
 
@@ -273,6 +286,7 @@ class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):
         entry = draft.answers["How many years of Python experience do you have?"]
         self.assertEqual(entry["value"], "")
         self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
         self.assertEqual(entry["reason"], "llm_call_failed")
 
     def test_llm_response_missing_this_question_drafts_for_manual_review(self):
@@ -289,6 +303,7 @@ class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):
         entry = draft.answers["How many years of Python experience do you have?"]
         self.assertEqual(entry["value"], "")
         self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
         self.assertEqual(entry["reason"], "missing_llm_response")
 
 
@@ -346,12 +361,18 @@ class NoResumeUploadedTests(DraftingServiceTestCase):
 
         draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
 
-        # Must not crash, and since the field isn't required, an
-        # unanswerable custom question doesn't block drafting outright.
+        # Must not crash, and it must not be silently dropped either (R1) --
+        # an optional, unanswerable question still gets a visible,
+        # needs_review placeholder entry so a human reviewing the draft can
+        # see the question existed, even though it doesn't block sending.
         self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
-        self.assertNotIn("What is your favorite part of being an engineer?", draft.answers)
+        entry = draft.answers["What is your favorite part of being an engineer?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertFalse(entry["required"])
+        self.assertEqual(entry["reason"], "insufficient_evidence")
 
-    def test_required_llm_eligible_question_with_no_resume_text_excludes_rather_than_crashing(self):
+    def test_required_llm_eligible_question_with_no_resume_text_drafts_for_manual_review(self):
         self.profile.resume_text = ""
         self.profile.save()
         schema = FormSchema(
@@ -379,8 +400,12 @@ class NoResumeUploadedTests(DraftingServiceTestCase):
 
         draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
 
-        self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED)
-        self.assertIn("What is your favorite part of being an engineer?", draft.exclusion_reason)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["What is your favorite part of being an engineer?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
+        self.assertEqual(entry["reason"], "insufficient_evidence")
 
 
 class ConcurrentTriggerGuardTests(DraftingServiceTestCase):

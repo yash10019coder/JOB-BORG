@@ -72,6 +72,14 @@ class AutoApplyDraft(models.Model):
 
         SCHEMA_MISMATCH = "schema_mismatch", "Unsupported form field"
         FORM_LOAD_FAILED = "form_load_failed", "Could not load application form"
+        # Narrowed: `drafting.draft_for()` only produces this for a blank
+        # *standard* (Profile-derived) required field -- an incomplete
+        # Profile. A required custom question the LLM couldn't answer no
+        # longer excludes the draft; it becomes a blank needs_review
+        # placeholder in `answers` for a human to fill in via the review
+        # queue instead (`send_auto_apply_draft` blocks sending until it's
+        # filled). This code stays reachable for the Profile-incompleteness
+        # case and any future terminal-exclusion use.
         UNANSWERABLE_REQUIRED = "unanswerable_required", "Required question unanswered"
         CAPTCHA_CHALLENGED = "captcha_challenged", "Bot-detection challenge"
         SUBMISSION_FAILED = "submission_failed", "Submission rejected"
