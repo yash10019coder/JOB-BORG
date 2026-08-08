@@ -39,7 +39,9 @@
             <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
                 <label for="value__{{ forloop.counter0 }}">
                     {{ label }}
-                    {% if entry.needs_review %}
+                    {% if label in draft.blocking_fields %}
+                    <span class="tag" style="background:#fee2e2; color:#991b1b;" aria-label="This question must be answered before the application can be sent">Answer required</span>
+                    {% elif entry.needs_review %}
                     <span class="tag" style="background:#fef3c7; color:#92400e;" aria-label="Needs review, please confirm this answer">Needs review</span>
                     {% endif %}
                 </label>
@@ -58,11 +60,17 @@
         {% endif %}
 
         {% if draft.status == "drafted" %}
-        <form method="post" action="{% url 'send_auto_apply_draft' draft.id %}"
-              onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='Sending…';">
-            {% csrf_token %}
-            <button type="submit">Send application</button>
-        </form>
+            {% if draft.blocking_fields %}
+            <p class="muted" role="status">
+                Answer {{ draft.blocking_fields|length }} required question{{ draft.blocking_fields|pluralize }} above before sending this application.
+            </p>
+            {% else %}
+            <form method="post" action="{% url 'send_auto_apply_draft' draft.id %}"
+                  onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='Sending…';">
+                {% csrf_token %}
+                <button type="submit">Send application</button>
+            </form>
+            {% endif %}
         {% endif %}
     </div>
     {% endfor %}
