@@ -7,8 +7,7 @@ built separately) are expected to treat every challenge as unsolved and
 fail closed rather than proceed with an unsolved CAPTCHA.
 
 Mirrors the registry shape used by ``apps.jobs.ingestion.dispatch``'s
-``CLIENT_REGISTRY`` / ``get_client`` (and the analogous LLM provider
-registry in ``apps.auto_apply.llm.base``): a small dict keyed by a settings
+``CLIENT_REGISTRY`` / ``get_client``: a small dict keyed by a settings
 string, with a lookup helper that returns ``None`` (rather than raising)
 when nothing is registered, since "no provider configured" is an expected,
 handled state here -- not an error.
