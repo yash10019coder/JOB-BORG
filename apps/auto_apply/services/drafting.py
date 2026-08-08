@@ -182,7 +182,10 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             unanswerable_required.append(form_field.label)
 
     # -- Custom fields (R5): explicit answer, then LLM inference. -----------
-    questions = [Question(id=f.label, text=f.label) for f in custom_fields]
+    questions = [
+        Question(id=f.label, text=f.label, field_type=f.field_type, options=f.options)
+        for f in custom_fields
+    ]
     resolved = answer_resolution.resolve_field_answers(
         user, questions, resume_text, profile, llm_client
     )
@@ -221,6 +224,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "category": resolved_answer.category,
                 "reason": resolved_answer.reason,
                 "field_type": form_field.field_type,
+                "options": form_field.options,
             }
             continue
         answers_payload[form_field.label] = {
@@ -230,6 +234,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "category": resolved_answer.category,
             "reason": resolved_answer.reason,
             "field_type": form_field.field_type,
+            "options": form_field.options,
         }
 
     if unanswerable_required:

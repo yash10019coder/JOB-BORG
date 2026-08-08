@@ -47,7 +47,16 @@
                 </label>
                 <input type="hidden" name="label__{{ forloop.counter0 }}" value="{{ label }}">
                 {% if draft.status == "drafted" %}
-                <input type="text" id="value__{{ forloop.counter0 }}" name="value__{{ forloop.counter0 }}" value="{{ entry.value }}">
+                    {% if entry.options %}
+                    <select id="value__{{ forloop.counter0 }}" name="value__{{ forloop.counter0 }}">
+                        <option value=""{% if not entry.value %} selected{% endif %}>-- Select --</option>
+                        {% for option in entry.options %}
+                        <option value="{{ option }}"{% if option == entry.value %} selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                    </select>
+                    {% else %}
+                    <input type="text" id="value__{{ forloop.counter0 }}" name="value__{{ forloop.counter0 }}" value="{{ entry.value }}">
+                    {% endif %}
                 {% else %}
                 <p>{{ entry.value }}</p>
                 {% endif %}

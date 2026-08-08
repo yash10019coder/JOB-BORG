@@ -25,6 +25,7 @@ from apps.auto_apply.llm.langchain_client import (
     _PROVIDER_CONFIGS,
     LangChainAnswerInferenceClient,
     ProviderConfig,
+    _build_prompt,
     _QuestionAnswerBatchSchema,
     _QuestionAnswerSchema,
 )
@@ -51,6 +52,31 @@ class _FakeStructuredClient:
         if self.raises is not None:
             raise self.raises
         return self.result
+
+
+class BuildPromptOptionsTests(SimpleTestCase):
+    """U2: option-bearing questions must render their exact option set in
+    the prompt so the LLM can be instructed to answer within it."""
+
+    def test_option_bearing_question_renders_options_attribute(self):
+        question = Question(
+            id="q1",
+            text="What is your highest level of education?",
+            field_type="single_select",
+            options=("High School", "Bachelor's", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertIn('options="High School|Bachelor\'s|Other"', prompt)
+
+    def test_free_text_question_renders_no_options_attribute(self):
+        question = Question(id="q1", text="Tell us about yourself", field_type="text")
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertNotIn("options=", prompt)
+        self.assertIn('<question id="q1">', prompt)
 
 
 class LangChainAnswerInferenceClientInferTests(SimpleTestCase):

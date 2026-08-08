@@ -779,7 +779,19 @@ class GreenhouseFormClient:
                 control.fill(str(value))
                 expect(control).to_have_value(str(value))
             elif form_field.field_type == SINGLE_SELECT:
-                control.select_option(label=str(value))
+                try:
+                    control.select_option(label=str(value))
+                except Exception as exc:
+                    # Not caught by a dedicated except type -- Playwright
+                    # raises a plain `Error`/`TimeoutError` when no option
+                    # matches `label=`. Translate it into the same typed,
+                    # clear-message exception `_fill_combobox`/
+                    # `_fill_checkbox_group` already raise for an option
+                    # mismatch, rather than letting the raw Playwright
+                    # exception propagate up to submit()'s generic catch-all.
+                    raise GreenhouseFormSubmissionFailed(
+                        f"No matching option for {value!r} found in select field {label!r}"
+                    ) from exc
                 expect(control).to_have_value(control.evaluate("el => el.value"))
             elif form_field.field_type == MULTI_SELECT:
                 values = value if isinstance(value, (list, tuple)) else [value]
