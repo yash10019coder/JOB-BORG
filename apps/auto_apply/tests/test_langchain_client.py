@@ -5,7 +5,16 @@ tests (mirrors this repo's established mocking convention), and the
 structured-output runnable itself is faked via dependency injection (the
 ``client=`` constructor seam) for inference-behavior tests -- no real network
 call is ever made, and no real API key is required for the suite to pass.
+
+``LangChainAnswerInferenceClientRealConstructionTests`` is the one exception:
+it constructs a real (unmocked) ``init_chat_model()`` chat model per provider
+with a fake API key and inspects the resulting object's own timeout field.
+This makes no network call (construction only) but catches a future
+langchain-* version silently dropping the ``timeout`` kwarg, which the mocked
+construction tests above cannot -- they only assert the kwarg was *passed*,
+not that the underlying integration actually binds it.
 """
+import dataclasses
 from types import SimpleNamespace
 from unittest import mock
 
@@ -126,6 +135,16 @@ class LangChainAnswerInferenceClientInferTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             client.infer([Question(id="q1", text="?")], RESUME_TEXT, PROFILE)
 
+    def test_infer_raises_value_error_when_structured_output_returns_none(self):
+        # with_structured_output() can return None when the model declines
+        # the forced tool call -- must surface as an explicit ValueError,
+        # not an opaque AttributeError from `None.answers`.
+        fake = _FakeStructuredClient(result=None)
+        client = LangChainAnswerInferenceClient(self._provider_config(), client=fake)
+
+        with self.assertRaises(ValueError):
+            client.infer([Question(id="q1", text="?")], RESUME_TEXT, PROFILE)
+
 
 class LangChainAnswerInferenceClientConstructionTests(SimpleTestCase):
     """Real (unfaked) client construction must always go through
@@ -137,6 +156,13 @@ class LangChainAnswerInferenceClientConstructionTests(SimpleTestCase):
 
     def _patched_init_chat_model(self):
         return mock.patch("apps.auto_apply.llm.langchain_client.init_chat_model")
+
+    _API_KEYS_BY_SETTING = {
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "OPENAI_API_KEY": "openai-key",
+        "GOOGLE_API_KEY": "google-key",
+        "NVIDIA_API_KEY": "nvidia-key",
+    }
 
     @override_settings(
         ANTHROPIC_API_KEY="anthropic-key",
@@ -151,9 +177,34 @@ class LangChainAnswerInferenceClientConstructionTests(SimpleTestCase):
                 LangChainAnswerInferenceClient(provider_config)
 
                 mock_init.assert_called_once()
-                _, kwargs = mock_init.call_args
+                args, kwargs = mock_init.call_args
                 self.assertIn("timeout", kwargs)
                 self.assertEqual(kwargs["timeout"], 30)
+                self.assertEqual(
+                    kwargs["api_key"], self._API_KEYS_BY_SETTING[provider_config.api_key_setting]
+                )
+                self.assertEqual(
+                    args[0], f"{provider_config.init_model}:{provider_config.default_model}"
+                )
+
+                chat_model_mock = mock_init.return_value
+                chat_model_mock.with_structured_output.assert_called_once_with(
+                    _QuestionAnswerBatchSchema, method=provider_config.structured_output_method
+                )
+
+    @override_settings(NVIDIA_API_KEY="nvidia-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
+    def test_nvidia_provider_forwards_generation_constraints(self):
+        # Regression guard: the deleted hand-rolled nvidia_client.py
+        # constrained the small open-weight model's generation
+        # (max_tokens/temperature/top_p); this must survive the LangChain
+        # refactor via ProviderConfig.model_kwargs, not be silently dropped.
+        with self._patched_init_chat_model() as mock_init:
+            LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["nvidia"])
+
+        _, kwargs = mock_init.call_args
+        self.assertEqual(kwargs["max_tokens"], 1024)
+        self.assertEqual(kwargs["temperature"], 0.2)
+        self.assertEqual(kwargs["top_p"], 0.7)
 
     @override_settings(NVIDIA_API_KEY="nvidia-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
     def test_nvidia_provider_passes_nim_base_url(self):
@@ -179,13 +230,35 @@ class LangChainAnswerInferenceClientConstructionTests(SimpleTestCase):
 
         mock_init.assert_not_called()
 
-    @override_settings(OPENAI_API_KEY="openai-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
-    def test_init_chat_model_receives_provider_prefixed_model_string(self):
-        with self._patched_init_chat_model() as mock_init:
-            LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["openai"])
 
-        args, _ = mock_init.call_args
-        self.assertEqual(args[0], "openai:gpt-5.1")
+class LangChainAnswerInferenceClientRealConstructionTests(SimpleTestCase):
+    """Constructs a real (unmocked) chat model per provider with a fake API
+    key and inspects its own timeout field -- catches a future langchain-*
+    version silently dropping the ``timeout`` kwarg, which the mocked
+    construction tests above cannot (they only prove the kwarg was passed to
+    ``init_chat_model``, not that the specific integration bound it). Makes
+    no network call: constructing a chat model object does not itself
+    contact the provider."""
+
+    @override_settings(ANTHROPIC_API_KEY="fake-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
+    def test_anthropic_binds_timeout(self):
+        client = LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["anthropic"])
+        self.assertEqual(client._structured_client.first.default_request_timeout, 30.0)
+
+    @override_settings(OPENAI_API_KEY="fake-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
+    def test_openai_binds_timeout(self):
+        client = LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["openai"])
+        self.assertEqual(client._structured_client.first.request_timeout, 30.0)
+
+    @override_settings(GOOGLE_API_KEY="fake-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
+    def test_google_binds_timeout(self):
+        client = LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["google"])
+        self.assertEqual(client._structured_client.first.timeout, 30.0)
+
+    @override_settings(NVIDIA_API_KEY="fake-key", AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS=30)
+    def test_nvidia_binds_timeout(self):
+        client = LangChainAnswerInferenceClient(_PROVIDER_CONFIGS["nvidia"])
+        self.assertEqual(client._structured_client.first.request_timeout, 30.0)
 
 
 class ProviderConfigTests(SimpleTestCase):
@@ -198,5 +271,5 @@ class ProviderConfigTests(SimpleTestCase):
         config = ProviderConfig(
             init_model="anthropic", default_model="m", api_key_setting="ANTHROPIC_API_KEY"
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             config.default_model = "other"
