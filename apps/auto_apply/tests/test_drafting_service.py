@@ -13,6 +13,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormSchemaMismatch,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    FILE,
     FormField,
     FormSchema,
     SINGLE_SELECT,
@@ -251,6 +252,36 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
         self.assertTrue(entry["required"])
         self.assertEqual(entry["reason"], "hard_excluded_category")
         self.assertEqual(llm_client.calls, [])
+
+
+class RequiredFileQuestionUnanswerableTests(DraftingServiceTestCase):
+    """A required FILE-type custom question (e.g. "upload your portfolio")
+    is the one custom-question case that still excludes the draft, unlike
+    every other unanswerable-required case above. `edit_auto_apply_draft`
+    deliberately never lets a human edit a FILE-type answer (a user-supplied
+    string there would flow straight into Playwright's set_input_files()),
+    so a blank FILE placeholder would be a permanent, unfillable blocker
+    rather than something the review queue can actually resolve."""
+
+    def test_required_unanswerable_file_question_still_excludes_draft(self):
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="Upload your portfolio",
+                    field_type=FILE,
+                    required=True,
+                ),
+            )
+        )
+        form_client = FakeFormClient(schema=schema)
+        llm_client = FakeLLMClient()  # never resolves a real answer for this field
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED)
+        self.assertIn("Upload your portfolio", draft.exclusion_reason)
+        self.assertNotIn("Upload your portfolio", draft.answers)
 
 
 class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):

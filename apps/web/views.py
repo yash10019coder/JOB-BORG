@@ -213,19 +213,24 @@ _STALE_MESSAGE = "This job posting closed before we could apply."
 def _blocking_required_fields(answers):
     """Labels of required fields still needing a human answer.
 
-    A field blocks sending when it's `required` and has no `value` -- this
-    is exactly the shape `drafting.draft_for()` leaves behind for a required
-    custom question the LLM couldn't confidently answer (any reason: hard-
-    excluded category, insufficient evidence, ungrounded, low confidence
-    with no text, or an LLM-infra failure). Sorted for stable message
-    ordering across calls. Shared by `auto_apply_queue` (render-time flag)
-    and `send_auto_apply_draft` (the actual enforcement) so the two never
-    drift out of sync with each other.
+    A field blocks sending when it's `required` and has no non-whitespace
+    `value` -- this is exactly the shape `drafting.draft_for()` leaves
+    behind for a required custom question the LLM couldn't confidently
+    answer (any reason: hard-excluded category, insufficient evidence,
+    ungrounded, low confidence with no text, or an LLM-infra failure).
+    `.strip()` matters here: `edit_auto_apply_draft` accepts arbitrary user
+    text with no blank-input validation, so a whitespace-only submission
+    (e.g. a single space) would otherwise read as "answered" and let a
+    required question -- including a hard-excluded-category one like work
+    authorization or salary -- reach the employer with no real answer.
+    Sorted for stable message ordering across calls. Shared by
+    `auto_apply_queue` (render-time flag) and `send_auto_apply_draft` (the
+    actual enforcement) so the two never drift out of sync with each other.
     """
     return sorted(
         label
         for label, entry in (answers or {}).items()
-        if entry.get("required") and not entry.get("value")
+        if entry.get("required") and not str(entry.get("value") or "").strip()
     )
 
 
