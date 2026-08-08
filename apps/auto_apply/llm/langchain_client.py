@@ -15,16 +15,13 @@ vendor.
 """
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.conf import settings
 from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
 from .base import Question, QuestionAnswer, _profile_text
-
-logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """You are helping a job applicant answer custom application \
 questions from a job posting, using ONLY the resume and profile information \
@@ -105,13 +102,21 @@ class ProviderConfig:
     # Name of the Django setting holding this provider's API key.
     api_key_setting: str
     base_url: str | None = None
-    # "function_calling" works for every provider registered here today;
-    # kept per-provider (not hardcoded) because NVIDIA NIM's small
+    # "function_calling" works for every frontier-model provider registered
+    # here; kept per-provider (not hardcoded) because NVIDIA NIM's small
     # open-weight instruct model is not guaranteed to support tool-calling
-    # the way frontier models do -- see the plan's D3 for the empirical
-    # rationale. Switch a provider to "json_mode" if function_calling proves
-    # unreliable against its specific hosted model.
+    # the way frontier models do -- see the plan's D3. NVIDIA is set to
+    # "json_mode" below: the hand-rolled client this supersedes never used
+    # tool-calling either, only prompt-instructed raw-JSON generation --
+    # "json_mode" is the closer-to-prior-behavior, defensible default, not
+    # an untested assumption. Still subject to a live confirmation pass
+    # against the real NIM-hosted model (see the plan's Risks section).
     structured_output_method: str = "function_calling"
+    # Extra generation kwargs forwarded to init_chat_model() (max_tokens,
+    # temperature, top_p, ...). Only NVIDIA's small open-weight model needs
+    # these constrained today -- carried over from the deleted hand-rolled
+    # nvidia_client.py, which set them for the same reason.
+    model_kwargs: dict = field(default_factory=dict)
 
 
 _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
@@ -139,6 +144,8 @@ _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         default_model="meta/llama-3.2-3b-instruct",
         api_key_setting="NVIDIA_API_KEY",
         base_url="https://integrate.api.nvidia.com/v1",
+        structured_output_method="json_mode",
+        model_kwargs={"max_tokens": 1024, "temperature": 0.2, "top_p": 0.7},
     ),
 }
 
@@ -176,6 +183,7 @@ class LangChainAnswerInferenceClient:
             # the ones that had this fix before LangChain.
             timeout=settings.AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS,
             base_url=provider_config.base_url,
+            **provider_config.model_kwargs,
         )
         self._structured_client = chat_model.with_structured_output(
             _QuestionAnswerBatchSchema,
@@ -194,6 +202,17 @@ class LangChainAnswerInferenceClient:
                 ("human", _build_prompt(questions, resume_text, profile)),
             ]
         )
+        if parsed is None:
+            # with_structured_output() can return None when the model
+            # declines the forced tool call/schema (e.g. include_raw=False
+            # and no parseable output) -- surface this the same way the
+            # deleted AnthropicAnswerInferenceClient did (an explicit
+            # ValueError) rather than letting `parsed.answers` below raise
+            # an opaque AttributeError.
+            raise ValueError(
+                f"{self._provider_config.init_model} structured-output call "
+                "returned no parsed result"
+            )
 
         return [
             QuestionAnswer(
