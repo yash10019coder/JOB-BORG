@@ -1,6 +1,6 @@
 ---
 title: "fix: float unanswerable auto-apply questions to human review instead of excluding the draft"
-status: active
+status: completed
 created: 2026-08-09
 ---
 
