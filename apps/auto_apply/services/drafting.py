@@ -27,7 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
-from apps.auto_apply.greenhouse_form.field_mapping import FormField, schema_to_dict
+from apps.auto_apply.greenhouse_form.field_mapping import FILE, FormField, schema_to_dict
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
 from apps.auto_apply.models import AutoApplyDraft
@@ -159,8 +159,10 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     # problem than an LLM-unanswerable custom question -- they signal an
     # incomplete Profile, which the user fixes on their profile page, not
     # inline per-draft -- so they keep the pre-existing exclude-the-draft
-    # behavior. Custom (LLM-inferred) questions no longer exclude the draft;
-    # see the loop below.
+    # behavior. Most custom (LLM-inferred) questions no longer exclude the
+    # draft (see the loop below); the one custom-question exception is a
+    # required FILE-type field, which also lands here since it can't be
+    # answered inline via the review queue either.
     unanswerable_required: list[str] = []
 
     # -- Standard fields (R4): filled straight from Profile/User. ----------
@@ -199,6 +201,19 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             # to fill in via the review queue (`edit_auto_apply_draft`)
             # before sending; `send_auto_apply_draft` blocks sending while a
             # required placeholder is still blank (see apps/web/views.py).
+            #
+            # Exception: a required FILE-type question (e.g. "upload your
+            # portfolio"). `edit_auto_apply_draft` deliberately excludes
+            # FILE-type answers from editing (a user-supplied string there
+            # would flow straight into Playwright's set_input_files() at
+            # send time -- see that view's docstring), so a blank FILE
+            # placeholder here would be a permanent, unfillable blocker
+            # rather than something a human can actually resolve inline.
+            # This one case keeps the pre-existing exclude-the-draft
+            # behavior instead.
+            if form_field.field_type == FILE and form_field.required:
+                unanswerable_required.append(form_field.label)
+                continue
             answers_payload[form_field.label] = {
                 "value": "",
                 "needs_review": True,
