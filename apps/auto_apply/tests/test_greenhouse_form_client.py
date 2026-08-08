@@ -475,6 +475,39 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertIn("submitted successfully", result.confirmation_text.lower())
 
+    def test_submit_single_select_mismatch_raises_typed_submission_failed(self):
+        # U5: a SINGLE_SELECT answer with no matching option must fail
+        # closed with a typed, clear-message exception -- not a raw
+        # Playwright TimeoutError bubbling up from select_option().
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(
+            _fixture_html("greenhouse_custom_questions_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            submit_client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Last Name": "Lovelace",
+                    "Email": "ada@example.com",
+                    "Phone": "555-0100",
+                    "Resume/CV": str(self._resume_file()),
+                    "Why do you want to work here?": "Because I love hard problems.",
+                    "Are you legally authorized to work in the US?": "Maybe, unclear",
+                    "Which of the following technologies have you used professionally?": [
+                        "Python",
+                        "Go",
+                    ],
+                },
+                expected_schema=schema,
+            )
+
+        message = str(ctx.exception)
+        self.assertIn("No matching option", message)
+        self.assertIn("Are you legally authorized to work in the US?", message)
+
     def test_submit_confirms_success_via_text_pattern_without_status_role(self):
         # Reproduces what live verification against a real Greenhouse board
         # found: the confirmation view carries no role="status" (or any

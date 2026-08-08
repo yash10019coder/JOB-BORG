@@ -220,6 +220,81 @@ class LLMInferableQuestionTests(DraftingServiceTestCase):
         self.assertTrue(python_answer["needs_review"])
 
 
+class QuestionFieldConstraintPropagationTests(DraftingServiceTestCase):
+    """U1: `field_type`/`options` from the discovered `FormField` must reach
+    the `Question` passed to the LLM client -- otherwise the LLM has no way
+    to know a question is option-constrained (see `answer_resolution`'s
+    validation, which relies on `Question.options` being populated)."""
+
+    def test_single_select_question_carries_field_type_and_options(self):
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="What is your highest level of education?",
+                    field_type=SINGLE_SELECT,
+                    required=True,
+                    options=("High School", "Bachelor's", "Master's", "Other"),
+                ),
+            )
+        )
+        llm_client = FakeLLMClient(
+            answers_by_id={
+                "What is your highest level of education?": QuestionAnswer(
+                    question_id="What is your highest level of education?",
+                    answer="Bachelor's",
+                    evidence=["Bachelor's"],
+                    self_reported_confidence=0.9,
+                )
+            }
+        )
+        form_client = FakeFormClient(schema=schema)
+
+        draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(len(llm_client.calls), 1)
+        questions, _, _ = llm_client.calls[0]
+        education_question = next(
+            q for q in questions if q.id == "What is your highest level of education?"
+        )
+        self.assertEqual(education_question.field_type, SINGLE_SELECT)
+        self.assertEqual(
+            education_question.options, ("High School", "Bachelor's", "Master's", "Other")
+        )
+
+    def test_text_question_has_no_options(self):
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="How many years of Python experience do you have?",
+                    field_type=TEXT,
+                    required=False,
+                ),
+            )
+        )
+        llm_client = FakeLLMClient(
+            answers_by_id={
+                "How many years of Python experience do you have?": QuestionAnswer(
+                    question_id="How many years of Python experience do you have?",
+                    answer="5 years",
+                    evidence=["5 years of Python"],
+                    self_reported_confidence=0.9,
+                )
+            }
+        )
+        form_client = FakeFormClient(schema=schema)
+
+        draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        questions, _, _ = llm_client.calls[0]
+        python_question = next(
+            q for q in questions if q.id == "How many years of Python experience do you have?"
+        )
+        self.assertEqual(python_question.field_type, TEXT)
+        self.assertEqual(python_question.options, ())
+
+
 class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
     """A required custom question the LLM can never answer (a hard-excluded
     category, with no ExplicitAnswer on file) no longer excludes the whole
