@@ -257,6 +257,28 @@ class GreenhouseFormClientTests(SimpleTestCase):
             {"Associate's Degree", "Bachelor's Degree", "Master's Degree", "Other"},
         )
 
+    def test_inspect_scrolls_combobox_to_load_options_beyond_the_first_page(self):
+        # Reproduces a live-verified gap: a Greenhouse "School" combobox is
+        # backed by a remote paginated API (2,466 entries at 100/page on
+        # the live board) -- a bare open only ever renders the first page.
+        # Scrolling the listbox's last option into view is what triggers
+        # the widget to fetch and render the next page; without that,
+        # _extract_options() only ever captured page 1, and the just-added
+        # option-constraint validation would then wrongly reject any real
+        # answer that happened to live on a later page.
+        client = self._client(_fixture_html("greenhouse_paginated_combobox_options_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(school_field.field_type, COMBOBOX_SELECT)
+        # All 3 fixture pages (12 total) should load -- the fixture has
+        # far fewer pages than a real 2,466-entry field, well inside
+        # _COMBOBOX_SCROLL_ITERATIONS's bound, so this asserts full
+        # convergence, not just "more than the first page".
+        self.assertEqual(len(school_field.options), 12)
+        self.assertIn("Aalborg University", school_field.options)
+        self.assertIn("Adams State University", school_field.options)
+
     # -- inspect()/submit(): aria-labelledby-only combobox (no <label>) ---
 
     def test_inspect_discovers_aria_labelledby_only_combobox_fields(self):
