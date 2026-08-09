@@ -1,7 +1,7 @@
 ---
 title: Fix Greenhouse verification-interstitial detection missing the confirmed multi-box code shape
 type: fix
-status: active
+status: completed
 date: 2026-08-09
 ---
 
