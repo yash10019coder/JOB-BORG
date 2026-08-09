@@ -85,12 +85,15 @@ def resolve_field_answers(
                 break
 
         if explicit is not None:
-            resolved[question.id] = ResolvedAnswer(
-                question_id=question.id,
-                category=category,
-                answer=explicit.answer_text,
-                needs_review=False,
-                reason=EXPLICIT_ANSWER_REASON,
+            resolved[question.id] = _enforce_option_constraint(
+                ResolvedAnswer(
+                    question_id=question.id,
+                    category=category,
+                    answer=explicit.answer_text,
+                    needs_review=False,
+                    reason=EXPLICIT_ANSWER_REASON,
+                ),
+                question,
             )
         else:
             remaining.append(question)

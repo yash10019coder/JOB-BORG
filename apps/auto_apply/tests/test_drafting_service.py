@@ -130,10 +130,14 @@ class StandardFieldsOnlyTests(DraftingServiceTestCase):
 
 class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
     def test_explicit_answer_covered_question_drafts_without_calling_llm(self):
+        # "No" (not free text) -- an explicit answer for an option-bearing
+        # question is now validated against the field's real options
+        # exactly like an LLM answer (see answer_resolution's
+        # _enforce_option_constraint), so the fixture must be a real option.
         ExplicitAnswer.objects.create(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
-            answer_text="No, I do not require sponsorship.",
+            answer_text="No",
         )
         schema = FormSchema(
             fields=STANDARD_ONLY_SCHEMA.fields
@@ -156,7 +160,7 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         sponsorship_answer = draft.answers[
             "Will you now or in the future require visa sponsorship?"
         ]
-        self.assertEqual(sponsorship_answer["value"], "No, I do not require sponsorship.")
+        self.assertEqual(sponsorship_answer["value"], "No")
         self.assertFalse(sponsorship_answer["needs_review"])
         self.assertEqual(sponsorship_answer["reason"], "explicit_answer")
         self.assertTrue(sponsorship_answer["required"])
