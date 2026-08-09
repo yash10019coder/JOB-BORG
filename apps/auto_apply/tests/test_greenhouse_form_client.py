@@ -30,6 +30,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormVerificationFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
@@ -238,6 +239,78 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(checkbox_field.field_type, CHECKBOX_GROUP)
         self.assertTrue(checkbox_field.required)
         self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
+
+    # -- inspect()/submit(): standalone checkbox (no enclosing fieldset) ----
+
+    def test_inspect_discovers_standalone_checkbox_as_acknowledgement_field(self):
+        # A standalone checkbox (no <fieldset><legend>) was previously
+        # entirely invisible to discovery -- _checkbox_group_field()
+        # returned None and the caller silently `continue`d past it. Now
+        # discovered as its own CHECKBOX_ACKNOWLEDGEMENT field.
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertIn("I agree to the Terms of Service", by_label)
+        terms_field = by_label["I agree to the Terms of Service"]
+        self.assertEqual(terms_field.field_type, CHECKBOX_ACKNOWLEDGEMENT)
+        self.assertTrue(terms_field.required)
+        self.assertEqual(terms_field.options, ("Yes", "No"))
+        self.assertEqual(terms_field.control_id, "terms")
+
+        # Edge case: a non-required standalone checkbox is discovered too,
+        # correctly marked not required.
+        newsletter_field = by_label["Subscribe me to the newsletter"]
+        self.assertEqual(newsletter_field.field_type, CHECKBOX_ACKNOWLEDGEMENT)
+        self.assertFalse(newsletter_field.required)
+
+    def test_submit_checks_standalone_checkbox_answered_yes(self):
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "I agree to the Terms of Service": "Yes",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_leaves_standalone_checkbox_unchecked_when_answered_no(self):
+        # A non-required standalone checkbox answered "No" must not be
+        # checked, and must not block submission.
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "I agree to the Terms of Service": "Yes",
+                "Subscribe me to the newsletter": "No",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_required_standalone_checkbox_unanswered_blocks_native_submit(self):
+        # Fail-closed guard (R2): the fixture's own native `required`
+        # blocks the real form submit when "terms" is left unchecked --
+        # confirms an unanswered required standalone checkbox is a genuine
+        # blocker end-to-end, not silently ignorable, now that it's a
+        # real, discovered, is_supported field rather than invisible.
+        client = self._client(
+            _fixture_html("greenhouse_standalone_checkbox_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
 
     def test_inspect_waits_for_combobox_options_that_render_after_the_listbox_opens(self):
         # Reproduces a live-verified race: a Greenhouse "Degree"/"School"
@@ -883,6 +956,43 @@ class GreenhouseFormClientTests(SimpleTestCase):
         mock_page.locator.side_effect = _locator
 
         self.assertFalse(client._verification_interstitial_detected(mock_page))
+
+    # -- submit(): bounded post-fill re-discovery for revealed fields -------
+
+    def test_submit_no_revealed_fields_behaves_identically(self):
+        # R7 happy path: choosing "Referral" never reveals the "specify"
+        # field -- the extra re-discovery pass finds nothing new and
+        # submission proceeds exactly as before this change.
+        client = self._client(_fixture_html("greenhouse_reveals_required_field_on_select_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "How did you hear about us?": "Referral",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_revealed_required_field_raises_schema_mismatch(self):
+        # R5/R6: choosing "Other" reveals a new required "Please specify"
+        # field that was never in the drafted answers -- there is no
+        # answer for a field that didn't exist at draft time, so this
+        # fails closed before Submit is ever clicked, rather than silently
+        # submitting incomplete or hanging on the generic timeout path.
+        client = self._client(_fixture_html("greenhouse_reveals_required_field_on_select_form.html"))
+        with self.assertRaises(GreenhouseFormSchemaMismatch) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                    "How did you hear about us?": "Other",
+                },
+            )
+        self.assertIn("Please specify", str(ctx.exception))
 
     def test_submit_normal_success_fixture_still_resolves_as_success(self):
         # Regression guard: an ordinary success fixture must remain

@@ -44,6 +44,7 @@ from .exceptions import (
 )
 from .education_api import education_type_for_control_id, fetch_full_list
 from .field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
@@ -348,6 +349,7 @@ class GreenhouseFormClient:
 
             try:
                 self._fill_answers(page, schema_now, answers)
+                self._raise_on_newly_revealed_required_fields(page, job_url, schema_now)
                 submitted_at = datetime.now(timezone.utc)
                 self._click_submit(page, schema_now)
                 result = self._confirm_success(
@@ -498,14 +500,45 @@ class GreenhouseFormClient:
                 # each with its own <label for> reading the *option* text
                 # (e.g. "Python"), not the question. Handled as one group
                 # per <fieldset>, not one field per checkbox.
-                group_field = self._checkbox_group_field(page, control, seen_control_ids)
-                if group_field is not None:
-                    if group_field.required and not group_field.is_supported:
-                        raise GreenhouseFormSchemaMismatch(
-                            f"Required field {group_field.label!r} on {job_url} has "
-                            f"unsupported type {group_field.field_type!r}."
-                        )
-                    fields.append(group_field)
+                has_fieldset = control.locator("xpath=ancestor::fieldset[1]").count() > 0
+                if has_fieldset:
+                    # Belongs to a <fieldset><legend> group -- either the
+                    # first checkbox in it (group_field is the whole
+                    # group) or a later sibling in a group already
+                    # captured (group_field is None because
+                    # `_checkbox_group_field()`'s own seen_control_ids
+                    # dedup already fired) -- either way, not a standalone
+                    # checkbox, so never fall through to the standalone
+                    # branch below.
+                    group_field = self._checkbox_group_field(page, control, seen_control_ids)
+                    if group_field is not None:
+                        if group_field.required and not group_field.is_supported:
+                            raise GreenhouseFormSchemaMismatch(
+                                f"Required field {group_field.label!r} on {job_url} has "
+                                f"unsupported type {group_field.field_type!r}."
+                            )
+                        fields.append(group_field)
+                    continue
+                # No enclosing <fieldset> -- a standalone checkbox (e.g. a
+                # policy/terms-of-service acceptance box), not a group.
+                # Discovered as its own CHECKBOX_ACKNOWLEDGEMENT field
+                # rather than silently skipped, so a required one fails
+                # closed like any other unsupported/unanswered field
+                # instead of leaving the form silently unsubmittable.
+                checkbox_id = control.get_attribute("id") or ""
+                if checkbox_id:
+                    if checkbox_id in seen_control_ids:
+                        continue
+                    seen_control_ids.add(checkbox_id)
+                fields.append(
+                    FormField(
+                        label=label_text,
+                        field_type=CHECKBOX_ACKNOWLEDGEMENT,
+                        required=self._is_required(control),
+                        options=("Yes", "No"),
+                        control_id=checkbox_id,
+                    )
+                )
                 continue
             control_id = control.get_attribute("id") or ""
             if control_id:
@@ -542,6 +575,34 @@ class GreenhouseFormClient:
 
         fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
         return FormSchema(fields=tuple(fields))
+
+    def _raise_on_newly_revealed_required_fields(
+        self, page, job_url: str, filled_schema: FormSchema
+    ) -> None:
+        """One bounded re-discovery pass (not a polling loop) after
+        `_fill_answers()` completes, to catch a field that only entered the
+        DOM as a side effect of an answer just filled (e.g. selecting
+        "Other" reveals a "please specify" text box). `filled_schema` is
+        exactly what was filled -- any field the fresh discovery finds that
+        isn't in it is new. There is no drafted answer for a field that
+        didn't exist at draft time, so a *required* new field fails closed
+        here, before Submit is ever clicked, rather than silently
+        submitting incomplete or hanging on the generic post-submit
+        timeout. A new field that isn't required is not a blocker and is
+        left as-is -- this pass only ever fails closed on the required
+        case, matching every other fail-closed check in this file.
+        """
+        rediscovered = self._discover_schema(page, job_url)
+        known_labels = {f.label for f in filled_schema.fields}
+        newly_required = [
+            f.label for f in rediscovered.fields if f.required and f.label not in known_labels
+        ]
+        if newly_required:
+            raise GreenhouseFormSchemaMismatch(
+                f"New required field(s) appeared on {job_url} after filling the "
+                f"drafted answers, with no answer available for them: "
+                f"{', '.join(newly_required)}."
+            )
 
     @staticmethod
     def _discover_aria_labelledby_only_fields(
@@ -898,6 +959,17 @@ class GreenhouseFormClient:
                 self._fill_combobox(page, control, str(value), label)
             elif form_field.field_type == CHECKBOX_GROUP:
                 self._fill_checkbox_group(page, control, value, label)
+            elif form_field.field_type == CHECKBOX_ACKNOWLEDGEMENT:
+                # `_enforce_option_constraint()` already guarantees any
+                # resolved answer reaching here is exactly "Yes" or "No"
+                # (the field's options are fixed to that pair at discovery
+                # time) -- no third branch needed for an invalid value,
+                # mirroring SINGLE_SELECT's trust in the same upstream
+                # guarantee.
+                if str(value) == "Yes":
+                    control.check()
+                else:
+                    control.uncheck()
             else:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
