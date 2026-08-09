@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from importlib import import_module
 from typing import Protocol
 
 from django.conf import settings
@@ -34,7 +33,7 @@ class Question:
     a separate implementation unit) so this module has no hard dependency on
     them -- callers adapt their own question representation into this shape.
     ``text`` is untrusted input: it is the employer's Greenhouse form label,
-    not something JobBorg authored (see ``anthropic_client``'s prompt
+    not something JobBorg authored (see ``langchain_client``'s prompt
     handling and the groundedness check below).
     """
 
@@ -96,43 +95,32 @@ class AnswerInferenceClient(Protocol):
         ...
 
 
-# ---------------------------------------------------------------------------
-# Provider registry -- mirrors apps/jobs/ingestion/dispatch.py's
-# CLIENT_REGISTRY shape (a dict keyed by a settings-driven string, resolved
-# through get_client()). Colocated with the protocol rather than in a
-# separate dispatch module since this slice registers a single provider;
-# split it out if/when a second vendor is added.
-#
-# Registered as (module path, class name) rather than a direct class
-# reference so importing this module never has to import
-# ``anthropic_client`` (which itself imports ``Question``/``QuestionAnswer``
-# from here) -- avoids a module-import-order-dependent circular import
-# between the two files while keeping the same "small dict + get_client()"
-# shape as dispatch.py.
-# ---------------------------------------------------------------------------
-CLIENT_REGISTRY: dict[str, tuple[str, str]] = {
-    "anthropic": ("apps.auto_apply.llm.anthropic_client", "AnthropicAnswerInferenceClient"),
-    "nvidia": ("apps.auto_apply.llm.nvidia_client", "NvidiaAnswerInferenceClient"),
-}
-
-
 def get_client(provider: str | None = None, **kwargs) -> AnswerInferenceClient:
     """Return a new client instance for ``provider`` (defaults to settings).
+
+    Every provider is driven by the single ``LangChainAnswerInferenceClient``
+    (see ``langchain_client.py``), configured per-provider through the
+    data-only ``_PROVIDER_CONFIGS`` table -- not a registry of classes.
+    Imported lazily here (not at module level) because ``langchain_client``
+    imports ``Question``/``QuestionAnswer``/``_profile_text`` from this
+    module, and those names aren't defined yet at the point a top-level
+    import of ``langchain_client`` would run -- avoids a module-import-order-
+    dependent circular import between the two files.
 
     Raises:
         ValueError: ``provider`` is not a registered provider.
     """
+    from .langchain_client import _PROVIDER_CONFIGS, LangChainAnswerInferenceClient
+
     provider = provider or settings.AUTO_APPLY_LLM_PROVIDER
     try:
-        module_path, class_name = CLIENT_REGISTRY[provider]
+        provider_config = _PROVIDER_CONFIGS[provider]
     except KeyError:
         raise ValueError(
             f"No AnswerInferenceClient registered for provider={provider!r}. "
-            f"Registered: {sorted(CLIENT_REGISTRY)}"
+            f"Registered: {sorted(_PROVIDER_CONFIGS)}"
         ) from None
-    module = import_module(module_path)
-    client_cls = getattr(module, class_name)
-    return client_cls(**kwargs)
+    return LangChainAnswerInferenceClient(provider_config, **kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -245,12 +245,14 @@ DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", d
 
 # ---------------------------------------------------------------------------
 # Auto-apply: LLM answer inference (apps.auto_apply.llm) -- provider-agnostic;
-# Anthropic Claude is the only registered implementation in this slice (see
-# apps/auto_apply/llm/base.py's CLIENT_REGISTRY).
+# one LangChain-backed client (apps/auto_apply/llm/langchain_client.py) drives
+# every registered provider (see its _PROVIDER_CONFIGS table).
 # ---------------------------------------------------------------------------
 AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 NVIDIA_API_KEY = env("NVIDIA_API_KEY", default="")
+OPENAI_API_KEY = env("OPENAI_API_KEY", default="")
+GOOGLE_API_KEY = env("GOOGLE_API_KEY", default="")
 # Both provider SDKs default to a very long request timeout (minutes) when
 # none is given, and draft_auto_apply has no Celery time_limit of its own --
 # confirmed live that an unbounded NVIDIA NIM call can block a worker slot
