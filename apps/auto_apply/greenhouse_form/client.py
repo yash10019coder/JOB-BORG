@@ -748,7 +748,28 @@ class GreenhouseFormClient:
             try:
                 control.click()
                 listbox = page.get_by_role("listbox")
-                listbox.first.wait_for(state="visible", timeout=1_000)
+                # Wait for an actual *option* to render, not for the
+                # (possibly still-empty) listbox container to become
+                # "visible" -- confirmed live (Atomicwork's "Degree"/
+                # "School" fields) that the container mounts empty first
+                # and real <option> entries render a few hundred ms later,
+                # and confirmed separately that a childless container can
+                # itself fail Playwright's visibility check (it commonly
+                # collapses to zero layout size with no children), so
+                # waiting on the container first can time out before the
+                # options ever get a chance to render. Waiting directly for
+                # an option -- scoped through the listbox so a stray
+                # leftover option from elsewhere on the page can't match --
+                # handles both a container that opens empty-but-visible and
+                # one that only becomes visible once populated, using the
+                # same budget `_fill_combobox` already uses for the same
+                # kind of wait. A widget that's legitimately empty on bare
+                # open (e.g. Location, which only populates once the user
+                # types) still times out here, falling through to the
+                # except below exactly as before.
+                listbox.first.get_by_role("option").first.wait_for(
+                    state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS
+                )
                 raw_options = listbox.first.get_by_role("option").all_text_contents()
             except Exception:  # noqa: BLE001 -- no listbox on bare open is normal, not fatal
                 raw_options = []

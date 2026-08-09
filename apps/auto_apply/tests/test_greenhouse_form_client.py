@@ -239,6 +239,24 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(checkbox_field.required)
         self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
 
+    def test_inspect_waits_for_combobox_options_that_render_after_the_listbox_opens(self):
+        # Reproduces a live-verified race: a Greenhouse "Degree"/"School"
+        # combobox's listbox container becomes visible immediately on open,
+        # but its real <option> entries render ~300ms later. The old
+        # _extract_options() only waited for the (empty) container to
+        # become visible, then read whatever options existed at that
+        # instant -- racing ahead of the population and recording zero
+        # options for a field that genuinely has real choices.
+        client = self._client(_fixture_html("greenhouse_delayed_combobox_options_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        degree_field = schema.by_label()["Degree"]
+        self.assertEqual(degree_field.field_type, COMBOBOX_SELECT)
+        self.assertEqual(
+            set(degree_field.options),
+            {"Associate's Degree", "Bachelor's Degree", "Master's Degree", "Other"},
+        )
+
     # -- inspect()/submit(): aria-labelledby-only combobox (no <label>) ---
 
     def test_inspect_discovers_aria_labelledby_only_combobox_fields(self):
