@@ -76,6 +76,20 @@ _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
 _COMBOBOX_OPTION_TIMEOUT_MS = 5_000
 _SETTLE_TIMEOUT_MS = 5_000
+# Some Greenhouse combobox widgets (confirmed live: the "School" field,
+# backed by a remote paginated API of 2,466 entries at 100/page) only ever
+# render the first page's options on a bare open -- loading more pages
+# requires scrolling the listbox's last option into view, which is what a
+# real user does when they scroll to browse. This is a bounded improvement,
+# not exhaustive: each extra page costs a real render round-trip, so this
+# stops early once a scroll stops growing the option count (a small list,
+# like the 10-entry "Degree" field, converges after one iteration) and
+# caps out well short of every possible page for very large lists like
+# School's 2,466 entries -- `_fill_combobox()` at send time is unaffected
+# by this cap, since it types the real target value rather than relying on
+# whatever this discovery-time scroll happened to load.
+_COMBOBOX_SCROLL_ITERATIONS = 5
+_COMBOBOX_SCROLL_WAIT_MS = 500
 
 # Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
 # successful submission. Verified against a live Greenhouse board
@@ -770,6 +784,21 @@ class GreenhouseFormClient:
                 listbox.first.get_by_role("option").first.wait_for(
                     state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS
                 )
+                # A single-page-of-100 result isn't necessarily the whole
+                # list -- confirmed live that a real, trusted scroll (last
+                # option into view) triggers the widget to fetch and render
+                # its next page, while a widget with everything already
+                # showing (or nothing more to load) simply stops growing.
+                # Bounded and best-effort: see _COMBOBOX_SCROLL_ITERATIONS.
+                options_locator = listbox.first.get_by_role("option")
+                previous_count = options_locator.count()
+                for _ in range(_COMBOBOX_SCROLL_ITERATIONS):
+                    options_locator.last.scroll_into_view_if_needed()
+                    page.wait_for_timeout(_COMBOBOX_SCROLL_WAIT_MS)
+                    current_count = options_locator.count()
+                    if current_count <= previous_count:
+                        break
+                    previous_count = current_count
                 raw_options = listbox.first.get_by_role("option").all_text_contents()
             except Exception:  # noqa: BLE001 -- no listbox on bare open is normal, not fatal
                 raw_options = []

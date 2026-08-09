@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces a live-verified Greenhouse behavior: the "School"
+        combobox is backed by a remote, paginated API (confirmed live:
+        boards.greenhouse.io/v1/boards/{token}/education/schools?page=N,
+        2,466 entries at 100/page) -- a bare open only renders the first
+        page; scrolling the listbox's last option into view is what
+        triggers the widget to fetch and render the next page (confirmed
+        live: a real trusted scroll grew the rendered count from 100 to
+        200; a programmatic scrollTop assignment alone did not).
+      -->
+      <div class="field">
+        <label id="school-label" for="school">School</label>
+        <input
+          type="text"
+          id="school"
+          role="combobox"
+          aria-labelledby="school-label"
+          autocomplete="off"
+        >
+        <ul
+          id="school-listbox"
+          role="listbox"
+          hidden
+          style="max-height: 100px; overflow-y: auto;"
+        ></ul>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Minimal paginated-on-scroll combobox: click loads page 1; scrolling
+    // the listbox near its bottom loads the next page, mirroring
+    // react-select's onMenuScrollToBottom pattern -- confirmed live that
+    // this requires a real scroll event on the listbox's own scrolling
+    // container, not a programmatic scrollTop assignment alone.
+    function initPaginatedCombobox(inputId, listboxId, pages) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+      var loadedPages = 0;
+
+      function appendNextPage() {
+        if (loadedPages >= pages.length) return;
+        pages[loadedPages].forEach(function (o) {
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.textContent = o;
+          li.style.height = '30px';
+          listbox.appendChild(li);
+        });
+        loadedPages++;
+      }
+
+      input.addEventListener('click', function () {
+        listbox.innerHTML = '';
+        loadedPages = 0;
+        listbox.hidden = false;
+        appendNextPage();
+      });
+
+      listbox.addEventListener('scroll', function () {
+        if (listbox.scrollTop + listbox.clientHeight >= listbox.scrollHeight - 5) {
+          appendNextPage();
+        }
+      });
+    }
+
+    initPaginatedCombobox('school', 'school-listbox', [
+      ['Aalborg University', 'Aalto University', 'Aarhus University', 'Abertay University'],
+      ['Abilene Christian University', 'Abo Akademi University', 'Abraham Baldwin Agricultural College', 'Abu Dhabi University'],
+      ['Academy of Art University', 'Acadia University', 'Acharya Nagarjuna University', 'Adams State University'],
+    ]);
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>
