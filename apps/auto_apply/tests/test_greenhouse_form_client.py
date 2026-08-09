@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-
+from django.core.cache import cache
 from django.test import SimpleTestCase
 
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
@@ -278,6 +278,102 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(len(school_field.options), 12)
         self.assertIn("Aalborg University", school_field.options)
         self.assertIn("Adams State University", school_field.options)
+
+    # -- inspect(): education-API-backed combobox (School/Degree/Discipline) ---
+
+    class _FakeEducationSession:
+        """Test double for `requests.Session` -- no real HTTP call is ever
+        made. Records every GET."""
+
+        def __init__(self, responses_by_page=None, raises=None):
+            self.responses_by_page = responses_by_page or {}
+            self.raises = raises
+            self.calls: list[dict] = []
+
+        def get(self, url, params=None, timeout=None):
+            self.calls.append({"url": url, "params": params, "timeout": timeout})
+            if self.raises is not None:
+                raise self.raises
+            return self.responses_by_page[params["page"]]
+
+    class _FakeEducationResponse:
+        def __init__(self, status_code=200, json_body=None):
+            self.status_code = status_code
+            self._json_body = json_body or {}
+
+        def json(self):
+            return self._json_body
+
+    def test_inspect_uses_full_education_api_list_when_available(self):
+        # The fixture's DOM-scraped list is only 2 schools; the education
+        # API (mocked here, never hitting a real network) reports 3 --
+        # the API list should entirely replace the DOM-scraped one, not
+        # merge with or lose out to it.
+        cache.clear()
+        session = self._FakeEducationSession(
+            {
+                1: self._FakeEducationResponse(
+                    200,
+                    {
+                        "items": [
+                            {"id": 1, "text": "API School A"},
+                            {"id": 2, "text": "API School B"},
+                            {"id": 3, "text": "API School C"},
+                        ],
+                        "meta": {"total_count": 3},
+                    },
+                )
+            }
+        )
+        client = self._client(
+            _fixture_html("greenhouse_education_api_backed_combobox_form.html"),
+            education_api_session=session,
+        )
+
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(
+            set(school_field.options), {"API School A", "API School B", "API School C"}
+        )
+        self.assertNotIn("DOM Sample School A", school_field.options)
+        # JOB_URL's board token is "acme" -- confirms the real request URL
+        # shape, not just that *a* request happened.
+        self.assertEqual(
+            session.calls[0]["url"],
+            "https://boards.greenhouse.io/v1/boards/acme/education/schools",
+        )
+
+    def test_inspect_falls_back_to_dom_options_when_education_api_fails(self):
+        # A board without this endpoint enabled, a network error, or any
+        # other API failure must never lose the field entirely -- fall
+        # back to whatever the DOM scrape already found.
+        cache.clear()
+        session = self._FakeEducationSession(raises=ConnectionError("boom"))
+        client = self._client(
+            _fixture_html("greenhouse_education_api_backed_combobox_form.html"),
+            education_api_session=session,
+        )
+
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(set(school_field.options), {"DOM Sample School A", "DOM Sample School B"})
+
+    def test_inspect_does_not_call_education_api_for_non_education_combobox(self):
+        # A combobox whose control_id doesn't match Greenhouse's Education
+        # block naming (e.g. "Are you authorized to work?", a plain
+        # work_auth id) must never trigger an education API call.
+        cache.clear()
+        session = self._FakeEducationSession()
+        client = self._client(
+            _fixture_html("greenhouse_combobox_and_file_upload_form.html"),
+            education_api_session=session,
+        )
+
+        client.inspect(JOB_URL)
+
+        self.assertEqual(session.calls, [])
 
     # -- inspect()/submit(): aria-labelledby-only combobox (no <label>) ---
 
