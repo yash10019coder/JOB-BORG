@@ -13,6 +13,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormSchemaMismatch,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     FILE,
     FormField,
     FormSchema,
@@ -326,6 +327,38 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
 
         self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
         entry = draft.answers["What are your salary expectations?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
+        self.assertEqual(entry["reason"], "hard_excluded_category")
+        self.assertEqual(llm_client.calls, [])
+
+
+    def test_required_standalone_checkbox_attestation_drafts_for_manual_review(self):
+        # A required CHECKBOX_ACKNOWLEDGEMENT field labeled with existing
+        # LEGAL_ATTESTATION phrasing (see apps/auto_apply/llm/categories.py)
+        # is not a FILE-type field, so it does not hit the one
+        # exclude-the-draft exception -- it floats up as a blank
+        # needs_review placeholder, same as any other hard-excluded
+        # required custom question, never auto-checked by the LLM.
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="I agree to the Terms of Service",
+                    field_type=CHECKBOX_ACKNOWLEDGEMENT,
+                    required=True,
+                    options=("Yes", "No"),
+                ),
+            )
+        )
+        form_client = FakeFormClient(schema=schema)
+        llm_client = FakeLLMClient()  # attestation is hard-excluded -- never called
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["I agree to the Terms of Service"]
         self.assertEqual(entry["value"], "")
         self.assertTrue(entry["needs_review"])
         self.assertTrue(entry["required"])
