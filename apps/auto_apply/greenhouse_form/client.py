@@ -134,7 +134,10 @@ _CONFIRMATION_TEXT_PATTERNS = (
 #     unrelated fields like "zip_code" (acceptable here only because this
 #     signal is never trusted alone -- see the confirming-copy requirement
 #     below).
-# Must be replaced/confirmed once a real interstitial page is captured.
+# `_verification_interstitial_detected()` also independently checks the
+# confirmed `_VERIFICATION_CODE_BOX_SELECTOR` multi-box shape below, so a
+# real interstitial rendered in that shape is not missed if it fails to
+# match this selector's still-unconfirmed attribute guesses.
 _VERIFICATION_CODE_INPUT_SELECTOR = (
     'input[autocomplete="one-time-code" i], '
     'input[inputmode="numeric" i], '
@@ -1276,9 +1279,21 @@ class GreenhouseFormClient:
 
     @staticmethod
     def _verification_interstitial_detected(page) -> bool:
-        """Detect Greenhouse's post-submit email-verification interstitial."""
-        code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
-        if code_input.count() == 0:
+        """Detect Greenhouse's post-submit email-verification interstitial.
+
+        Checks both recognized code-entry-control shapes: the original
+        (unverified) single-input guess, and the confirmed real shape --
+        N separate `input[maxlength="1"]` boxes (see
+        `_VERIFICATION_CODE_BOX_SELECTOR`'s comment, captured live) --
+        requiring at least 2 boxes so a single unrelated one-character
+        input elsewhere on the page can't alone satisfy this signal
+        (mirrors `_fill_verification_code()`'s own `box_count >= 2`
+        threshold for the same shape).
+        """
+        has_code_control = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).count() > 0
+        if not has_code_control:
+            has_code_control = page.locator(_VERIFICATION_CODE_BOX_SELECTOR).count() >= 2
+        if not has_code_control:
             return False
         body_text = page.locator("body").inner_text().lower()
         return any(phrase in body_text for phrase in _VERIFICATION_TEXT_PATTERNS)

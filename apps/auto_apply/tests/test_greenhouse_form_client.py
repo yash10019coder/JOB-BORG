@@ -810,6 +810,80 @@ class GreenhouseFormClientTests(SimpleTestCase):
             )
         self.assertEqual(ctx.exception.outcome, VerificationOutcome.CODE_REJECTED)
 
+    def test_submit_bare_multibox_interstitial_still_detected(self):
+        # Regression test for the bug fixed here: the real interstitial
+        # captured in media/auto_apply_debug/1786259666-c46a2165-a11y.yaml
+        # rendered 8 single-character code boxes carrying NONE of
+        # `_VERIFICATION_CODE_INPUT_SELECTOR`'s assumed attributes (no
+        # autocomplete="one-time-code", no inputmode="numeric", no
+        # name/id/placeholder containing "code") -- only `maxlength="1"`.
+        # Before this fix, detection's code_input.count() was 0 and the
+        # interstitial was silently missed, falling through to the generic
+        # GreenhouseFormSubmissionFailed instead of routing into email
+        # verification at all.
+        client = self._client(_fixture_html("greenhouse_verification_multibox_bare_form.html"))
+        with self.assertRaises(GreenhouseFormVerificationFailed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormSubmissionFailed)
+
+    def test_verification_interstitial_detected_true_for_bare_multibox_shape(self):
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 8)
+            if sel == "body":
+                return MagicMock(
+                    inner_text=lambda: "A verification code was sent to you. Enter the code below."
+                )
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertTrue(client._verification_interstitial_detected(mock_page))
+
+    def test_verification_interstitial_not_falsely_triggered_by_single_stray_box(self):
+        # A lone maxlength="1" input elsewhere on the page (e.g. a
+        # single-character field unrelated to verification) must not alone
+        # satisfy the control-signal -- mirrors `_fill_verification_code()`'s
+        # own `box_count >= 2` threshold for the same shape.
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 1)
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertFalse(client._verification_interstitial_detected(mock_page))
+
+    def test_verification_interstitial_not_falsely_triggered_without_confirming_copy(self):
+        # The multi-box control signal alone is never enough -- confirming
+        # copy is still required (existing two-signal design, unchanged).
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 8)
+            if sel == "body":
+                return MagicMock(inner_text=lambda: "Nothing relevant here.")
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertFalse(client._verification_interstitial_detected(mock_page))
+
     def test_submit_normal_success_fixture_still_resolves_as_success(self):
         # Regression guard: an ordinary success fixture must remain
         # unaffected by the new verification-interstitial branch.
