@@ -42,6 +42,7 @@ from .exceptions import (
     GreenhouseFormSubmissionFailed,
     GreenhouseFormVerificationFailed,
 )
+from .education_api import education_type_for_control_id, fetch_full_list
 from .field_mapping import (
     CHECKBOX_GROUP,
     COMBOBOX_SELECT,
@@ -243,6 +244,7 @@ class GreenhouseFormClient:
         navigation_timeout_ms: int = _DEFAULT_NAVIGATION_TIMEOUT_MS,
         confirmation_timeout_ms: int = _DEFAULT_CONFIRMATION_TIMEOUT_MS,
         captcha_timeout_s: float = _DEFAULT_CAPTCHA_TIMEOUT_S,
+        education_api_session=None,
     ):
         self._context_factory = context_factory or _default_context_factory
         self._default_captcha_solver = captcha_solver
@@ -252,6 +254,10 @@ class GreenhouseFormClient:
         self.navigation_timeout_ms = navigation_timeout_ms
         self.confirmation_timeout_ms = confirmation_timeout_ms
         self.captcha_timeout_s = captcha_timeout_s
+        # Injectable for tests -- never make a real HTTP call from a test;
+        # construct with a fake/mock `requests.Session`-shaped object
+        # instead. See `education_api.fetch_full_list`.
+        self._education_api_session = education_api_session
 
     # -- public API -----------------------------------------------------
 
@@ -515,6 +521,8 @@ class GreenhouseFormClient:
                 label_text = self._group_label_for(control) or label_text
             required = self._is_required(control)
             options = self._extract_options(page, control, field_type)
+            if field_type == COMBOBOX_SELECT:
+                options = self._maybe_full_education_options(job_url, control_id, options)
             form_field = FormField(
                 label=label_text,
                 field_type=field_type,
@@ -806,6 +814,34 @@ class GreenhouseFormClient:
                 page.keyboard.press("Escape")
             return tuple(opt.strip() for opt in raw_options if opt.strip())
         return ()
+
+    def _maybe_full_education_options(
+        self, job_url: str, control_id: str, dom_options: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Replace a DOM-scraped, possibly-partial option list with the
+        complete one when this control is backed by Greenhouse's public
+        education API (School/Degree/Discipline) -- see `education_api`
+        module docstring. Falls back to `dom_options` unchanged when the
+        control isn't API-backed, or the API call fails for any reason
+        (network error, unexpected shape, board without this endpoint).
+        """
+        education_type = education_type_for_control_id(control_id)
+        if education_type is None:
+            return dom_options
+        board_token = self._extract_board_token(job_url)
+        if not board_token:
+            return dom_options
+        full_options = fetch_full_list(
+            board_token, education_type, session=self._education_api_session
+        )
+        return full_options if full_options else dom_options
+
+    @staticmethod
+    def _extract_board_token(job_url: str) -> str:
+        from urllib.parse import urlparse
+
+        path = urlparse(job_url).path.strip("/")
+        return path.split("/")[0] if path else ""
 
     # -- filling --------------------------------------------------------
 
