@@ -182,6 +182,28 @@ class ResolveAnswersHardExcludedCategoryTests(SimpleTestCase):
         self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
         self.assertEqual(resolved.category, QuestionCategory.WORK_AUTHORIZATION)
 
+    def test_standalone_checkbox_attestation_text_never_reaches_the_llm_client(self):
+        # A standalone CHECKBOX_ACKNOWLEDGEMENT field's discovered `label`
+        # becomes the Question.text classify() runs against, same as any
+        # other custom question -- a checkbox labeled with existing
+        # LEGAL_ATTESTATION phrasing must never be auto-checked by the LLM;
+        # it always resolves to needs_review for a human to decide.
+        question = Question(
+            id="I agree to the Terms of Service",
+            text="I agree to the Terms of Service",
+            field_type="checkbox_acknowledgement",
+            options=("Yes", "No"),
+        )
+        llm_client = FakeAnswerInferenceClient(answers_by_id={})
+
+        [resolved] = resolve_answers([question], RESUME_TEXT, PROFILE, llm_client)
+
+        self.assertEqual(llm_client.calls, [], "LLM client must never be called for hard-excluded categories")
+        self.assertTrue(resolved.needs_review)
+        self.assertIsNone(resolved.answer)
+        self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
+        self.assertEqual(resolved.category, QuestionCategory.LEGAL_ATTESTATION)
+
     def test_mixed_batch_only_sends_allowed_questions_to_llm(self):
         sponsorship_question = Question(id="q1", text="Will you now or in the future require visa sponsorship?")
         salary_question = Question(id="q2", text="What are your salary expectations?")
