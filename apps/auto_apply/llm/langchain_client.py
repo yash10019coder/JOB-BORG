@@ -90,12 +90,19 @@ def _build_prompt(questions: list[Question], resume_text: str, profile) -> str:
         "<questions>",
     ]
     for question in questions:
-        if question.options:
-            options_attr = "|".join(question.options)
-            lines.append(f'<question id="{question.id}" options="{options_attr}">')
-        else:
-            lines.append(f'<question id="{question.id}">')
+        lines.append(f'<question id="{question.id}">')
         lines.append(question.text)
+        if question.options:
+            # One <option> element per value rather than a single delimited
+            # attribute -- an employer-authored option label can itself
+            # contain any punctuation (including a delimiter character),
+            # and a joined string would then be ambiguous for the model to
+            # parse back out, silently rejecting every answer for that
+            # question at the deterministic validation gate below.
+            lines.append("<options>")
+            for option in question.options:
+                lines.append(f"<option>{option}</option>")
+            lines.append("</options>")
         lines.append("</question>")
     lines.append("</questions>")
     return "\n".join(lines)

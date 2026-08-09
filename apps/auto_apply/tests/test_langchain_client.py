@@ -58,7 +58,7 @@ class BuildPromptOptionsTests(SimpleTestCase):
     """U2: option-bearing questions must render their exact option set in
     the prompt so the LLM can be instructed to answer within it."""
 
-    def test_option_bearing_question_renders_options_attribute(self):
+    def test_option_bearing_question_renders_each_option_as_its_own_element(self):
         question = Question(
             id="q1",
             text="What is your highest level of education?",
@@ -68,14 +68,33 @@ class BuildPromptOptionsTests(SimpleTestCase):
 
         prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
 
-        self.assertIn('options="High School|Bachelor\'s|Other"', prompt)
+        self.assertIn("<option>High School</option>", prompt)
+        self.assertIn("<option>Bachelor's</option>", prompt)
+        self.assertIn("<option>Other</option>", prompt)
 
-    def test_free_text_question_renders_no_options_attribute(self):
+    def test_option_containing_delimiter_like_punctuation_survives_intact(self):
+        # Regression guard: a single pipe-delimited options="..." attribute
+        # is ambiguous when an employer-authored option label itself
+        # contains "|" -- the per-<option>-element shape has no such
+        # collision, since each option is its own text node.
+        question = Question(
+            id="q1",
+            text="Employment type?",
+            field_type="single_select",
+            options=("Full-time | Part-time", "Contract", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertIn("<option>Full-time | Part-time</option>", prompt)
+        self.assertIn("<option>Contract</option>", prompt)
+
+    def test_free_text_question_renders_no_options_element(self):
         question = Question(id="q1", text="Tell us about yourself", field_type="text")
 
         prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
 
-        self.assertNotIn("options=", prompt)
+        self.assertNotIn("<options>", prompt)
         self.assertIn('<question id="q1">', prompt)
 
 
