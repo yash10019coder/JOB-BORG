@@ -210,6 +210,30 @@ _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatic
 _STALE_MESSAGE = "This job posting closed before we could apply."
 
 
+def _blocking_required_fields(answers):
+    """Labels of required fields still needing a human answer.
+
+    A field blocks sending when it's `required` and has no non-whitespace
+    `value` -- this is exactly the shape `drafting.draft_for()` leaves
+    behind for a required custom question the LLM couldn't confidently
+    answer (any reason: hard-excluded category, insufficient evidence,
+    ungrounded, low confidence with no text, or an LLM-infra failure).
+    `.strip()` matters here: `edit_auto_apply_draft` accepts arbitrary user
+    text with no blank-input validation, so a whitespace-only submission
+    (e.g. a single space) would otherwise read as "answered" and let a
+    required question -- including a hard-excluded-category one like work
+    authorization or salary -- reach the employer with no real answer.
+    Sorted for stable message ordering across calls. Shared by
+    `auto_apply_queue` (render-time flag) and `send_auto_apply_draft` (the
+    actual enforcement) so the two never drift out of sync with each other.
+    """
+    return sorted(
+        label
+        for label, entry in (answers or {}).items()
+        if entry.get("required") and not str(entry.get("value") or "").strip()
+    )
+
+
 def _friendly_draft_message(draft):
     """User-facing explanation for a non-actionable draft state, keyed on
     `draft.reason_code` rather than the stored `exclusion_reason`/
@@ -296,6 +320,7 @@ def auto_apply_queue(request):
 
     for draft in page_obj:
         draft.friendly_message = _friendly_draft_message(draft)
+        draft.blocking_fields = _blocking_required_fields(draft.answers)
 
     return render(request, "web/auto_apply_queue.html", {"page_obj": page_obj})
 
@@ -357,10 +382,32 @@ def send_auto_apply_draft(request, pk):
     triggering submission of that user's resume/answers to an employer
     without their action. Zero rows updated (not found, wrong status, *or*
     wrong user) is a 404 in all three cases -- the response never leaks
-    which case it was. Using `.filter(...).update(...)` and checking the
-    row count (rather than get-then-save) is also what makes the guard
-    atomic against a concurrent double-submit.
+    which case it was.
+
+    Before that atomic transition, a required-field blocking check
+    (`_blocking_required_fields`) rejects the send outright if any required
+    question the LLM couldn't answer is still blank -- this is the
+    server-side backstop for the queue template's disabled Send button
+    (belt-and-braces: the template gate is presentation only). This check
+    reads the draft first rather than folding into the atomic
+    `.filter(...).update(...)` below, which briefly reopens a window where a
+    concurrent edit could clear a block between the check and the update --
+    acceptable here since the `.filter(...).update(...)` row-count check
+    remains the sole source of truth for the actual `SENDING` transition;
+    the pre-check is purely a friendlier rejection path, not the safety
+    boundary.
     """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    blocking = _blocking_required_fields(draft.answers)
+    if blocking:
+        messages.error(
+            request,
+            "Answer these required question(s) before sending: " + "; ".join(blocking),
+        )
+        return redirect("auto_apply_queue")
+
     updated = AutoApplyDraft.objects.filter(
         pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
     ).update(status=AutoApplyDraft.Status.SENDING)

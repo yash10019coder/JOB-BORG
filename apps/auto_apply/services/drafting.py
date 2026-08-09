@@ -27,7 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
-from apps.auto_apply.greenhouse_form.field_mapping import FormField, schema_to_dict
+from apps.auto_apply.greenhouse_form.field_mapping import FILE, FormField, schema_to_dict
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
 from apps.auto_apply.models import AutoApplyDraft
@@ -36,19 +36,6 @@ from apps.jobs.models import JobSource
 from . import answer_resolution
 
 logger = logging.getLogger(__name__)
-
-# Resolution reasons that mean "the LLM pipeline itself failed to produce a
-# response" (vendor error, billing lockout, malformed batch reply) as
-# opposed to a content judgment about the question (insufficient evidence,
-# ungrounded, low confidence) or a deliberate policy exclusion (hard-excluded
-# category). Required fields landing here are routed to the user for manual
-# completion (see the loop below) rather than excluding the whole draft.
-_LLM_INFRA_FAILURE_REASONS = frozenset(
-    {
-        llm_base.ResolutionReason.LLM_CALL_FAILED,
-        llm_base.ResolutionReason.MISSING_LLM_RESPONSE,
-    }
-)
 
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
@@ -168,6 +155,14 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         target.append(form_field)
 
     answers_payload: dict[str, dict] = {}
+    # Blank *standard* (Profile-derived) required fields are a different
+    # problem than an LLM-unanswerable custom question -- they signal an
+    # incomplete Profile, which the user fixes on their profile page, not
+    # inline per-draft -- so they keep the pre-existing exclude-the-draft
+    # behavior. Most custom (LLM-inferred) questions no longer exclude the
+    # draft (see the loop below); the one custom-question exception is a
+    # required FILE-type field, which also lands here since it can't be
+    # answered inline via the review queue either.
     unanswerable_required: list[str] = []
 
     # -- Standard fields (R4): filled straight from Profile/User. ----------
@@ -178,6 +173,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             answers_payload[form_field.label] = {
                 "value": value,
                 "needs_review": False,
+                "required": form_field.required,
                 "category": "standard",
                 "reason": "profile",
                 "field_type": form_field.field_type,
@@ -198,39 +194,51 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             # Falsy covers `None` (hard-excluded / LLM-infra-failure /
             # missing-response) and `""` (e.g. `insufficient_evidence=True`
             # with no answer text) -- neither is a real answer to submit.
-            # A *required* field with an LLM-infra-failure reason is
-            # special-cased below rather than falling into the generic
-            # unanswerable-required bucket.
-            if resolved_answer.reason in _LLM_INFRA_FAILURE_REASONS and form_field.required:
-                # The LLM pipeline itself broke (vendor outage, billing
-                # lockout, malformed batch response) -- that's not a
-                # judgment that this question is unanswerable, so don't
-                # exclude the whole draft over it. Leave a blank,
-                # needs_review placeholder the user can fill in via the
-                # review queue (U8's edit_auto_apply_draft) before sending.
-                answers_payload[form_field.label] = {
-                    "value": "",
-                    "needs_review": True,
-                    "category": resolved_answer.category,
-                    "reason": resolved_answer.reason,
-                    "field_type": form_field.field_type,
-                }
-                continue
-            if form_field.required:
+            # None of these are a judgment that the *application* is
+            # unanswerable, only that the LLM couldn't answer this one
+            # question -- so it never excludes the whole draft. Leave a
+            # blank, needs_review placeholder (required or not) for a human
+            # to fill in via the review queue (`edit_auto_apply_draft`)
+            # before sending; `send_auto_apply_draft` blocks sending while a
+            # required placeholder is still blank (see apps/web/views.py).
+            #
+            # Exception: a required FILE-type question (e.g. "upload your
+            # portfolio"). `edit_auto_apply_draft` deliberately excludes
+            # FILE-type answers from editing (a user-supplied string there
+            # would flow straight into Playwright's set_input_files() at
+            # send time -- see that view's docstring), so a blank FILE
+            # placeholder here would be a permanent, unfillable blocker
+            # rather than something a human can actually resolve inline.
+            # This one case keeps the pre-existing exclude-the-draft
+            # behavior instead.
+            if form_field.field_type == FILE and form_field.required:
                 unanswerable_required.append(form_field.label)
+                continue
+            answers_payload[form_field.label] = {
+                "value": "",
+                "needs_review": True,
+                "required": form_field.required,
+                "category": resolved_answer.category,
+                "reason": resolved_answer.reason,
+                "field_type": form_field.field_type,
+            }
             continue
         answers_payload[form_field.label] = {
             "value": resolved_answer.answer,
             "needs_review": resolved_answer.needs_review,
+            "required": form_field.required,
             "category": resolved_answer.category,
             "reason": resolved_answer.reason,
             "field_type": form_field.field_type,
         }
 
     if unanswerable_required:
-        # R6: any required field ending up unanswerable excludes the job
-        # for this user -- as a persisted, revisitable row, not a crash or
-        # a silent drop.
+        # Only blank *standard* (Profile-derived) required fields land here
+        # now -- an incomplete Profile, not an LLM judgment call. Custom
+        # questions the LLM couldn't answer no longer exclude the draft;
+        # they become blank needs_review placeholders in answers_payload
+        # above instead (see the loop above and Status.EXCLUDED's docstring
+        # on AutoApplyDraft).
         reason = "Required question(s) could not be answered: " + "; ".join(
             unanswerable_required
         )

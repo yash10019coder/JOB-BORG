@@ -167,6 +167,89 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
         # The visual treatment (border-left color) differs for the flagged answer.
         self.assertIn("#f59e0b", content)
 
+    def test_queue_renders_answer_required_badge_and_hides_send_button(self):
+        job = self._job()
+        self._draft(
+            self.alice,
+            job,
+            answers={
+                "Work authorization?": {
+                    "value": "", "needs_review": True, "required": True,
+                    "category": "work_authorization", "reason": "hard_excluded_category",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+        content = response.content.decode()
+
+        self.assertIn("Answer required</span>", content)
+        self.assertIn(
+            "aria-label=\"This question must be answered before the application can be sent",
+            content,
+        )
+        self.assertNotIn("Send application", content)
+        self.assertIn("Answer 1 required question", content)
+
+    def test_queue_shows_send_button_when_no_blocking_fields(self):
+        job = self._job()
+        self._draft(
+            self.alice,
+            job,
+            answers={
+                "Email": {
+                    "value": "a@x.com", "needs_review": False, "required": True,
+                    "category": "standard", "reason": "profile",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+        content = response.content.decode()
+
+        self.assertIn("Send application", content)
+        self.assertNotIn("Answer required</span>", content)
+
+    def test_queue_flags_blocking_required_field_in_context(self):
+        job = self._job()
+        draft = self._draft(
+            self.alice,
+            job,
+            answers={
+                "Email": {
+                    "value": "a@x.com", "needs_review": False, "required": True,
+                    "category": "standard", "reason": "profile",
+                },
+                "Work authorization?": {
+                    "value": "", "needs_review": True, "required": True,
+                    "category": "work_authorization", "reason": "hard_excluded_category",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        rendered_draft = next(d for d in response.context["page_obj"] if d.pk == draft.pk)
+        self.assertEqual(rendered_draft.blocking_fields, ["Work authorization?"])
+
+    def test_queue_no_blocking_fields_when_only_optional_gaps_remain(self):
+        job = self._job()
+        draft = self._draft(
+            self.alice,
+            job,
+            answers={
+                "Nickname?": {
+                    "value": "", "needs_review": True, "required": False,
+                    "category": "other", "reason": "insufficient_evidence",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        rendered_draft = next(d for d in response.context["page_obj"] if d.pk == draft.pk)
+        self.assertEqual(rendered_draft.blocking_fields, [])
+
     def test_queue_shows_exclusion_reason_as_friendly_message(self):
         job = self._job()
         self._draft(
@@ -284,6 +367,78 @@ class SendAutoApplyDraftTests(AutoApplyViewsTestCase):
         self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
         mock_task.delay.assert_called_once_with(draft.id)
         self.assertRedirects(response, reverse("auto_apply_queue"))
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_blocked_when_required_field_still_blank(self, mock_task):
+        job = self._job()
+        draft = self._draft(
+            self.alice,
+            job,
+            answers={
+                "Work authorization?": {
+                    "value": "", "needs_review": True, "required": True,
+                    "category": "work_authorization", "reason": "hard_excluded_category",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+
+        response = client.post(reverse("send_auto_apply_draft", args=[draft.id]), follow=True)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        mock_task.delay.assert_not_called()
+        self.assertContains(response, "Work authorization?")
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_succeeds_when_only_optional_field_unanswered(self, mock_task):
+        job = self._job()
+        draft = self._draft(
+            self.alice,
+            job,
+            answers={
+                "Nickname?": {
+                    "value": "", "needs_review": True, "required": False,
+                    "category": "other", "reason": "insufficient_evidence",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+
+        response = client.post(reverse("send_auto_apply_draft", args=[draft.id]), follow=True)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        mock_task.delay.assert_called_once_with(draft.id)
+        self.assertRedirects(response, reverse("auto_apply_queue"))
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_blocked_when_required_field_is_whitespace_only(self, mock_task):
+        """Regression guard: a whitespace-only value must not count as a
+        real answer -- `edit_auto_apply_draft` performs no blank-input
+        validation, so without `.strip()` in `_blocking_required_fields`, a
+        single-space submission would "answer" a hard-excluded-category
+        question (work authorization, salary, legal attestation) and let it
+        reach the employer with no real content."""
+        job = self._job()
+        draft = self._draft(
+            self.alice,
+            job,
+            answers={
+                "Work authorization?": {
+                    "value": "  ", "needs_review": True, "required": True,
+                    "category": "work_authorization", "reason": "hard_excluded_category",
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+
+        response = client.post(reverse("send_auto_apply_draft", args=[draft.id]), follow=True)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        mock_task.delay.assert_not_called()
+        self.assertContains(response, "Work authorization?")
 
     @mock.patch("apps.web.views.submit_auto_apply_draft")
     def test_send_rejects_stale_draft(self, mock_task):
