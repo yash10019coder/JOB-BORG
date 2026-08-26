@@ -23,6 +23,11 @@ class JobSource(models.Model):
         LEVER = "lever", "Lever"
         ASHBY = "ashby", "Ashby"
         WORKDAY = "workday", "Workday"
+        SMARTRECRUITERS = "smartrecruiters", "SmartRecruiters"
+        WORKABLE = "workable", "Workable"
+        RECRUITEE = "recruitee", "Recruitee"
+        PERSONIO = "personio", "Personio"
+        ORACLE_CLOUD = "oracle_cloud", "Oracle Cloud"
 
     ats = models.CharField(max_length=32, choices=ATS.choices, default=ATS.GREENHOUSE)
     board_token = models.CharField(
