@@ -15,12 +15,26 @@ from apps.locations.engine import (
     normalize_location,
 )
 
-from .exceptions import AshbyParseError, GreenhouseParseError, LeverParseError
+from .exceptions import (
+    AshbyParseError,
+    GreenhouseParseError,
+    LeverParseError,
+    OracleCloudParseError,
+    PersonioParseError,
+    RecruiteeParseError,
+    SmartRecruitersParseError,
+    WorkableParseError,
+)
 
 GREENHOUSE_SOURCE_ATS = "greenhouse"
 LEVER_SOURCE_ATS = "lever"
 ASHBY_SOURCE_ATS = "ashby"
 WORKDAY_SOURCE_ATS = "workday"
+SMARTRECRUITERS_SOURCE_ATS = "smartrecruiters"
+WORKABLE_SOURCE_ATS = "workable"
+RECRUITEE_SOURCE_ATS = "recruitee"
+PERSONIO_SOURCE_ATS = "personio"
+ORACLE_CLOUD_SOURCE_ATS = "oracle_cloud"
 
 
 def _derive_is_remote(location_name):
@@ -211,3 +225,197 @@ def normalize_workday_job(job):
         salary_max=job.salary_max,
         source_url=str(job.url) if job.url else "",
     )
+
+
+def normalize_smartrecruiters_job(raw):
+    """Return a normalized job dict from a SmartRecruiters raw dict.
+
+    Raises:
+        SmartRecruitersParseError: on bad dict shape or missing required fields.
+    """
+    if not isinstance(raw, dict):
+        raise SmartRecruitersParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("id")
+    title = raw.get("name")
+    if not job_id or not title:
+        raise SmartRecruitersParseError(
+            "Job is missing a required field (id or name)"
+        )
+
+    loc_obj = raw.get("location") or {}
+    if isinstance(loc_obj, dict):
+        city = loc_obj.get("city", "")
+        region = loc_obj.get("region", "")
+        country = loc_obj.get("country", "")
+        parts = [p for p in (city, region, country) if p]
+        location_name = ", ".join(parts) if parts else ""
+        is_remote_flag = bool(loc_obj.get("remote"))
+    else:
+        location_name = str(loc_obj)
+        is_remote_flag = False
+
+    is_remote = is_remote_flag or _derive_is_remote(location_name)
+    description = raw.get("jobAd", {}).get("sections", {}).get("jobDescription", {}).get("text", "") or ""
+
+    return _build_normalized_job(
+        source_ats=SMARTRECRUITERS_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url=raw.get("ref", ""),
+    )
+
+
+def normalize_workable_job(raw):
+    """Return a normalized job dict from a Workable raw dict.
+
+    Raises:
+        WorkableParseError: on bad dict shape or missing required fields.
+    """
+    if not isinstance(raw, dict):
+        raise WorkableParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("shortcode") or raw.get("id")
+    title = raw.get("title")
+    if not job_id or not title:
+        raise WorkableParseError(
+            "Job is missing a required field (shortcode/id or title)"
+        )
+
+    location_obj = raw.get("location") or {}
+    if isinstance(location_obj, dict):
+        location_name = location_obj.get("location_str") or location_obj.get("city") or ""
+        is_remote_flag = bool(location_obj.get("telecommute")) or bool(raw.get("telecommute"))
+    else:
+        location_name = str(location_obj)
+        is_remote_flag = bool(raw.get("telecommute"))
+
+    is_remote = is_remote_flag or _derive_is_remote(location_name)
+    description = raw.get("description") or raw.get("full_description") or ""
+
+    return _build_normalized_job(
+        source_ats=WORKABLE_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url=raw.get("url", ""),
+    )
+
+
+def normalize_recruitee_job(raw):
+    """Return a normalized job dict from a Recruitee raw dict.
+
+    Raises:
+        RecruiteeParseError: on bad dict shape or missing required fields.
+    """
+    if not isinstance(raw, dict):
+        raise RecruiteeParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("id")
+    title = raw.get("title")
+    if not job_id or not title:
+        raise RecruiteeParseError(
+            "Job is missing a required field (id or title)"
+        )
+
+    location_name = raw.get("location") or raw.get("city") or ""
+    is_remote = bool(raw.get("remote")) or _derive_is_remote(location_name)
+    description = raw.get("description") or ""
+
+    return _build_normalized_job(
+        source_ats=RECRUITEE_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url=raw.get("careers_url") or raw.get("url") or "",
+    )
+
+
+def normalize_personio_job(pos):
+    """Return a normalized job dict from a Personio position XML Element.
+
+    Raises:
+        PersonioParseError: on missing required fields.
+    """
+    job_id = pos.findtext("id")
+    title = pos.findtext("name")
+    if not job_id or not title:
+        raise PersonioParseError(
+            "Job is missing a required XML field (id or name)"
+        )
+
+    office = pos.findtext("office") or ""
+    department = pos.findtext("department") or ""
+    location_name = office or department
+
+    is_remote = _derive_is_remote(location_name)
+
+    # Combine jobDescriptions texts into description HTML
+    desc_parts = []
+    job_descs = pos.find("jobDescriptions")
+    if job_descs is not None:
+        for desc in job_descs.findall("jobDescription"):
+            name = desc.findtext("name")
+            value = desc.findtext("value")
+            if name:
+                desc_parts.append(f"<h3>{html.escape(name)}</h3>")
+            if value:
+                desc_parts.append(value)
+    description = "\n".join(desc_parts)
+
+    return _build_normalized_job(
+        source_ats=PERSONIO_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url="",
+    )
+
+
+def normalize_oracle_cloud_job(raw):
+    """Return a normalized job dict from an Oracle Cloud job requisition dict.
+
+    Raises:
+        OracleCloudParseError: on bad dict shape or missing required fields.
+    """
+    if not isinstance(raw, dict):
+        raise OracleCloudParseError(
+            f"Expected a job object, got {type(raw).__name__}"
+        )
+
+    job_id = raw.get("Id") or raw.get("JobId") or raw.get("RequisitionNumber")
+    title = raw.get("Title")
+    if not job_id or not title:
+        raise OracleCloudParseError(
+            "Job is missing a required field (Id or Title)"
+        )
+
+    location_name = raw.get("PrimaryLocation") or raw.get("Location") or ""
+    is_remote = _derive_is_remote(location_name)
+    description = raw.get("ShortDescription") or raw.get("Description") or ""
+
+    return _build_normalized_job(
+        source_ats=ORACLE_CLOUD_SOURCE_ATS,
+        source_job_id=str(job_id),
+        title=title,
+        description=description,
+        location_name=location_name,
+        is_remote=is_remote,
+        source_url="",
+    )
+
