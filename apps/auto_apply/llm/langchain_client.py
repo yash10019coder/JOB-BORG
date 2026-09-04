@@ -16,6 +16,7 @@ vendor.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from html import escape as escape_html
 
 from django.conf import settings
 from langchain.chat_models import init_chat_model
@@ -99,9 +100,12 @@ def _build_prompt(questions: list[Question], resume_text: str, profile) -> str:
             # and a joined string would then be ambiguous for the model to
             # parse back out, silently rejecting every answer for that
             # question at the deterministic validation gate below.
+            # Option values are XML-escaped to ensure they don't break the
+            # XML structure if they contain <, >, &, or quote characters.
             lines.append("<options>")
             for option in question.options:
-                lines.append(f"<option>{option}</option>")
+                escaped_option = escape_html(option)
+                lines.append(f"<option>{escaped_option}</option>")
             lines.append("</options>")
         lines.append("</question>")
     lines.append("</questions>")
