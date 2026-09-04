@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse Country/Location/custom-select
+        widget: a text <input role="combobox"> associated via *both* a
+        native `for`/`id` label link *and* `aria-labelledby` pointing at
+        the same label, whose required-asterisk lives in a nested
+        `aria-hidden="true"` span (verified live: this combination is what
+        makes Playwright's get_by_label(exact=True) match against the
+        label's raw textContent -- asterisk included -- instead of the
+        ARIA-computed accessible name, which excludes it).
+      -->
+      <div class="field">
+        <label id="work_auth-label" for="work_auth">Are you authorized to work?<span aria-hidden="true">*</span></label>
+        <input
+          type="text"
+          id="work_auth"
+          role="combobox"
+          aria-labelledby="work_auth-label"
+          aria-required="true"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="work_auth-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse phone country-code combobox, with
+        two options that both substring-match a search of "India" (one of
+        them, "British Indian Ocean Territory", only because it contains
+        the word "Indian") -- verified live against a real Greenhouse board
+        (Alpaca) that picking the first substring match rather than the one
+        that *starts with* the typed value silently selects the wrong
+        country.
+      -->
+      <div class="field">
+        <label id="fav_country-label" for="fav_country">Favorite Country</label>
+        <input
+          type="text"
+          id="fav_country"
+          role="combobox"
+          aria-labelledby="fav_country-label"
+          aria-invalid="true"
+          autocomplete="off"
+        >
+        <ul id="fav_country-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <!--
+        Reproduces the real Greenhouse file-upload widget: the actual
+        <input type=file> is labelled "Attach" (generic, identical across
+        both fields) via a visually-hidden <label>, while the
+        human-meaningful name lives on the surrounding role="group"'s
+        aria-labelledby target instead.
+      -->
+      <div class="field" role="group" aria-labelledby="upload-label-resume">
+        <div id="upload-label-resume">Resume/CV<span aria-hidden="true">*</span></div>
+        <label class="visually-hidden" for="resume">Attach</label>
+        <input type="file" id="resume" aria-labelledby="upload-label-resume">
+      </div>
+      <div class="field" role="group" aria-labelledby="upload-label-cover_letter">
+        <div id="upload-label-cover_letter">Cover Letter</div>
+        <label class="visually-hidden" for="cover_letter">Attach</label>
+        <input type="file" id="cover_letter" aria-labelledby="upload-label-cover_letter">
+      </div>
+
+      <!--
+        Reproduces Greenhouse's standard multi-select-question markup: a
+        <fieldset><legend> wrapping several individual checkboxes, each
+        with its own <label for> reading the *option* text ("Python"), not
+        the question -- distinct from a native <select multiple>.
+      -->
+      <fieldset class="field">
+        <legend>Which languages do you know?<span aria-hidden="true">*</span></legend>
+        <input type="checkbox" id="lang_python" required aria-required="true">
+        <label for="lang_python">Python</label>
+        <input type="checkbox" id="lang_go" required aria-required="true">
+        <label for="lang_go">Go</label>
+        <input type="checkbox" id="lang_rust" required aria-required="true">
+        <label for="lang_rust">Rust</label>
+      </fieldset>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Minimal react-select-style combobox: click opens a listbox of fixed
+    // options; typing filters it; clicking an option selects it, updates
+    // aria-invalid, and closes the menu -- mirrors the interaction
+    // contract verified live against a real Greenhouse board.
+    function initCombobox(inputId, listboxId, options) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+
+      function render(filterText) {
+        listbox.innerHTML = '';
+        var term = (filterText || '').toLowerCase();
+        options
+          .filter(function (o) { return o.toLowerCase().indexOf(term) !== -1; })
+          .forEach(function (o) {
+            var li = document.createElement('li');
+            li.setAttribute('role', 'option');
+            li.textContent = o;
+            li.addEventListener('click', function () {
+              input.setAttribute('aria-invalid', 'false');
+              input.dataset.value = o;
+              listbox.hidden = true;
+            });
+            listbox.appendChild(li);
+          });
+      }
+
+      input.addEventListener('click', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+      input.addEventListener('input', function () {
+        listbox.hidden = false;
+        render(input.value);
+      });
+    }
+
+    initCombobox('work_auth', 'work_auth-listbox', ['Yes', 'No']);
+    // Order matches the real Alpaca page: the non-matching-prefix decoy
+    // renders *before* "India" in the filtered listbox, so a naive
+    // `options.first` pick (rather than a starts-with preference) would
+    // select the wrong one.
+    initCombobox('fav_country', 'fav_country-listbox', ['British Indian Ocean Territory', 'India']);
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var selectedCountry = document.getElementById('fav_country').dataset.value || '';
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully. ' +
+        'Selected country: ' + selectedCountry + '</div>';
+    });
+  </script>
+</body>
+</html>

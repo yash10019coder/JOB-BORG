@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces a failure mode: the combobox's listbox container
+        mounts (empty) and stays empty indefinitely -- the options that should
+        render never do, e.g., due to a network failure or a browser timeout.
+        This tests that _fill_combobox() fails closed with a clear,
+        diagnosable error rather than hanging on the wait-for-option timeout.
+      -->
+      <div class="field">
+        <label id="education-label" for="education">Education Level</label> <span aria-hidden="true">*</span>
+        <input
+          type="text"
+          id="education"
+          role="combobox"
+          aria-labelledby="education-label"
+          required
+          aria-required="true"
+          autocomplete="off"
+        >
+        <ul id="education-listbox" role="listbox" hidden></ul>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Combobox that opens an empty listbox and never populates options.
+    // Reproduces a network failure or timeout scenario where options never load.
+    function initNeverLoadingCombobox(inputId, listboxId) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+
+      input.addEventListener('click', function () {
+        listbox.innerHTML = '';
+        listbox.hidden = false;
+        // Never append options -- stays empty forever
+      });
+    }
+
+    initNeverLoadingCombobox('education', 'education-listbox');
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

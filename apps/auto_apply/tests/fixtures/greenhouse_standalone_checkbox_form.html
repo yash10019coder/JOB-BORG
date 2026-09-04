@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+
+      <!--
+        A standalone checkbox -- no enclosing <fieldset><legend>, unlike
+        the CHECKBOX_GROUP fixtures. Reproduces Greenhouse's
+        policy/terms-of-service-acceptance pattern: one checkbox, its own
+        <label>, no sibling options.
+      -->
+      <div class="field">
+        <input type="checkbox" id="terms" name="terms" required aria-required="true">
+        <label for="terms">I agree to the Terms of Service</label>
+      </div>
+
+      <!-- A second, non-required standalone checkbox for edge-case coverage. -->
+      <div class="field">
+        <input type="checkbox" id="newsletter" name="newsletter">
+        <label for="newsletter">Subscribe me to the newsletter</label>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var terms = document.getElementById('terms');
+      if (!terms.checked) {
+        return; // native `required` blocks submission -- mirrors real browser behavior
+      }
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>
