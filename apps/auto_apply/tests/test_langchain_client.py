@@ -69,7 +69,8 @@ class BuildPromptOptionsTests(SimpleTestCase):
         prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
 
         self.assertIn("<option>High School</option>", prompt)
-        self.assertIn("<option>Bachelor's</option>", prompt)
+        # Apostrophes are XML-escaped to &#x27;
+        self.assertIn("<option>Bachelor&#x27;s</option>", prompt)
         self.assertIn("<option>Other</option>", prompt)
 
     def test_option_containing_delimiter_like_punctuation_survives_intact(self):
@@ -96,6 +97,201 @@ class BuildPromptOptionsTests(SimpleTestCase):
 
         self.assertNotIn("<options>", prompt)
         self.assertIn('<question id="q1">', prompt)
+
+    def test_option_containing_xml_unsafe_less_than_sign(self):
+        # Regression guard: option labels containing < must be XML-escaped
+        # to &lt; to avoid breaking the option element structure.
+        # Without escaping, <option>Java < 8</option> is invalid XML.
+        question = Question(
+            id="q1",
+            text="Java version?",
+            field_type="single_select",
+            options=("Java < 8", "Java >= 8", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # The prompt must contain escaped version of the less-than sign
+        self.assertIn("Java &lt; 8", prompt)
+        # The original unsafe version should not appear in option tags
+        self.assertNotIn("<option>Java < 8</option>", prompt)
+
+    def test_option_containing_xml_unsafe_greater_than_sign(self):
+        # Regression guard: > must be escaped to &gt;
+        question = Question(
+            id="q1",
+            text="Experience level?",
+            field_type="single_select",
+            options=("Years > 5", "Years <= 5", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertIn("Years &gt; 5", prompt)
+        self.assertIn("Years &lt;= 5", prompt)
+
+    def test_option_containing_xml_unsafe_ampersand(self):
+        # Regression guard: & must be escaped to &amp;
+        question = Question(
+            id="q1",
+            text="Technology?",
+            field_type="single_select",
+            options=("C++ & C#", "Python & Java", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertIn("C++ &amp; C#", prompt)
+        self.assertIn("Python &amp; Java", prompt)
+
+    def test_option_containing_multiple_xml_unsafe_characters(self):
+        # Regression guard: complex labels with multiple unsafe characters
+        question = Question(
+            id="q1",
+            text="Stack?",
+            field_type="single_select",
+            options=("Node.js & React < 18", "Python > 3.8 & Django", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        self.assertIn("Node.js &amp; React &lt; 18", prompt)
+        self.assertIn("Python &gt; 3.8 &amp; Django", prompt)
+
+    def test_empty_options_list_renders_no_options_element(self):
+        # Regression guard: empty options list should not render the
+        # <options> element (empty tuple is falsy, so the if check prevents it)
+        question = Question(
+            id="q1",
+            text="Select something?",
+            field_type="single_select",
+            options=(),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # No options element should be rendered for empty options
+        self.assertNotIn("<options>", prompt)
+        self.assertNotIn("</options>", prompt)
+        # Count <option> tags - should be 0
+        option_count = prompt.count("<option>")
+        self.assertEqual(option_count, 0)
+
+    def test_very_long_option_list_renders_all_options(self):
+        # Regression guard: very long option lists should all render
+        options = tuple(f"Option {i}" for i in range(100))
+        question = Question(
+            id="q1",
+            text="Pick one?",
+            field_type="single_select",
+            options=options,
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # All options should be present
+        option_count = prompt.count("<option>")
+        self.assertEqual(option_count, 100)
+        self.assertIn("<option>Option 0</option>", prompt)
+        self.assertIn("<option>Option 50</option>", prompt)
+        self.assertIn("<option>Option 99</option>", prompt)
+
+    def test_options_differing_only_in_whitespace(self):
+        # Regression guard: options that look similar but differ in whitespace
+        # should remain distinct and render correctly
+        question = Question(
+            id="q1",
+            text="Whitespace test?",
+            field_type="single_select",
+            options=("Option A", "Option  A", "  Option A", "Option A "),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # All variants should be present
+        self.assertIn("<option>Option A</option>", prompt)
+        self.assertIn("<option>Option  A</option>", prompt)
+        self.assertIn("<option>  Option A</option>", prompt)
+        self.assertIn("<option>Option A </option>", prompt)
+        option_count = prompt.count("<option>")
+        self.assertEqual(option_count, 4)
+
+    def test_options_differing_only_in_case(self):
+        # Regression guard: options that differ only in case should remain distinct
+        question = Question(
+            id="q1",
+            text="Case test?",
+            field_type="single_select",
+            options=("YES", "Yes", "yes", "yeS"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # All variants should be present
+        self.assertIn("<option>YES</option>", prompt)
+        self.assertIn("<option>Yes</option>", prompt)
+        self.assertIn("<option>yes</option>", prompt)
+        self.assertIn("<option>yeS</option>", prompt)
+        option_count = prompt.count("<option>")
+        self.assertEqual(option_count, 4)
+
+    def test_option_with_both_single_and_double_quotes(self):
+        # Regression guard: quotes in option text should not break XML structure.
+        # Both single and double quotes are HTML-escaped.
+        question = Question(
+            id="q1",
+            text="Quote test?",
+            field_type="single_select",
+            options=('He said "hello"', "She said 'goodbye'", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # Double quotes are escaped to &quot;, single quotes to &#x27;
+        # The text inside the quotes should still be present
+        self.assertIn("hello", prompt)
+        self.assertIn("goodbye", prompt)
+        # Verify we have three options
+        option_count = prompt.count("<option>")
+        self.assertEqual(option_count, 3)
+        # Verify quote escaping
+        self.assertIn("&quot;hello&quot;", prompt)
+        self.assertIn("&#x27;goodbye&#x27;", prompt)
+
+    def test_prompt_validity_with_xml_unsafe_options(self):
+        # Regression guard: the resulting prompt must be well-formed XML
+        # even with unsafe option values. This is a structural test that
+        # verifies the <options> element is properly closed.
+        question = Question(
+            id="q1",
+            text="Tech test?",
+            field_type="single_select",
+            options=("C++ & C#", "Java < 8", "Python > 3.8", "Other"),
+        )
+
+        prompt = _build_prompt([question], RESUME_TEXT, PROFILE)
+
+        # Check that options block is properly structured
+        # Count opening and closing tags should match
+        options_open = prompt.count("<options>")
+        options_close = prompt.count("</options>")
+        self.assertEqual(options_open, 1)
+        self.assertEqual(options_close, 1)
+
+        # All options should be present (4 total)
+        option_count = prompt.count("<option>")
+        option_close_count = prompt.count("</option>")
+        self.assertEqual(option_count, 4)
+        self.assertEqual(option_close_count, 4)
+
+        # Verify structure integrity by checking that each option opens and closes properly
+        lines = prompt.split("\n")
+        for line in lines:
+            if "<option>" in line:
+                self.assertTrue(
+                    line.endswith("</option>"),
+                    f"Option line not properly closed: {line}",
+                )
 
 
 class LangChainAnswerInferenceClientInferTests(SimpleTestCase):
