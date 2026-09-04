@@ -574,6 +574,7 @@ class GreenhouseFormClient:
             fields.append(form_field)
 
         fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
+        fields.extend(self._discover_aria_label_only_fields(page, job_url, seen_control_ids))
         return FormSchema(fields=tuple(fields))
 
     def _raise_on_newly_revealed_required_fields(
@@ -663,6 +664,86 @@ class GreenhouseFormClient:
             if references_a_label_element:
                 continue
             label_text = GreenhouseFormClient._clean_label(" ".join(label_parts))
+            if not label_text:
+                continue
+
+            if control_id:
+                seen_control_ids.add(control_id)
+            field_type = GreenhouseFormClient._classify_field_type(control)
+            required = GreenhouseFormClient._is_required(control)
+            options = GreenhouseFormClient._extract_options(page, control, field_type)
+            form_field = FormField(
+                label=label_text,
+                field_type=field_type,
+                required=required,
+                options=options,
+                control_id=control_id,
+            )
+            if required and not form_field.is_supported:
+                raise GreenhouseFormSchemaMismatch(
+                    f"Required field {label_text!r} on {job_url} has unsupported "
+                    f"type {field_type!r}."
+                )
+            fields.append(form_field)
+        return fields
+
+    @staticmethod
+    def _discover_aria_label_only_fields(
+        page, job_url: str, seen_control_ids: set[str]
+    ) -> list[FormField]:
+        """Third discovery pass for controls with direct aria-label, no <label> or aria-labelledby.
+
+        Some ATS platforms (and potentially Greenhouse) use direct `aria-label` attributes
+        on form controls when a native `<label>` element or `aria-labelledby` reference
+        is not present. This is a valid accessibility pattern that should be discovered.
+
+        Skips any control already captured by earlier passes (by `control_id`).
+        """
+        fields: list[FormField] = []
+        # Use a more permissive selector that finds any input, select, or textarea
+        # inside or outside a form that has aria-label but not aria-labelledby
+        candidates = page.locator("form input[aria-label], form select[aria-label], form textarea[aria-label]")
+        for i in range(candidates.count()):
+            control = candidates.nth(i)
+            control_id = control.get_attribute("id") or ""
+            if control_id and control_id in seen_control_ids:
+                continue
+
+            tag_name = control.evaluate("el => el.tagName").upper()
+            if tag_name not in ("INPUT", "SELECT", "TEXTAREA"):
+                continue
+
+            control_type = (control.get_attribute("type") or "").lower()
+            if control_type in ("file", "checkbox"):
+                # These types are handled by earlier passes (file has group labels,
+                # checkboxes are in fieldsets or discovered as standalone)
+                continue
+
+            # Skip if it also has aria-labelledby (aria-labelledby takes precedence)
+            has_aria_labelledby = bool((control.get_attribute("aria-labelledby") or "").strip())
+            if has_aria_labelledby:
+                # This control should have been found by the aria_labelledby pass
+                continue
+
+            # Skip if there's a <label for> pointing to this control (would be in main pass)
+            if control_id:
+                label_for_control = page.locator(f"label[for='{control_id}']")
+                if label_for_control.count() > 0:
+                    # This control has a <label> and should have been found by the main pass
+                    continue
+
+            # Skip if control is nested inside a <label>
+            label_ancestor = control.locator("xpath=ancestor::label[1]")
+            if label_ancestor.count() > 0:
+                # This control is nested in a label and should have been found by the main pass
+                continue
+
+            # Get aria-label directly from the control
+            aria_label = control.get_attribute("aria-label")
+            if not aria_label:
+                continue
+
+            label_text = GreenhouseFormClient._clean_label(aria_label)
             if not label_text:
                 continue
 
