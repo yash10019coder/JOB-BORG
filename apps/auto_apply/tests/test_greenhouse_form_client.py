@@ -499,6 +499,43 @@ class GreenhouseFormClientTests(SimpleTestCase):
         )
         self.assertTrue(result.success)
 
+    # -- inspect()/submit(): aria-label-only fields (no <label>, no aria-labelledby) ---
+
+    def test_inspect_discovers_aria_label_only_fields(self):
+        # Controls with aria-label directly on them (no <label> element and
+        # no aria-labelledby) are a valid accessibility pattern that should
+        # be discovered. Currently not handled by either the main label-based
+        # discovery pass or the aria_labelledby_only pass.
+        client = self._client(_fixture_html("greenhouse_aria_label_only_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertEqual(set(by_label), {"First Name", "Email Address", "Country of Residence"})
+
+        email_field = by_label["Email Address"]
+        self.assertEqual(email_field.field_type, TEXT)
+        self.assertTrue(email_field.required)
+
+        country_field = by_label["Country of Residence"]
+        self.assertEqual(country_field.field_type, COMBOBOX_SELECT)
+        self.assertFalse(country_field.required)
+
+    def test_submit_fills_aria_label_only_fields(self):
+        client = self._client(_fixture_html("greenhouse_aria_label_only_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_aria_label_only_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email Address": "ada@example.com",
+                "Country of Residence": "Canada",
+            },
+            expected_schema=schema,
+        )
+        self.assertTrue(result.success)
+
     def test_submit_combobox_prefers_option_starting_with_typed_value(self):
         # Reproduces what live verification against a real Greenhouse board
         # (Alpaca) found: typing "India" into a phone country-code combobox
