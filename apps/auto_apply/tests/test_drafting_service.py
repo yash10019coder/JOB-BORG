@@ -579,3 +579,165 @@ class ConcurrentTriggerGuardTests(DraftingServiceTestCase):
         self.assertEqual(
             AutoApplyDraft.objects.filter(user=self.user, job=self.job).count(), 1
         )
+
+
+class CanonicalGreenhouseUrlTests(DraftingServiceTestCase):
+    """Tests for canonicalization of embedded Greenhouse URLs to
+    job-boards.greenhouse.io (supporting employer-domain boards)."""
+
+    def test_canonical_url_already_canonical_job_boards_greenhouse_io(self):
+        """Already-canonical job-boards.greenhouse.io URL is passed through unchanged."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+
+        self.job.source_url = "https://job-boards.greenhouse.io/acme/jobs/12345"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertEqual(result, "https://job-boards.greenhouse.io/acme/jobs/12345")
+
+    def test_canonical_url_already_canonical_boards_greenhouse_io(self):
+        """Already-canonical boards.greenhouse.io URL is passed through unchanged."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+
+        self.job.source_url = "https://boards.greenhouse.io/acme/jobs/12345"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertEqual(result, "https://boards.greenhouse.io/acme/jobs/12345")
+
+    def test_canonical_url_already_canonical_eu_greenhouse_io(self):
+        """Already-canonical job-boards.eu.greenhouse.io URL is passed through unchanged."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+
+        self.job.source_url = "https://job-boards.eu.greenhouse.io/acme/jobs/12345"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertEqual(result, "https://job-boards.eu.greenhouse.io/acme/jobs/12345")
+
+    def test_embedded_url_with_matching_job_source_resolves_to_canonical(self):
+        """Employer-domain URL with valid gh_jid and matching JobSource
+        resolves to the canonical job-boards.greenhouse.io URL."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+        from apps.jobs.models import JobSource
+
+        # Create a JobSource for the employer.
+        JobSource.objects.create(
+            ats=JobSource.ATS.GREENHOUSE,
+            board_token="acme-board",
+            employer=self.employer,
+        )
+
+        # Set up an embedded URL on the employer's domain.
+        self.job.source_url = "https://databricks.com/company/careers/open-positions/job?gh_jid=8778009002"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertEqual(
+            result, "https://job-boards.greenhouse.io/acme-board/jobs/8778009002"
+        )
+
+    def test_embedded_url_without_gh_jid_returns_none(self):
+        """Embedded URL with no gh_jid parameter returns None."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+
+        # Embedded URL without gh_jid.
+        self.job.source_url = "https://databricks.com/company/careers/?board=careers"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertIsNone(result)
+
+    def test_embedded_url_without_matching_job_source_returns_none(self):
+        """Embedded URL with gh_jid but no matching JobSource returns None."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+
+        # Don't create a JobSource for this employer.
+        self.job.source_url = "https://databricks.com/company/careers/?gh_jid=8778009002"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertIsNone(result)
+
+    def test_malformed_query_string_extracts_gh_jid_correctly(self):
+        """Real-world malformed query string with bare value before board=
+        still extracts gh_jid correctly."""
+        from apps.auto_apply.services.drafting import _canonical_greenhouse_url
+        from apps.jobs.models import JobSource
+
+        # Create a JobSource for the employer.
+        JobSource.objects.create(
+            ats=JobSource.ATS.GREENHOUSE,
+            board_token="coreweave-board",
+            employer=self.employer,
+        )
+
+        # Set up a malformed query string (note the bare "4691415006" before board=).
+        self.job.source_url = "https://coreweave.com/careers/job?4691415006&board=coreweave&gh_jid=4691415006"
+        self.job.save()
+
+        result = _canonical_greenhouse_url(self.job)
+
+        self.assertEqual(
+            result, "https://job-boards.greenhouse.io/coreweave-board/jobs/4691415006"
+        )
+
+    def test_embedded_url_draft_proceeds_with_canonical_url(self):
+        """Draft for an embedded URL should use the canonical URL for form inspection."""
+        from apps.jobs.models import JobSource
+
+        # Create a JobSource for the employer.
+        JobSource.objects.create(
+            ats=JobSource.ATS.GREENHOUSE,
+            board_token="acme-board",
+            employer=self.employer,
+        )
+
+        # Set up an embedded URL.
+        self.job.source_url = "https://databricks.com/company/careers/open-positions/job?gh_jid=8778009002"
+        self.job.save()
+
+        form_client = FakeFormClient(schema=STANDARD_ONLY_SCHEMA)
+        llm_client = FakeLLMClient()
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        # The draft should proceed, and the form client should have been
+        # called with the canonical URL, not the embedded one.
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        canonical_url = "https://job-boards.greenhouse.io/acme-board/jobs/8778009002"
+        self.assertEqual(form_client.inspect_calls, [canonical_url])
+
+    def test_unresolvable_embedded_url_falls_back_to_original_and_fails(self):
+        """Unresolvable embedded URL (no JobSource) falls back to original
+        URL and produces a form_load_failed exclusion."""
+        from apps.auto_apply.greenhouse_form.exceptions import (
+            GreenhouseFormError,
+        )
+
+        # Set up an embedded URL but don't create a JobSource.
+        self.job.source_url = "https://databricks.com/company/careers/?gh_jid=8778009002"
+        self.job.save()
+
+        form_client = FakeFormClient(
+            raises=GreenhouseFormError("Could not load form")
+        )
+        llm_client = FakeLLMClient()
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        # Should be excluded, and the form client should have tried the
+        # original (unresolvable) URL.
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED)
+        self.assertEqual(
+            draft.reason_code, AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED
+        )
+        self.assertEqual(form_client.inspect_calls, [self.job.source_url])
