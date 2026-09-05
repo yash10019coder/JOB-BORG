@@ -34,7 +34,7 @@ from .greenhouse_form.exceptions import (
 )
 from .greenhouse_form.field_mapping import schema_from_dict
 from .models import AutoApplyDraft
-from .services.drafting import draft_for
+from .services.drafting import draft_for, _canonical_greenhouse_url
 
 # Hard kill limit for Celery (D1). Single source of truth lives in
 # apps.auto_apply.checks (imported above) since it's a lightweight module
@@ -166,13 +166,19 @@ def submit_auto_apply_draft(draft_id):
             draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
             return draft.pk
 
+    # Canonicalize embedded Greenhouse URLs before navigating to them.
+    canonical_url = _canonical_greenhouse_url(job)
+    if canonical_url is None:
+        # URL is embedded and cannot be resolved; fall through to form load failure.
+        canonical_url = job.source_url
+
     form_client = GreenhouseFormClient(
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
     )
     try:
         try:
             form_client.submit(
-                job.source_url,
+                canonical_url,
                 answers,
                 expected_schema=expected_schema,
                 captcha_solver=get_solver(),

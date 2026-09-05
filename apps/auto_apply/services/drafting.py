@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import parse_qs, urlparse
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
-from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
+from apps.auto_apply.greenhouse_form.client import (
+    GreenhouseFormClient,
+    DEFAULT_ALLOWED_HOSTNAMES,
+)
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
@@ -36,6 +40,49 @@ from apps.jobs.models import JobSource
 from . import answer_resolution
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_greenhouse_url(job) -> str | None:
+    """Canonicalize embedded Greenhouse URLs to job-boards.greenhouse.io.
+
+    Greenhouse-powered job boards embedded on an employer's own domain
+    (e.g. https://databricks.com/careers/?gh_jid=...) cannot be navigated
+    to by GreenhouseFormClient's strict hostname allowlist (a security
+    control). This function resolves them to their real job-boards.greenhouse.io
+    URL using the JobSource's board_token stored in the database.
+
+    Args:
+        job: A Job instance with a source_url and employer FK.
+
+    Returns:
+        The canonical job-boards.greenhouse.io URL if the input is an
+        embedded Greenhouse URL resolvable via JobSource, otherwise the
+        original job.source_url if it's already canonical, or None if it's
+        an embedded URL we cannot resolve.
+    """
+    parsed = urlparse(job.source_url)
+    if parsed.hostname in DEFAULT_ALLOWED_HOSTNAMES:
+        # Already canonical, no need to look anything up.
+        return job.source_url
+
+    # Not an allowed hostname -- check if it's an embedded Greenhouse URL
+    # with a gh_jid parameter we can use to reconstruct the canonical URL.
+    gh_jid = parse_qs(parsed.query).get("gh_jid", [None])[0]
+    if not gh_jid:
+        # No gh_jid found, can't resolve this URL.
+        return None
+
+    # Look up the JobSource for this employer's Greenhouse board.
+    source = JobSource.objects.filter(
+        employer=job.employer, ats=JobSource.ATS.GREENHOUSE
+    ).first()
+    if not source:
+        # No Greenhouse JobSource registered for this employer.
+        return None
+
+    # Reconstruct the canonical URL using the board_token.
+    return f"https://job-boards.greenhouse.io/{source.board_token}/jobs/{gh_jid}"
+
 
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
@@ -129,8 +176,14 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     profile = getattr(user, "profile", None)
     resume_text = getattr(profile, "resume_text", "") or ""
 
+    # Canonicalize embedded Greenhouse URLs before navigating to them.
+    canonical_url = _canonical_greenhouse_url(job)
+    if canonical_url is None:
+        # URL is embedded and cannot be resolved; fall through to form load failure.
+        canonical_url = job.source_url
+
     try:
-        schema = form_client.inspect(job.source_url)
+        schema = form_client.inspect(canonical_url)
     except GreenhouseFormSchemaMismatch as exc:
         return _persist_draft(
             user,
