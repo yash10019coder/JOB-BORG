@@ -954,6 +954,16 @@ class GreenhouseFormClient:
                         f"Not all selections registered for multi-select field {label!r}."
                     )
             elif form_field.field_type == FILE:
+                # Optional FILE fields with no value (empty string, None) should
+                # be skipped entirely, not passed to file validation. Only
+                # required FILE fields should fail closed if a value is missing.
+                if not value:
+                    if form_field.required:
+                        raise GreenhouseFormError(
+                            f"File {value!r} for field {label!r} does not exist."
+                        )
+                    # Optional field with no value: skip filling entirely
+                    continue
                 control.set_input_files(str(self._validated_file_path(value, label)))
             elif form_field.field_type == COMBOBOX_SELECT:
                 self._fill_combobox(page, control, str(value), label)

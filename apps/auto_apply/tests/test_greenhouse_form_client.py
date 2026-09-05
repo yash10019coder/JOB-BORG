@@ -554,6 +554,39 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         self.assertTrue(result.success)
 
+    def test_submit_skips_optional_file_field_with_empty_value(self):
+        """Regression test: optional FILE fields (e.g. Cover Letter) with
+        empty string values should be skipped entirely during submission,
+        not passed to file validation which would fail closed.
+
+        This reproduces the production bug where empty Cover Letter paths
+        caused submissions to fail even though Cover Letter is not required.
+        """
+        client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        resume_path = self._tmpdir / "resume.pdf"
+        resume_path.write_bytes(b"%PDF-1.4 fake resume")
+
+        # Submit with Resume but no Cover Letter (empty string value)
+        # This should succeed without attempting file validation on the
+        # empty Cover Letter value
+        submit_client = self._client(_fixture_html("greenhouse_combobox_and_file_upload_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Are you authorized to work?": "Yes",
+                "Resume/CV": str(resume_path),
+                "Cover Letter": "",  # Optional field with empty value
+                "Which languages do you know?": ["Python", "Rust"],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+
     # -- required unsupported field type ----------------------------------
 
     def test_required_unsupported_field_type_raises_schema_mismatch(self):
