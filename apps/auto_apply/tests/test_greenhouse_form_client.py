@@ -442,6 +442,51 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertIn("thanks for applying", result.confirmation_text.lower())
 
+    def test_submit_confirms_success_via_heading_with_confirmation_text(self):
+        # Reproduces what some real Greenhouse boards do: communicate
+        # success primarily via a page heading rather than body text. The
+        # client must check headings as well as body text to catch these
+        # confirmations.
+        client = self._client(_fixture_html("greenhouse_heading_confirmation_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_heading_confirmation_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+        # The confirmation text should be found in the heading
+        self.assertIn("successfully submitted", result.confirmation_text.lower())
+
+    def test_submit_confirms_success_via_url_redirect_pattern(self):
+        # Reproduces what some real Greenhouse boards do: redirect to a
+        # confirmation page with a distinct URL (e.g., /confirmation).
+        # The client must detect success via URL patterns when present.
+        client = self._client(_fixture_html("greenhouse_redirect_confirmation_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_redirect_confirmation_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+        # The confirmation text should indicate URL-based detection
+        self.assertIn("confirmation", result.confirmation_text.lower())
+
     # -- submission failure + debug artifacts --------------------------------
 
     def test_submit_rejected_form_raises_submission_failed_with_debug_artifacts(self):

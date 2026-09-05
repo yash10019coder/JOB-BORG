@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Simulates a Greenhouse board that uses a main heading to indicate
+    // success. Some boards have a minimal confirmation view that primarily
+    // communicates via the heading tag. This test ensures the client can
+    // detect success from heading text if it matches the confirmation
+    // patterns.
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.getElementById('app-root').innerHTML =
+        '<h1>Application Successfully Submitted</h1>' +
+        '<p>We have received your application and will review it shortly.</p>';
+    });
+  </script>
+</body>
+</html>

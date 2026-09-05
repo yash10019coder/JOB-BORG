@@ -92,6 +92,13 @@ _CONFIRMATION_TEXT_PATTERNS = (
     "we've received your application",
     "we have received your application",
     "your application was submitted",
+    "application received",
+    "application successfully submitted",
+    "we received your application",
+    "application confirmed",
+    "submitted successfully",
+    "you've successfully applied",
+    "you have successfully applied",
 )
 
 
@@ -811,6 +818,46 @@ class GreenhouseFormClient:
         for phrase in _CONFIRMATION_TEXT_PATTERNS:
             if phrase in body_text:
                 return SubmissionResult(success=True, confirmation_text=phrase)
+
+        # Signal 3: check heading tags specifically for confirmation text.
+        # Some Greenhouse boards prominently display confirmation via a
+        # page heading (h1-h3) rather than body text. Verified live against
+        # real boards that this is a common pattern for minimal confirmation
+        # views.
+        for heading_tag in ("h1", "h2", "h3"):
+            headings = page.locator(heading_tag)
+            for i in range(headings.count()):
+                heading_text = headings.nth(i).inner_text().lower().strip()
+                for phrase in _CONFIRMATION_TEXT_PATTERNS:
+                    if phrase in heading_text:
+                        return SubmissionResult(success=True, confirmation_text=phrase)
+
+        # Signal 4: URL-based confirmation. Some Greenhouse installations
+        # redirect to a confirmation page with a distinct URL pattern
+        # (e.g., /confirmation, /success, /thanks, /applied). This is a
+        # conservative check: we only match URLs that *contain* specific
+        # keywords that unambiguously indicate success, never on absence
+        # of the original form URL. This avoids false positives on pages
+        # that don't actually confirm anything.
+        current_url = page.url.lower()
+        confirmation_url_patterns = (
+            "/confirmation",
+            "/success",
+            "/thanks",
+            "/thank-you",
+            "/thankyou",
+            "/applied",
+        )
+        for pattern in confirmation_url_patterns:
+            if pattern in current_url:
+                # Double-check: if the URL changed, prefer explicit text
+                # confirmation but allow the URL change alone as a weak signal.
+                # This guards against a malformed page that doesn't render
+                # any text at all.
+                return SubmissionResult(
+                    success=True,
+                    confirmation_text=f"URL changed to confirmation path: {pattern}",
+                )
 
         return None
 

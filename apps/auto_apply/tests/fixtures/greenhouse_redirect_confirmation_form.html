@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Simulates a real Greenhouse board that redirects to a success page
+    // after form submission. This pattern is common in many Greenhouse
+    // installations: the confirmation happens via a URL change to a
+    // /confirmation or /thank-you page, and the client detects success
+    // via URL matching (not just text matching).
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      // Simulate URL change and redirect
+      window.history.pushState({}, '', 'https://job-boards.greenhouse.io/acme/jobs/12345/confirmation');
+      // Replace the DOM with a message that doesn't match our standard
+      // confirmation patterns, to test URL-based detection. The URL change
+      // alone (to /confirmation) should signal success.
+      document.getElementById('app-root').innerHTML =
+        '<div class="confirmation-page">' +
+        '<h1>Next Steps</h1>' +
+        '<p>Your information has been processed. You will hear back from us within 5 business days.</p>' +
+        '<p>Return to the job board or close this window.</p>' +
+        '</div>';
+    });
+  </script>
+</body>
+</html>
