@@ -23,14 +23,14 @@
   <script>
     // Simulates a Greenhouse board that uses a main heading to indicate
     // success. Some boards have a minimal confirmation view that primarily
-    // communicates via the heading tag. This test ensures the client can
-    // detect success from heading text if it matches the confirmation
-    // patterns.
+    // communicates via the heading tag. Body text is intentionally generic
+    // (doesn't match Signal 2 text patterns) to verify Signal 3 (heading
+    // check) is exercised rather than body text check matching first.
     document.getElementById('application-form').addEventListener('submit', function (e) {
       e.preventDefault();
       document.getElementById('app-root').innerHTML =
         '<h1>Application Successfully Submitted</h1>' +
-        '<p>We have received your application and will review it shortly.</p>';
+        '<p>Next, you will receive an email with more information. Expect to hear from us within 5 business days.</p>';
     });
   </script>
 </body>
