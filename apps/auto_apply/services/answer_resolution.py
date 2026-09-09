@@ -19,6 +19,7 @@ from __future__ import annotations
 from apps.auto_apply.llm.base import (
     AnswerInferenceClient,
     Question,
+    ResolutionReason,
     ResolvedAnswer,
     resolve_answers,
 )
@@ -84,12 +85,15 @@ def resolve_field_answers(
                 break
 
         if explicit is not None:
-            resolved[question.id] = ResolvedAnswer(
-                question_id=question.id,
-                category=category,
-                answer=explicit.answer_text,
-                needs_review=False,
-                reason=EXPLICIT_ANSWER_REASON,
+            resolved[question.id] = _enforce_option_constraint(
+                ResolvedAnswer(
+                    question_id=question.id,
+                    category=category,
+                    answer=explicit.answer_text,
+                    needs_review=False,
+                    reason=EXPLICIT_ANSWER_REASON,
+                ),
+                question,
             )
         else:
             remaining.append(question)
@@ -98,7 +102,37 @@ def resolve_field_answers(
         # Single batched call for every question with no explicit-answer
         # override, sharing one resume/profile context -- resolve_answers()
         # itself enforces the one-call-per-batch contract.
+        questions_by_id = {question.id: question for question in remaining}
         for answer in resolve_answers(remaining, resume_text, profile, llm_client):
-            resolved[answer.question_id] = answer
+            resolved[answer.question_id] = _enforce_option_constraint(
+                answer, questions_by_id[answer.question_id]
+            )
 
     return [resolved[q.id] for q in questions]
+
+
+def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> ResolvedAnswer:
+    """Deterministic backstop for option-bearing questions (`SINGLE_SELECT`,
+    `MULTI_SELECT`, `CHECKBOX_GROUP`): an LLM answer is trusted only when it
+    is an exact match against `question.options`.
+
+    LLM instruction-following (the system prompt in `langchain_client.py`)
+    is the first line of defense, not the enforcement boundary -- a model
+    can still ignore the instruction and invent a value outside the option
+    set. When that happens, the answer is treated exactly like any other
+    unanswerable question (empty, `needs_review=True`) rather than letting
+    an invalid value reach `answers_payload` and fail later at submit time
+    (or silently misrepresent the applicant). Free-text questions
+    (`question.options` empty) are untouched.
+    """
+    if not question.options or not answer.answer:
+        return answer
+    if answer.answer in question.options:
+        return answer
+    return ResolvedAnswer(
+        question_id=answer.question_id,
+        category=answer.category,
+        answer=None,
+        needs_review=True,
+        reason=ResolutionReason.INVALID_OPTION,
+    )

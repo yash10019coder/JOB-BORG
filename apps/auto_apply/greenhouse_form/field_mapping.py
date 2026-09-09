@@ -25,17 +25,36 @@ COMBOBOX_SELECT = "combobox_select"
 # checkbox's own `<label for>` becomes one entry in `options` -- see
 # client.py's `_checkbox_group_field()`/`_fill_checkbox_group()`.
 CHECKBOX_GROUP = "checkbox_group"
+# A single standalone `<input type=checkbox>` with its own `<label>` -- no
+# enclosing `<fieldset>` (that shape is CHECKBOX_GROUP above). Greenhouse's
+# policy/terms-of-service-acceptance checkboxes render this way. Modeled as
+# an option-bearing field with a fixed ("Yes", "No") option set rather than
+# a bespoke boolean type, so the existing option-constrained answer-
+# resolution machinery (`_enforce_option_constraint()`) applies with no new
+# code -- see client.py's `_fill_answers()` CHECKBOX_ACKNOWLEDGEMENT branch.
+CHECKBOX_ACKNOWLEDGEMENT = "checkbox_acknowledgement"
 
 # Every field type this slice knows how to fill. A *required* rendered field
 # whose type falls outside this set is unsupported and drafting/submission
 # must fail closed (GreenhouseFormSchemaMismatch) rather than skip it.
 SUPPORTED_FIELD_TYPES = frozenset(
-    {TEXT, TEXTAREA, SINGLE_SELECT, MULTI_SELECT, FILE, COMBOBOX_SELECT, CHECKBOX_GROUP}
+    {
+        TEXT,
+        TEXTAREA,
+        SINGLE_SELECT,
+        MULTI_SELECT,
+        FILE,
+        COMBOBOX_SELECT,
+        CHECKBOX_GROUP,
+        CHECKBOX_ACKNOWLEDGEMENT,
+    }
 )
 
 # Field types that carry a discrete option set (used for select/checkbox-group
 # controls); relevant for the option-set comparison in schema_matches().
-_OPTION_BEARING_TYPES = frozenset({SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP})
+_OPTION_BEARING_TYPES = frozenset(
+    {SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP, CHECKBOX_ACKNOWLEDGEMENT}
+)
 
 
 @dataclass(frozen=True)

@@ -42,7 +42,9 @@ from .exceptions import (
     GreenhouseFormSubmissionFailed,
     GreenhouseFormVerificationFailed,
 )
+from .education_api import education_type_for_control_id, fetch_full_list
 from .field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
@@ -76,6 +78,20 @@ _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
 _COMBOBOX_OPTION_TIMEOUT_MS = 5_000
 _SETTLE_TIMEOUT_MS = 5_000
+# Some Greenhouse combobox widgets (confirmed live: the "School" field,
+# backed by a remote paginated API of 2,466 entries at 100/page) only ever
+# render the first page's options on a bare open -- loading more pages
+# requires scrolling the listbox's last option into view, which is what a
+# real user does when they scroll to browse. This is a bounded improvement,
+# not exhaustive: each extra page costs a real render round-trip, so this
+# stops early once a scroll stops growing the option count (a small list,
+# like the 10-entry "Degree" field, converges after one iteration) and
+# caps out well short of every possible page for very large lists like
+# School's 2,466 entries -- `_fill_combobox()` at send time is unaffected
+# by this cap, since it types the real target value rather than relying on
+# whatever this discovery-time scroll happened to load.
+_COMBOBOX_SCROLL_ITERATIONS = 5
+_COMBOBOX_SCROLL_WAIT_MS = 500
 
 # Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
 # successful submission. Verified against a live Greenhouse board
@@ -119,7 +135,10 @@ _CONFIRMATION_TEXT_PATTERNS = (
 #     unrelated fields like "zip_code" (acceptable here only because this
 #     signal is never trusted alone -- see the confirming-copy requirement
 #     below).
-# Must be replaced/confirmed once a real interstitial page is captured.
+# `_verification_interstitial_detected()` also independently checks the
+# confirmed `_VERIFICATION_CODE_BOX_SELECTOR` multi-box shape below, so a
+# real interstitial rendered in that shape is not missed if it fails to
+# match this selector's still-unconfirmed attribute guesses.
 _VERIFICATION_CODE_INPUT_SELECTOR = (
     'input[autocomplete="one-time-code" i], '
     'input[inputmode="numeric" i], '
@@ -229,6 +248,7 @@ class GreenhouseFormClient:
         navigation_timeout_ms: int = _DEFAULT_NAVIGATION_TIMEOUT_MS,
         confirmation_timeout_ms: int = _DEFAULT_CONFIRMATION_TIMEOUT_MS,
         captcha_timeout_s: float = _DEFAULT_CAPTCHA_TIMEOUT_S,
+        education_api_session=None,
     ):
         self._context_factory = context_factory or _default_context_factory
         self._default_captcha_solver = captcha_solver
@@ -238,6 +258,10 @@ class GreenhouseFormClient:
         self.navigation_timeout_ms = navigation_timeout_ms
         self.confirmation_timeout_ms = confirmation_timeout_ms
         self.captcha_timeout_s = captcha_timeout_s
+        # Injectable for tests -- never make a real HTTP call from a test;
+        # construct with a fake/mock `requests.Session`-shaped object
+        # instead. See `education_api.fetch_full_list`.
+        self._education_api_session = education_api_session
 
     # -- public API -----------------------------------------------------
 
@@ -325,6 +349,7 @@ class GreenhouseFormClient:
 
             try:
                 self._fill_answers(page, schema_now, answers)
+                self._raise_on_newly_revealed_required_fields(page, job_url, schema_now)
                 submitted_at = datetime.now(timezone.utc)
                 self._click_submit(page, schema_now)
                 result = self._confirm_success(
@@ -475,14 +500,45 @@ class GreenhouseFormClient:
                 # each with its own <label for> reading the *option* text
                 # (e.g. "Python"), not the question. Handled as one group
                 # per <fieldset>, not one field per checkbox.
-                group_field = self._checkbox_group_field(page, control, seen_control_ids)
-                if group_field is not None:
-                    if group_field.required and not group_field.is_supported:
-                        raise GreenhouseFormSchemaMismatch(
-                            f"Required field {group_field.label!r} on {job_url} has "
-                            f"unsupported type {group_field.field_type!r}."
-                        )
-                    fields.append(group_field)
+                has_fieldset = control.locator("xpath=ancestor::fieldset[1]").count() > 0
+                if has_fieldset:
+                    # Belongs to a <fieldset><legend> group -- either the
+                    # first checkbox in it (group_field is the whole
+                    # group) or a later sibling in a group already
+                    # captured (group_field is None because
+                    # `_checkbox_group_field()`'s own seen_control_ids
+                    # dedup already fired) -- either way, not a standalone
+                    # checkbox, so never fall through to the standalone
+                    # branch below.
+                    group_field = self._checkbox_group_field(page, control, seen_control_ids)
+                    if group_field is not None:
+                        if group_field.required and not group_field.is_supported:
+                            raise GreenhouseFormSchemaMismatch(
+                                f"Required field {group_field.label!r} on {job_url} has "
+                                f"unsupported type {group_field.field_type!r}."
+                            )
+                        fields.append(group_field)
+                    continue
+                # No enclosing <fieldset> -- a standalone checkbox (e.g. a
+                # policy/terms-of-service acceptance box), not a group.
+                # Discovered as its own CHECKBOX_ACKNOWLEDGEMENT field
+                # rather than silently skipped, so a required one fails
+                # closed like any other unsupported/unanswered field
+                # instead of leaving the form silently unsubmittable.
+                checkbox_id = control.get_attribute("id") or ""
+                if checkbox_id:
+                    if checkbox_id in seen_control_ids:
+                        continue
+                    seen_control_ids.add(checkbox_id)
+                fields.append(
+                    FormField(
+                        label=label_text,
+                        field_type=CHECKBOX_ACKNOWLEDGEMENT,
+                        required=self._is_required(control),
+                        options=("Yes", "No"),
+                        control_id=checkbox_id,
+                    )
+                )
                 continue
             control_id = control.get_attribute("id") or ""
             if control_id:
@@ -501,6 +557,8 @@ class GreenhouseFormClient:
                 label_text = self._group_label_for(control) or label_text
             required = self._is_required(control)
             options = self._extract_options(page, control, field_type)
+            if field_type == COMBOBOX_SELECT:
+                options = self._maybe_full_education_options(job_url, control_id, options)
             form_field = FormField(
                 label=label_text,
                 field_type=field_type,
@@ -517,6 +575,34 @@ class GreenhouseFormClient:
 
         fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
         return FormSchema(fields=tuple(fields))
+
+    def _raise_on_newly_revealed_required_fields(
+        self, page, job_url: str, filled_schema: FormSchema
+    ) -> None:
+        """One bounded re-discovery pass (not a polling loop) after
+        `_fill_answers()` completes, to catch a field that only entered the
+        DOM as a side effect of an answer just filled (e.g. selecting
+        "Other" reveals a "please specify" text box). `filled_schema` is
+        exactly what was filled -- any field the fresh discovery finds that
+        isn't in it is new. There is no drafted answer for a field that
+        didn't exist at draft time, so a *required* new field fails closed
+        here, before Submit is ever clicked, rather than silently
+        submitting incomplete or hanging on the generic post-submit
+        timeout. A new field that isn't required is not a blocker and is
+        left as-is -- this pass only ever fails closed on the required
+        case, matching every other fail-closed check in this file.
+        """
+        rediscovered = self._discover_schema(page, job_url)
+        known_labels = {f.label for f in filled_schema.fields}
+        newly_required = [
+            f.label for f in rediscovered.fields if f.required and f.label not in known_labels
+        ]
+        if newly_required:
+            raise GreenhouseFormSchemaMismatch(
+                f"New required field(s) appeared on {job_url} after filling the "
+                f"drafted answers, with no answer available for them: "
+                f"{', '.join(newly_required)}."
+            )
 
     @staticmethod
     def _discover_aria_labelledby_only_fields(
@@ -748,7 +834,43 @@ class GreenhouseFormClient:
             try:
                 control.click()
                 listbox = page.get_by_role("listbox")
-                listbox.first.wait_for(state="visible", timeout=1_000)
+                # Wait for an actual *option* to render, not for the
+                # (possibly still-empty) listbox container to become
+                # "visible" -- confirmed live (Atomicwork's "Degree"/
+                # "School" fields) that the container mounts empty first
+                # and real <option> entries render a few hundred ms later,
+                # and confirmed separately that a childless container can
+                # itself fail Playwright's visibility check (it commonly
+                # collapses to zero layout size with no children), so
+                # waiting on the container first can time out before the
+                # options ever get a chance to render. Waiting directly for
+                # an option -- scoped through the listbox so a stray
+                # leftover option from elsewhere on the page can't match --
+                # handles both a container that opens empty-but-visible and
+                # one that only becomes visible once populated, using the
+                # same budget `_fill_combobox` already uses for the same
+                # kind of wait. A widget that's legitimately empty on bare
+                # open (e.g. Location, which only populates once the user
+                # types) still times out here, falling through to the
+                # except below exactly as before.
+                listbox.first.get_by_role("option").first.wait_for(
+                    state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS
+                )
+                # A single-page-of-100 result isn't necessarily the whole
+                # list -- confirmed live that a real, trusted scroll (last
+                # option into view) triggers the widget to fetch and render
+                # its next page, while a widget with everything already
+                # showing (or nothing more to load) simply stops growing.
+                # Bounded and best-effort: see _COMBOBOX_SCROLL_ITERATIONS.
+                options_locator = listbox.first.get_by_role("option")
+                previous_count = options_locator.count()
+                for _ in range(_COMBOBOX_SCROLL_ITERATIONS):
+                    options_locator.last.scroll_into_view_if_needed()
+                    page.wait_for_timeout(_COMBOBOX_SCROLL_WAIT_MS)
+                    current_count = options_locator.count()
+                    if current_count <= previous_count:
+                        break
+                    previous_count = current_count
                 raw_options = listbox.first.get_by_role("option").all_text_contents()
             except Exception:  # noqa: BLE001 -- no listbox on bare open is normal, not fatal
                 raw_options = []
@@ -756,6 +878,34 @@ class GreenhouseFormClient:
                 page.keyboard.press("Escape")
             return tuple(opt.strip() for opt in raw_options if opt.strip())
         return ()
+
+    def _maybe_full_education_options(
+        self, job_url: str, control_id: str, dom_options: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Replace a DOM-scraped, possibly-partial option list with the
+        complete one when this control is backed by Greenhouse's public
+        education API (School/Degree/Discipline) -- see `education_api`
+        module docstring. Falls back to `dom_options` unchanged when the
+        control isn't API-backed, or the API call fails for any reason
+        (network error, unexpected shape, board without this endpoint).
+        """
+        education_type = education_type_for_control_id(control_id)
+        if education_type is None:
+            return dom_options
+        board_token = self._extract_board_token(job_url)
+        if not board_token:
+            return dom_options
+        full_options = fetch_full_list(
+            board_token, education_type, session=self._education_api_session
+        )
+        return full_options if full_options else dom_options
+
+    @staticmethod
+    def _extract_board_token(job_url: str) -> str:
+        from urllib.parse import urlparse
+
+        path = urlparse(job_url).path.strip("/")
+        return path.split("/")[0] if path else ""
 
     # -- filling --------------------------------------------------------
 
@@ -779,7 +929,19 @@ class GreenhouseFormClient:
                 control.fill(str(value))
                 expect(control).to_have_value(str(value))
             elif form_field.field_type == SINGLE_SELECT:
-                control.select_option(label=str(value))
+                try:
+                    control.select_option(label=str(value))
+                except Exception as exc:
+                    # Not caught by a dedicated except type -- Playwright
+                    # raises a plain `Error`/`TimeoutError` when no option
+                    # matches `label=`. Translate it into the same typed,
+                    # clear-message exception `_fill_combobox`/
+                    # `_fill_checkbox_group` already raise for an option
+                    # mismatch, rather than letting the raw Playwright
+                    # exception propagate up to submit()'s generic catch-all.
+                    raise GreenhouseFormSubmissionFailed(
+                        f"No matching option for {value!r} found in select field {label!r}"
+                    ) from exc
                 expect(control).to_have_value(control.evaluate("el => el.value"))
             elif form_field.field_type == MULTI_SELECT:
                 values = value if isinstance(value, (list, tuple)) else [value]
@@ -797,6 +959,17 @@ class GreenhouseFormClient:
                 self._fill_combobox(page, control, str(value), label)
             elif form_field.field_type == CHECKBOX_GROUP:
                 self._fill_checkbox_group(page, control, value, label)
+            elif form_field.field_type == CHECKBOX_ACKNOWLEDGEMENT:
+                # `_enforce_option_constraint()` already guarantees any
+                # resolved answer reaching here is exactly "Yes" or "No"
+                # (the field's options are fixed to that pair at discovery
+                # time) -- no third branch needed for an invalid value,
+                # mirroring SINGLE_SELECT's trust in the same upstream
+                # guarantee.
+                if str(value) == "Yes":
+                    control.check()
+                else:
+                    control.uncheck()
             else:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
@@ -1178,9 +1351,21 @@ class GreenhouseFormClient:
 
     @staticmethod
     def _verification_interstitial_detected(page) -> bool:
-        """Detect Greenhouse's post-submit email-verification interstitial."""
-        code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
-        if code_input.count() == 0:
+        """Detect Greenhouse's post-submit email-verification interstitial.
+
+        Checks both recognized code-entry-control shapes: the original
+        (unverified) single-input guess, and the confirmed real shape --
+        N separate `input[maxlength="1"]` boxes (see
+        `_VERIFICATION_CODE_BOX_SELECTOR`'s comment, captured live) --
+        requiring at least 2 boxes so a single unrelated one-character
+        input elsewhere on the page can't alone satisfy this signal
+        (mirrors `_fill_verification_code()`'s own `box_count >= 2`
+        threshold for the same shape).
+        """
+        has_code_control = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).count() > 0
+        if not has_code_control:
+            has_code_control = page.locator(_VERIFICATION_CODE_BOX_SELECTOR).count() >= 2
+        if not has_code_control:
             return False
         body_text = page.locator("body").inner_text().lower()
         return any(phrase in body_text for phrase in _VERIFICATION_TEXT_PATTERNS)

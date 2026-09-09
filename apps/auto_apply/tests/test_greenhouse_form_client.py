@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-
+from django.core.cache import cache
 from django.test import SimpleTestCase
 
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
@@ -30,6 +30,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormVerificationFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     CHECKBOX_GROUP,
     COMBOBOX_SELECT,
     FILE,
@@ -238,6 +239,214 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(checkbox_field.field_type, CHECKBOX_GROUP)
         self.assertTrue(checkbox_field.required)
         self.assertEqual(set(checkbox_field.options), {"Python", "Go", "Rust"})
+
+    # -- inspect()/submit(): standalone checkbox (no enclosing fieldset) ----
+
+    def test_inspect_discovers_standalone_checkbox_as_acknowledgement_field(self):
+        # A standalone checkbox (no <fieldset><legend>) was previously
+        # entirely invisible to discovery -- _checkbox_group_field()
+        # returned None and the caller silently `continue`d past it. Now
+        # discovered as its own CHECKBOX_ACKNOWLEDGEMENT field.
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        by_label = schema.by_label()
+        self.assertIn("I agree to the Terms of Service", by_label)
+        terms_field = by_label["I agree to the Terms of Service"]
+        self.assertEqual(terms_field.field_type, CHECKBOX_ACKNOWLEDGEMENT)
+        self.assertTrue(terms_field.required)
+        self.assertEqual(terms_field.options, ("Yes", "No"))
+        self.assertEqual(terms_field.control_id, "terms")
+
+        # Edge case: a non-required standalone checkbox is discovered too,
+        # correctly marked not required.
+        newsletter_field = by_label["Subscribe me to the newsletter"]
+        self.assertEqual(newsletter_field.field_type, CHECKBOX_ACKNOWLEDGEMENT)
+        self.assertFalse(newsletter_field.required)
+
+    def test_submit_checks_standalone_checkbox_answered_yes(self):
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "I agree to the Terms of Service": "Yes",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_leaves_standalone_checkbox_unchecked_when_answered_no(self):
+        # A non-required standalone checkbox answered "No" must not be
+        # checked, and must not block submission.
+        client = self._client(_fixture_html("greenhouse_standalone_checkbox_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "I agree to the Terms of Service": "Yes",
+                "Subscribe me to the newsletter": "No",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_required_standalone_checkbox_unanswered_blocks_native_submit(self):
+        # Fail-closed guard (R2): the fixture's own native `required`
+        # blocks the real form submit when "terms" is left unchecked --
+        # confirms an unanswered required standalone checkbox is a genuine
+        # blocker end-to-end, not silently ignorable, now that it's a
+        # real, discovered, is_supported field rather than invisible.
+        client = self._client(
+            _fixture_html("greenhouse_standalone_checkbox_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+
+    def test_inspect_waits_for_combobox_options_that_render_after_the_listbox_opens(self):
+        # Reproduces a live-verified race: a Greenhouse "Degree"/"School"
+        # combobox's listbox container becomes visible immediately on open,
+        # but its real <option> entries render ~300ms later. The old
+        # _extract_options() only waited for the (empty) container to
+        # become visible, then read whatever options existed at that
+        # instant -- racing ahead of the population and recording zero
+        # options for a field that genuinely has real choices.
+        client = self._client(_fixture_html("greenhouse_delayed_combobox_options_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        degree_field = schema.by_label()["Degree"]
+        self.assertEqual(degree_field.field_type, COMBOBOX_SELECT)
+        self.assertEqual(
+            set(degree_field.options),
+            {"Associate's Degree", "Bachelor's Degree", "Master's Degree", "Other"},
+        )
+
+    def test_inspect_scrolls_combobox_to_load_options_beyond_the_first_page(self):
+        # Reproduces a live-verified gap: a Greenhouse "School" combobox is
+        # backed by a remote paginated API (2,466 entries at 100/page on
+        # the live board) -- a bare open only ever renders the first page.
+        # Scrolling the listbox's last option into view is what triggers
+        # the widget to fetch and render the next page; without that,
+        # _extract_options() only ever captured page 1, and the just-added
+        # option-constraint validation would then wrongly reject any real
+        # answer that happened to live on a later page.
+        client = self._client(_fixture_html("greenhouse_paginated_combobox_options_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(school_field.field_type, COMBOBOX_SELECT)
+        # All 3 fixture pages (12 total) should load -- the fixture has
+        # far fewer pages than a real 2,466-entry field, well inside
+        # _COMBOBOX_SCROLL_ITERATIONS's bound, so this asserts full
+        # convergence, not just "more than the first page".
+        self.assertEqual(len(school_field.options), 12)
+        self.assertIn("Aalborg University", school_field.options)
+        self.assertIn("Adams State University", school_field.options)
+
+    # -- inspect(): education-API-backed combobox (School/Degree/Discipline) ---
+
+    class _FakeEducationSession:
+        """Test double for `requests.Session` -- no real HTTP call is ever
+        made. Records every GET."""
+
+        def __init__(self, responses_by_page=None, raises=None):
+            self.responses_by_page = responses_by_page or {}
+            self.raises = raises
+            self.calls: list[dict] = []
+
+        def get(self, url, params=None, timeout=None):
+            self.calls.append({"url": url, "params": params, "timeout": timeout})
+            if self.raises is not None:
+                raise self.raises
+            return self.responses_by_page[params["page"]]
+
+    class _FakeEducationResponse:
+        def __init__(self, status_code=200, json_body=None):
+            self.status_code = status_code
+            self._json_body = json_body or {}
+
+        def json(self):
+            return self._json_body
+
+    def test_inspect_uses_full_education_api_list_when_available(self):
+        # The fixture's DOM-scraped list is only 2 schools; the education
+        # API (mocked here, never hitting a real network) reports 3 --
+        # the API list should entirely replace the DOM-scraped one, not
+        # merge with or lose out to it.
+        cache.clear()
+        session = self._FakeEducationSession(
+            {
+                1: self._FakeEducationResponse(
+                    200,
+                    {
+                        "items": [
+                            {"id": 1, "text": "API School A"},
+                            {"id": 2, "text": "API School B"},
+                            {"id": 3, "text": "API School C"},
+                        ],
+                        "meta": {"total_count": 3},
+                    },
+                )
+            }
+        )
+        client = self._client(
+            _fixture_html("greenhouse_education_api_backed_combobox_form.html"),
+            education_api_session=session,
+        )
+
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(
+            set(school_field.options), {"API School A", "API School B", "API School C"}
+        )
+        self.assertNotIn("DOM Sample School A", school_field.options)
+        # JOB_URL's board token is "acme" -- confirms the real request URL
+        # shape, not just that *a* request happened.
+        self.assertEqual(
+            session.calls[0]["url"],
+            "https://boards.greenhouse.io/v1/boards/acme/education/schools",
+        )
+
+    def test_inspect_falls_back_to_dom_options_when_education_api_fails(self):
+        # A board without this endpoint enabled, a network error, or any
+        # other API failure must never lose the field entirely -- fall
+        # back to whatever the DOM scrape already found.
+        cache.clear()
+        session = self._FakeEducationSession(raises=ConnectionError("boom"))
+        client = self._client(
+            _fixture_html("greenhouse_education_api_backed_combobox_form.html"),
+            education_api_session=session,
+        )
+
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertEqual(set(school_field.options), {"DOM Sample School A", "DOM Sample School B"})
+
+    def test_inspect_does_not_call_education_api_for_non_education_combobox(self):
+        # A combobox whose control_id doesn't match Greenhouse's Education
+        # block naming (e.g. "Are you authorized to work?", a plain
+        # work_auth id) must never trigger an education API call.
+        cache.clear()
+        session = self._FakeEducationSession()
+        client = self._client(
+            _fixture_html("greenhouse_combobox_and_file_upload_form.html"),
+            education_api_session=session,
+        )
+
+        client.inspect(JOB_URL)
+
+        self.assertEqual(session.calls, [])
 
     # -- inspect()/submit(): aria-labelledby-only combobox (no <label>) ---
 
@@ -475,6 +684,39 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertTrue(result.success)
         self.assertIn("submitted successfully", result.confirmation_text.lower())
 
+    def test_submit_single_select_mismatch_raises_typed_submission_failed(self):
+        # U5: a SINGLE_SELECT answer with no matching option must fail
+        # closed with a typed, clear-message exception -- not a raw
+        # Playwright TimeoutError bubbling up from select_option().
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(
+            _fixture_html("greenhouse_custom_questions_form.html"), confirmation_timeout_ms=500
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            submit_client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Last Name": "Lovelace",
+                    "Email": "ada@example.com",
+                    "Phone": "555-0100",
+                    "Resume/CV": str(self._resume_file()),
+                    "Why do you want to work here?": "Because I love hard problems.",
+                    "Are you legally authorized to work in the US?": "Maybe, unclear",
+                    "Which of the following technologies have you used professionally?": [
+                        "Python",
+                        "Go",
+                    ],
+                },
+                expected_schema=schema,
+            )
+
+        message = str(ctx.exception)
+        self.assertIn("No matching option", message)
+        self.assertIn("Are you legally authorized to work in the US?", message)
+
     def test_submit_confirms_success_via_text_pattern_without_status_role(self):
         # Reproduces what live verification against a real Greenhouse board
         # found: the confirmation view carries no role="status" (or any
@@ -640,6 +882,117 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 deadline_monotonic=time.monotonic() + 60,
             )
         self.assertEqual(ctx.exception.outcome, VerificationOutcome.CODE_REJECTED)
+
+    def test_submit_bare_multibox_interstitial_still_detected(self):
+        # Regression test for the bug fixed here: the real interstitial
+        # captured in media/auto_apply_debug/1786259666-c46a2165-a11y.yaml
+        # rendered 8 single-character code boxes carrying NONE of
+        # `_VERIFICATION_CODE_INPUT_SELECTOR`'s assumed attributes (no
+        # autocomplete="one-time-code", no inputmode="numeric", no
+        # name/id/placeholder containing "code") -- only `maxlength="1"`.
+        # Before this fix, detection's code_input.count() was 0 and the
+        # interstitial was silently missed, falling through to the generic
+        # GreenhouseFormSubmissionFailed instead of routing into email
+        # verification at all.
+        client = self._client(_fixture_html("greenhouse_verification_multibox_bare_form.html"))
+        with self.assertRaises(GreenhouseFormVerificationFailed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+            )
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormSubmissionFailed)
+
+    def test_verification_interstitial_detected_true_for_bare_multibox_shape(self):
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 8)
+            if sel == "body":
+                return MagicMock(
+                    inner_text=lambda: "A verification code was sent to you. Enter the code below."
+                )
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertTrue(client._verification_interstitial_detected(mock_page))
+
+    def test_verification_interstitial_not_falsely_triggered_by_single_stray_box(self):
+        # A lone maxlength="1" input elsewhere on the page (e.g. a
+        # single-character field unrelated to verification) must not alone
+        # satisfy the control-signal -- mirrors `_fill_verification_code()`'s
+        # own `box_count >= 2` threshold for the same shape.
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 1)
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertFalse(client._verification_interstitial_detected(mock_page))
+
+    def test_verification_interstitial_not_falsely_triggered_without_confirming_copy(self):
+        # The multi-box control signal alone is never enough -- confirming
+        # copy is still required (existing two-signal design, unchanged).
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+
+        def _locator(sel):
+            if "maxlength" in sel:
+                return MagicMock(count=lambda: 8)
+            if sel == "body":
+                return MagicMock(inner_text=lambda: "Nothing relevant here.")
+            return MagicMock(count=lambda: 0)
+
+        mock_page.locator.side_effect = _locator
+
+        self.assertFalse(client._verification_interstitial_detected(mock_page))
+
+    # -- submit(): bounded post-fill re-discovery for revealed fields -------
+
+    def test_submit_no_revealed_fields_behaves_identically(self):
+        # R7 happy path: choosing "Referral" never reveals the "specify"
+        # field -- the extra re-discovery pass finds nothing new and
+        # submission proceeds exactly as before this change.
+        client = self._client(_fixture_html("greenhouse_reveals_required_field_on_select_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+                "How did you hear about us?": "Referral",
+            },
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_revealed_required_field_raises_schema_mismatch(self):
+        # R5/R6: choosing "Other" reveals a new required "Please specify"
+        # field that was never in the drafted answers -- there is no
+        # answer for a field that didn't exist at draft time, so this
+        # fails closed before Submit is ever clicked, rather than silently
+        # submitting incomplete or hanging on the generic timeout path.
+        client = self._client(_fixture_html("greenhouse_reveals_required_field_on_select_form.html"))
+        with self.assertRaises(GreenhouseFormSchemaMismatch) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                    "How did you hear about us?": "Other",
+                },
+            )
+        self.assertIn("Please specify", str(ctx.exception))
 
     def test_submit_normal_success_fixture_still_resolves_as_success(self):
         # Regression guard: an ordinary success fixture must remain

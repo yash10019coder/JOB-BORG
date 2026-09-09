@@ -210,6 +210,72 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
         self.assertIn("Send application", content)
         self.assertNotIn("Answer required</span>", content)
 
+    def test_queue_renders_select_for_option_bearing_needs_review_field(self):
+        job = self._job()
+        self._draft(
+            self.alice,
+            job,
+            answers={
+                "What college did you attend?": {
+                    "value": "", "needs_review": True, "required": True,
+                    "category": "other", "reason": "invalid_option",
+                    "field_type": "single_select",
+                    "options": ["State University A", "State University B", "Other"],
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+        content = response.content.decode()
+
+        self.assertIn("<select", content)
+        self.assertIn('<option value="State University A"', content)
+        self.assertIn('<option value="Other"', content)
+        self.assertNotIn('name="value__0" value=""', content)
+
+    def test_queue_select_preselects_an_already_valid_stored_value(self):
+        job = self._job()
+        self._draft(
+            self.alice,
+            job,
+            answers={
+                "What college did you attend?": {
+                    "value": "State University B", "needs_review": True, "required": True,
+                    "category": "other", "reason": "low_confidence",
+                    "field_type": "single_select",
+                    "options": ["State University A", "State University B", "Other"],
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+        content = response.content.decode()
+
+        self.assertIn('<option value="State University B" selected>', content)
+        self.assertNotIn('<option value="State University A" selected>', content)
+        self.assertNotIn('<option value="Other" selected>', content)
+
+    def test_queue_renders_text_input_for_free_text_needs_review_field(self):
+        job = self._job()
+        self._draft(
+            self.alice,
+            job,
+            answers={
+                "Why us?": {
+                    "value": "", "needs_review": True, "required": False,
+                    "category": "other", "reason": "insufficient_evidence",
+                    "field_type": "text",
+                    "options": [],
+                },
+            },
+        )
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+        content = response.content.decode()
+
+        self.assertNotIn("<select", content)
+        self.assertIn('type="text"', content)
+
     def test_queue_flags_blocking_required_field_in_context(self):
         job = self._job()
         draft = self._draft(

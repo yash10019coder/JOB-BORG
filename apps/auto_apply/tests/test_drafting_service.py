@@ -13,6 +13,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormSchemaMismatch,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_ACKNOWLEDGEMENT,
     FILE,
     FormField,
     FormSchema,
@@ -130,10 +131,14 @@ class StandardFieldsOnlyTests(DraftingServiceTestCase):
 
 class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
     def test_explicit_answer_covered_question_drafts_without_calling_llm(self):
+        # "No" (not free text) -- an explicit answer for an option-bearing
+        # question is now validated against the field's real options
+        # exactly like an LLM answer (see answer_resolution's
+        # _enforce_option_constraint), so the fixture must be a real option.
         ExplicitAnswer.objects.create(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
-            answer_text="No, I do not require sponsorship.",
+            answer_text="No",
         )
         schema = FormSchema(
             fields=STANDARD_ONLY_SCHEMA.fields
@@ -156,7 +161,7 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         sponsorship_answer = draft.answers[
             "Will you now or in the future require visa sponsorship?"
         ]
-        self.assertEqual(sponsorship_answer["value"], "No, I do not require sponsorship.")
+        self.assertEqual(sponsorship_answer["value"], "No")
         self.assertFalse(sponsorship_answer["needs_review"])
         self.assertEqual(sponsorship_answer["reason"], "explicit_answer")
         self.assertTrue(sponsorship_answer["required"])
@@ -220,6 +225,81 @@ class LLMInferableQuestionTests(DraftingServiceTestCase):
         self.assertTrue(python_answer["needs_review"])
 
 
+class QuestionFieldConstraintPropagationTests(DraftingServiceTestCase):
+    """U1: `field_type`/`options` from the discovered `FormField` must reach
+    the `Question` passed to the LLM client -- otherwise the LLM has no way
+    to know a question is option-constrained (see `answer_resolution`'s
+    validation, which relies on `Question.options` being populated)."""
+
+    def test_single_select_question_carries_field_type_and_options(self):
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="What is your highest level of education?",
+                    field_type=SINGLE_SELECT,
+                    required=True,
+                    options=("High School", "Bachelor's", "Master's", "Other"),
+                ),
+            )
+        )
+        llm_client = FakeLLMClient(
+            answers_by_id={
+                "What is your highest level of education?": QuestionAnswer(
+                    question_id="What is your highest level of education?",
+                    answer="Bachelor's",
+                    evidence=["Bachelor's"],
+                    self_reported_confidence=0.9,
+                )
+            }
+        )
+        form_client = FakeFormClient(schema=schema)
+
+        draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(len(llm_client.calls), 1)
+        questions, _, _ = llm_client.calls[0]
+        education_question = next(
+            q for q in questions if q.id == "What is your highest level of education?"
+        )
+        self.assertEqual(education_question.field_type, SINGLE_SELECT)
+        self.assertEqual(
+            education_question.options, ("High School", "Bachelor's", "Master's", "Other")
+        )
+
+    def test_text_question_has_no_options(self):
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="How many years of Python experience do you have?",
+                    field_type=TEXT,
+                    required=False,
+                ),
+            )
+        )
+        llm_client = FakeLLMClient(
+            answers_by_id={
+                "How many years of Python experience do you have?": QuestionAnswer(
+                    question_id="How many years of Python experience do you have?",
+                    answer="5 years",
+                    evidence=["5 years of Python"],
+                    self_reported_confidence=0.9,
+                )
+            }
+        )
+        form_client = FakeFormClient(schema=schema)
+
+        draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        questions, _, _ = llm_client.calls[0]
+        python_question = next(
+            q for q in questions if q.id == "How many years of Python experience do you have?"
+        )
+        self.assertEqual(python_question.field_type, TEXT)
+        self.assertEqual(python_question.options, ())
+
+
 class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
     """A required custom question the LLM can never answer (a hard-excluded
     category, with no ExplicitAnswer on file) no longer excludes the whole
@@ -247,6 +327,38 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
 
         self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
         entry = draft.answers["What are your salary expectations?"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["required"])
+        self.assertEqual(entry["reason"], "hard_excluded_category")
+        self.assertEqual(llm_client.calls, [])
+
+
+    def test_required_standalone_checkbox_attestation_drafts_for_manual_review(self):
+        # A required CHECKBOX_ACKNOWLEDGEMENT field labeled with existing
+        # LEGAL_ATTESTATION phrasing (see apps/auto_apply/llm/categories.py)
+        # is not a FILE-type field, so it does not hit the one
+        # exclude-the-draft exception -- it floats up as a blank
+        # needs_review placeholder, same as any other hard-excluded
+        # required custom question, never auto-checked by the LLM.
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="I agree to the Terms of Service",
+                    field_type=CHECKBOX_ACKNOWLEDGEMENT,
+                    required=True,
+                    options=("Yes", "No"),
+                ),
+            )
+        )
+        form_client = FakeFormClient(schema=schema)
+        llm_client = FakeLLMClient()  # attestation is hard-excluded -- never called
+
+        draft = draft_for(self.user, self.job, form_client=form_client, llm_client=llm_client)
+
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["I agree to the Terms of Service"]
         self.assertEqual(entry["value"], "")
         self.assertTrue(entry["needs_review"])
         self.assertTrue(entry["required"])

@@ -39,6 +39,8 @@ class Question:
 
     id: str
     text: str
+    field_type: str = ""
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ class ResolutionReason:
     LOW_CONFIDENCE = "low_confidence"
     LLM_CALL_FAILED = "llm_call_failed"
     MISSING_LLM_RESPONSE = "missing_llm_response"
+    INVALID_OPTION = "invalid_option"
     OK = "ok"
 
 
