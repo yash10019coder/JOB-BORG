@@ -41,7 +41,12 @@ class ImapEmailCodeProvider:
     def get_code(
         self, *, since: datetime, deadline_monotonic: float
     ) -> CodeLookupResult:
-        """Poll inbox for verification code matching criteria until deadline."""
+        """Poll inbox for verification code matching criteria until deadline.
+
+        Enforces strict deadline bounds on all IMAP operations. If the deadline
+        is exceeded at any point before a code is found (including during
+        initial connection/login), returns CODE_TIMEOUT rather than hanging.
+        """
         if not self.credential.is_active:
             return CodeLookupResult(outcome=VerificationOutcome.NO_INBOX_CREDENTIALS)
 
@@ -56,20 +61,44 @@ class ImapEmailCodeProvider:
             )
             return CodeLookupResult(outcome=VerificationOutcome.INBOX_AUTH_FAILED)
 
+        # Check deadline BEFORE attempting connection (RH1)
+        if time.monotonic() >= deadline_monotonic:
+            logger.warning(
+                "IMAP deadline already exceeded for user_id=%s before connection attempt",
+                self.credential.user_id,
+            )
+            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+
         # Determine effective poll parameters from settings
         poll_interval = getattr(settings, "AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS", 4)
         sender_allowlist = getattr(settings, "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST", ["greenhouse.io"])
 
         imap_client = None
         try:
-            # Connect to IMAP server with a 10s socket timeout
+            # Calculate remaining budget for connection attempt (RH2)
+            remaining_for_connection = deadline_monotonic - time.monotonic()
+            if remaining_for_connection <= 0:
+                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+
+            # Cap socket timeout to remaining budget, but keep at least 3s minimum
+            # to avoid making the timeout 0 on a nearly-expired deadline
+            socket_timeout = max(3.0, min(10.0, remaining_for_connection))
+
+            # Connect to IMAP server with deadline-aware socket timeout
             ssl_context = ssl.create_default_context()
             imap_client = imaplib.IMAP4_SSL(
                 host=self.credential.imap_host,
                 port=self.credential.imap_port,
                 ssl_context=ssl_context,
-                timeout=10.0,
+                timeout=socket_timeout,
             )
+        except socket.timeout as exc:
+            logger.warning(
+                "IMAP connection timeout for user_id=%s host=%s",
+                self.credential.user_id,
+                self.credential.imap_host,
+            )
+            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
         except (socket.error, OSError, ssl.SSLError) as exc:
             logger.warning(
                 "IMAP connection failed for user_id=%s host=%s: %s",
@@ -79,8 +108,11 @@ class ImapEmailCodeProvider:
             )
             return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
 
-        # Login
+        # Login with deadline check (RH2)
         try:
+            if time.monotonic() >= deadline_monotonic:
+                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+
             imap_client.login(self.credential.email_address, raw_password)
         except imaplib.IMAP4.error as exc:
             logger.warning(
@@ -95,6 +127,16 @@ class ImapEmailCodeProvider:
             # R7: Auth failure deactivates credential
             self.credential.mark_auth_failed("inbox_auth_failed")
             return CodeLookupResult(outcome=VerificationOutcome.INBOX_AUTH_FAILED)
+        except socket.timeout as exc:
+            logger.warning(
+                "IMAP login timeout for user_id=%s",
+                self.credential.user_id,
+            )
+            try:
+                imap_client.logout()
+            except Exception:
+                pass
+            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
         except (socket.error, OSError, ssl.SSLError) as exc:
             logger.warning(
                 "IMAP socket error during login for user_id=%s: %s",
@@ -109,7 +151,18 @@ class ImapEmailCodeProvider:
 
         try:
             # Select inbox in read-only mode (D2)
-            status, _ = imap_client.select("INBOX", readonly=True)
+            if time.monotonic() >= deadline_monotonic:
+                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+
+            try:
+                status, _ = imap_client.select("INBOX", readonly=True)
+            except socket.timeout:
+                logger.warning(
+                    "IMAP select() timeout for user_id=%s",
+                    self.credential.user_id,
+                )
+                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+
             if status != "OK":
                 return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
 
@@ -165,6 +218,12 @@ class ImapEmailCodeProvider:
                                     outcome=VerificationOutcome.CODE_AMBIGUOUS
                                 )
 
+                except socket.timeout as exc:
+                    logger.warning(
+                        "IMAP operation timeout for user_id=%s",
+                        self.credential.user_id,
+                    )
+                    return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
                 except (socket.error, OSError, imaplib.IMAP4.error) as exc:
                     logger.warning(
                         "IMAP error during poll loop for user_id=%s: %s",

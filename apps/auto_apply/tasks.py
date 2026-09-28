@@ -51,6 +51,14 @@ _SWEEP_SAFETY_MARGIN_SECONDS = 60
 # occupying a worker slot with no AutoApplyDraft ever created.
 _DRAFT_HARD_KILL_SECONDS = 180
 
+# Per-user verification lock timeout (RH4). Much shorter than the overall
+# submission budget to ensure stale locks don't accumulate for very long if a
+# task is killed (SIGKILL) before the finally block runs to clean up. If a
+# legitimate submission takes longer than this to complete, the lock is freed
+# anyway and a concurrent submission can start (both will fail closed if
+# verification actually succeeds for one but the other races ahead).
+_VERIFICATION_LOCK_TIMEOUT_SECONDS = 120
+
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
@@ -153,7 +161,9 @@ def submit_auto_apply_draft(draft_id):
     lock_key = f"auto_apply:verification_lock:{draft.user_id}"
     acquired_lock = False
     if provider is not None:
-        acquired_lock = bool(cache.add(lock_key, "1", timeout=int(budget)))
+        # RH4: Use fixed, safe lock timeout independent of submission budget
+        # to prevent stale locks if task is killed before cleanup runs
+        acquired_lock = bool(cache.add(lock_key, "1", timeout=_VERIFICATION_LOCK_TIMEOUT_SECONDS))
         if not acquired_lock:
             logger.warning(
                 "submit_auto_apply_draft(draft_id=%s): could not acquire verification lock for user_id=%s.",

@@ -1249,6 +1249,15 @@ class GreenhouseFormClient:
                         outcome=lookup_res.outcome,
                     )
 
+                # RH3: Deadline check after code fetch completes. If code fetching
+                # consumed most of the remaining budget, fail closed rather than
+                # attempting to fill/submit with no time left.
+                if time.monotonic() >= deadline:
+                    raise GreenhouseFormVerificationFailed(
+                        "Deadline expired after fetching verification code",
+                        outcome=VerificationOutcome.CODE_TIMEOUT,
+                    )
+
                 # R9: Code typed! Enter code and submit. Debug artifact capture MUST be suppressed
                 # on the post-code path so live OTP is never written to disk -- this covers the
                 # success check too (not just fill/submit): a Playwright race right after a
