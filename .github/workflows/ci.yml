@@ -21,7 +21,8 @@ jobs:
         image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: jobborg
-          POSTGRES_PASSWORD: jobborg
+          # Ephemeral service container reachable only from this job: no password.
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: jobborg
         ports:
           - 5432:5432
@@ -31,7 +32,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://jobborg:jobborg@localhost:5432/jobborg
+      DATABASE_URL: postgres://jobborg@localhost:5432/jobborg
       DJANGO_SETTINGS_MODULE: config.settings.test
     steps:
       - uses: actions/checkout@v4
