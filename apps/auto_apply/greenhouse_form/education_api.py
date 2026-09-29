@@ -102,6 +102,8 @@ def fetch_full_list(
             )
             if total_count is None:
                 total_count = (body.get("meta") or {}).get("total_count")
+                if type(total_count) is not int or total_count < 0:
+                    return None
             if not page_items or total_count is None or len(items) >= total_count:
                 break
             page_number += 1

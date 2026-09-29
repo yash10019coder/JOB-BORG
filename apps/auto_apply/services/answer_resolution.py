@@ -50,7 +50,16 @@ _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
 }
 
 
-_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor|\bvisa\b", re.IGNORECASE)
+_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor", re.IGNORECASE)
+_AMBIGUOUS_AUTHORIZATION_QUESTION = re.compile(
+    r"\bh-?1b\b|\bimmigration\b|\bwork[ -]permit\b|\bcitizenship\b",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_QUESTION = re.compile(
+    r"\bwork authoriz|\bauthoriz(?:ed|ation) to work\b|"
+    r"\beligib(?:le|ility) to work\b|\bright to work\b",
+    re.IGNORECASE,
+)
 
 
 def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
@@ -60,13 +69,20 @@ def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ..
     sponsorship?" classify as WORK_AUTHORIZATION, but their answers are not
     interchangeable -- "No" to one means the opposite of "No" to the other, so
     a saved answer for the wrong sub-category must never be used. Split them by
-    question wording; a question that mentions neither is a plain
-    work-authorization question.
+    question wording; ambiguous status questions and combined questions
+    require human review.
     """
     if category == QuestionCategory.WORK_AUTHORIZATION:
-        if _SPONSORSHIP_QUESTION.search(question_text or ""):
+        text = question_text or ""
+        sponsorship = _SPONSORSHIP_QUESTION.search(text)
+        authorization = _AUTHORIZATION_QUESTION.search(text)
+        if _AMBIGUOUS_AUTHORIZATION_QUESTION.search(text) or (sponsorship and authorization):
+            return ()
+        if sponsorship:
             return (ExplicitAnswer.Category.SPONSORSHIP,)
-        return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
+        if authorization:
+            return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
+        return ()
     return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
 
 

@@ -577,6 +577,94 @@ class GreenhouseFormClientTests(SimpleTestCase):
             )
         self.assertIsInstance(ctx.exception, GreenhouseFormSubmissionUnconfirmed)
 
+    def test_confirmation_exception_after_click_is_unconfirmed(self):
+        client = self._client(_fixture_html("greenhouse_preexisting_status_form.html"))
+        with patch.object(client, "_click_submit", wraps=client._click_submit) as click, patch.object(
+            client, "_confirm_success", side_effect=RuntimeError("confirmation failed")
+        ):
+            with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+                client.submit(JOB_URL, {"First Name": "Ada"})
+        click.assert_called_once()
+
+    def test_click_exception_after_dispatch_is_unconfirmed(self):
+        from playwright.sync_api import Locator
+
+        original_click = Locator.click
+
+        def click_then_raise(locator, *args, **kwargs):
+            original_click(locator, *args, **kwargs)
+            raise RuntimeError("navigation failed after click")
+
+        client = self._client(_fixture_html("greenhouse_preexisting_status_form.html"))
+        with patch.object(Locator, "click", autospec=True, side_effect=click_then_raise), patch.object(
+            client, "_confirm_success"
+        ) as confirm:
+            with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+                client.submit(JOB_URL, {"First Name": "Ada"})
+        confirm.assert_not_called()
+
+    def test_actionability_failure_before_dispatch_is_failed(self):
+        from playwright.sync_api import Locator
+
+        original_click = Locator.click
+        html = _fixture_html("greenhouse_preexisting_status_form.html").replace(
+            '<button type="submit">', '<button type="submit" style="visibility:hidden">'
+        )
+        client = self._client(html)
+        with patch.object(
+            Locator, "click", autospec=True,
+            side_effect=lambda locator: original_click(locator, timeout=200),
+        ):
+            with self.assertRaises(GreenhouseFormSubmissionFailed) as caught:
+                client.submit(JOB_URL, {"First Name": "Ada"})
+        self.assertNotIsInstance(caught.exception, GreenhouseFormSubmissionUnconfirmed)
+
+    def test_unchanged_confirmation_phrase_in_status_is_not_new_evidence(self):
+        html = _fixture_html("greenhouse_preexisting_status_form.html").replace(
+            "Your progress is saved automatically.", "Thanks for applying!"
+        )
+        with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+            self._client(html, confirmation_timeout_ms=300).submit(JOB_URL, {"First Name": "Ada"})
+
+    def test_existing_body_phrase_can_confirm_in_a_new_status_region(self):
+        html = _fixture_html("greenhouse_preexisting_status_form.html").replace(
+            '<div role="status">Your progress is saved automatically.</div>',
+            '<p>thanks for applying</p>',
+        ).replace(
+            "e.preventDefault();",
+            "e.preventDefault(); document.querySelector('p').setAttribute('role', 'status');",
+        )
+        result = self._client(html).submit(JOB_URL, {"First Name": "Ada"})
+        self.assertTrue(result.success)
+        self.assertEqual(result.confirmation_text, "thanks for applying")
+
+    def test_updated_status_with_existing_phrase_confirms(self):
+        html = _fixture_html("greenhouse_preexisting_status_form.html").replace(
+            "Your progress is saved automatically.", "Thanks for applying!"
+        ).replace(
+            "e.preventDefault();",
+            "e.preventDefault(); document.querySelector('[role=status]').textContent = "
+            "'Thanks for applying! Application received.';",
+        )
+        self.assertTrue(self._client(html).submit(JOB_URL, {"First Name": "Ada"}).success)
+
+    def test_existing_phrase_on_new_document_at_same_url_confirms(self):
+        html = _fixture_html("greenhouse_preexisting_status_form.html").replace(
+            '<div role="status">Your progress is saved automatically.</div>',
+            '<p>thanks for applying</p>',
+        ).replace("e.preventDefault();", "e.preventDefault(); location.reload();")
+
+        def factory():
+            context = self._browser.new_context()
+            responses = iter((html, "<html><body>thanks for applying</body></html>"))
+            context.route(JOB_URL, lambda route: route.fulfill(
+                status=200, content_type="text/html", body=next(responses)
+            ))
+            return _TestContextHandle(context)
+
+        result = GreenhouseFormClient(context_factory=factory).submit(JOB_URL, {"First Name": "Ada"})
+        self.assertTrue(result.success)
+
     # -- required unsupported field type ----------------------------------
 
     def test_required_unsupported_field_type_raises_schema_mismatch(self):

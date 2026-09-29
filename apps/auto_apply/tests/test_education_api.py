@@ -126,6 +126,20 @@ class FetchFullListTests(SimpleTestCase):
 
         self.assertIsNone(cache.get("greenhouse_education_api:acme-empty-page:schools"))
 
+    def test_invalid_total_counts_return_none_without_caching(self):
+        from django.core.cache import cache
+
+        for index, count in enumerate((-1, True, "1", 1.5)):
+            with self.subTest(total_count=count):
+                board = f"acme-invalid-count-{index}"
+                cache_key = f"greenhouse_education_api:{board}:schools"
+                cache.delete(cache_key)
+                session = FakeSession({1: _page(["Only School"], count)})
+
+                self.assertIsNone(fetch_full_list(board, "schools", session=session))
+                self.assertIsNone(cache.get(cache_key))
+                self.assertEqual(len(session.calls), 1)
+
     def test_result_is_cached_across_calls_for_same_board_and_type(self):
         session = FakeSession({1: _page(["Cached School"], 1)})
 

@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import RestrictedError
 from django.test import TestCase
 
 from apps.applications.models import JobApplication
@@ -130,7 +131,7 @@ class JobApplicationRestrictTests(TestCase):
         self.assertEqual(AutoApplyDraft.objects.count(), 0)
 
     def test_deleting_only_the_job_application_is_still_refused(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(RestrictedError):
             JobApplication.objects.get().delete()
 
 

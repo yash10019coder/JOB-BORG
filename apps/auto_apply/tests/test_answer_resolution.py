@@ -316,3 +316,30 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
 
         self.assertNotEqual(resolved.answer, "US Citizen")
         self.assertTrue(resolved.needs_review)
+
+    def test_ambiguous_questions_require_review_despite_saved_answers(self):
+        for category in (ExplicitAnswer.Category.WORK_AUTHORIZATION, ExplicitAnswer.Category.SPONSORSHIP):
+            ExplicitAnswer.objects.create(user=self.user, category=category, answer_text="No")
+
+        for text in (
+            "Do you currently hold H-1B status?",
+            "Do you currently hold a valid H1B visa?",
+            "Do you need H-1B sponsorship?",
+            "What is your immigration status?",
+            "Do you hold a work permit?",
+            "Do you have a visa?",
+            "What is your citizenship status?",
+            "Are you authorized to work or do you require sponsorship?",
+            "Are you eligible to work without visa sponsorship?",
+            "Do you have the right to work without sponsorship?",
+        ):
+            with self.subTest(text=text):
+                client = FakeLLMClient()
+                question = Question(id="q", text=text, field_type="text")
+                resolved = resolve_field_answers(
+                    self.user, [question], self.profile.resume_text, self.profile, client
+                )[0]
+                self.assertIsNone(resolved.answer)
+                self.assertTrue(resolved.needs_review)
+                self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
+                self.assertEqual(client.calls, [])

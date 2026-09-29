@@ -24,6 +24,7 @@ Every ``inspect()``/``submit()`` call runs against a fresh, isolated
 Playwright browser context (no shared cookies/storage across calls),
 constructed via an injectable ``context_factory`` and torn down after use.
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import time
 import uuid
@@ -58,6 +59,13 @@ from .field_mapping import (
     SubmissionResult,
     schema_matches,
 )
+
+@dataclass(frozen=True)
+class _SuccessSignals:
+    document_id: str
+    status_text: str
+    phrases: tuple[str, ...]
+
 
 # Hostnames a job_url is allowed to point at before this client will
 # navigate to it -- defense-in-depth given the browser executes arbitrary
@@ -349,23 +357,27 @@ class GreenhouseFormClient:
                 )
 
             clicked = False
+
+            def mark_dispatched():
+                nonlocal clicked
+                clicked = True
+
             try:
                 self._fill_answers(page, schema_now, answers)
                 self._raise_on_newly_revealed_required_fields(page, job_url, schema_now)
                 # A status region / confirmation phrase already on the page
                 # before Submit is not evidence of success -- remember it so
                 # only a NEW signal counts.
-                pre_existing = self._check_success_signal(page)
-                ignore_text = pre_existing.confirmation_text if pre_existing else None
+                pre_existing = self._read_success_signals(page)
                 submitted_at = datetime.now(timezone.utc)
-                self._click_submit(page, schema_now)
+                self._click_submit(page, schema_now, on_dispatch=mark_dispatched)
                 clicked = True
                 result = self._confirm_success(
                     page,
                     provider=provider,
                     submitted_at=submitted_at,
                     deadline_monotonic=deadline_monotonic,
-                    ignore_text=ignore_text,
+                    ignore_signals=pre_existing,
                 )
             except (
                 GreenhouseFormChallenged,
@@ -1111,7 +1123,9 @@ class GreenhouseFormClient:
             )
         return candidate
 
-    def _click_submit(self, page, schema: FormSchema | None = None) -> None:
+    def _click_submit(
+        self, page, schema: FormSchema | None = None, *, on_dispatch: Callable[[], None]
+    ) -> None:
         submit_button = page.get_by_role("button", name="Submit", exact=False)
         if submit_button.count() == 0:
             submit_button = page.locator('button[type="submit"], input[type="submit"]')
@@ -1132,6 +1146,21 @@ class GreenhouseFormClient:
                 f"Submit button is disabled; the click would be a silent no-op.{detail}"
             )
 
+        # Notify Python from the actual trusted click, before the site's
+        # handlers can navigate or close the page. A click() error while
+        # waiting for navigation must not make a dispatched submit retryable.
+        binding = f"__jobborg_submit_{uuid.uuid4().hex}"
+        page.expose_binding(binding, lambda source: on_dispatch())
+        submit_button.evaluate(
+            """(button, binding) => {
+                window.addEventListener('click', event => {
+                    if (event.isTrusted && event.composedPath().includes(button)) {
+                        window[binding]();
+                    }
+                }, {capture: true});
+            }""",
+            binding,
+        )
         submit_button.click()
 
     @staticmethod
@@ -1191,7 +1220,7 @@ class GreenhouseFormClient:
         provider: EmailCodeProvider | None = None,
         submitted_at: datetime | None = None,
         deadline_monotonic: float | None = None,
-        ignore_text: str | None = None,
+        ignore_signals: _SuccessSignals | None = None,
     ) -> SubmissionResult | None:
 
         """Poll for a post-submit outcome until ``confirmation_timeout_ms``
@@ -1228,7 +1257,7 @@ class GreenhouseFormClient:
         # multi-minute task budget.
         poll_deadline = min(deadline, time.monotonic() + self.confirmation_timeout_ms / 1000)
         while True:
-            result = self._check_success_signal(page, ignore_text)
+            result = self._check_success_signal(page, ignore_signals)
             if result is not None:
                 return result
             if self._verification_interstitial_detected(page):
@@ -1294,7 +1323,7 @@ class GreenhouseFormClient:
                         ).first
                         submit_button.click()
                         page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                        post_code_check = self._check_success_signal(page, ignore_text)
+                        post_code_check = self._check_success_signal(page, ignore_signals)
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -1325,25 +1354,38 @@ class GreenhouseFormClient:
     def _deadline_expired(deadline: float) -> bool:
         return time.monotonic() >= deadline
 
-    def _check_success_signal(self, page, ignore_text: str | None = None) -> SubmissionResult | None:
-        # Signal 1: an explicit ARIA status live region, if the board
-        # renders one -- cheap and unambiguous when present.
+    def _read_success_signals(self, page) -> _SuccessSignals:
+        # A fresh document may confirm with exactly the same words that were
+        # present on the form, including when navigation keeps the same URL.
+        document_id = page.evaluate(
+            "id => window.__jobborg_document_id ||= id", uuid.uuid4().hex
+        )
         status = page.get_by_role("status")
-        if status.count() > 0:
-            text = status.first.inner_text().strip()
-            if text and text != ignore_text:
-                return SubmissionResult(success=True, confirmation_text=text)
-
-        # Signal 2: known confirmation phrasing anywhere in the rendered
-        # page text. Only specific, positive multi-word phrases are
-        # matched -- never element presence/absence alone -- so this can't
-        # be tricked by an error banner that happens to render after
-        # submit (see _CONFIRMATION_TEXT_PATTERNS).
+        status_text = status.first.inner_text().strip() if status.count() else ""
         body_text = page.locator("body").inner_text().lower()
-        for phrase in _CONFIRMATION_TEXT_PATTERNS:
-            if phrase in body_text and phrase != ignore_text:
-                return SubmissionResult(success=True, confirmation_text=phrase)
+        return _SuccessSignals(
+            document_id=document_id,
+            status_text=status_text,
+            phrases=tuple(phrase for phrase in _CONFIRMATION_TEXT_PATTERNS if phrase in body_text),
+        )
 
+    def _check_success_signal(
+        self, page, ignore_signals: _SuccessSignals | None = None
+    ) -> SubmissionResult | None:
+        signals = self._read_success_signals(page)
+        if ignore_signals and signals.document_id != ignore_signals.document_id:
+            ignore_signals = None
+
+        # Compare each signal to its own pre-submit value. Status text and
+        # body phrases can overlap, but are not interchangeable evidence.
+        if signals.status_text and (
+            ignore_signals is None or signals.status_text != ignore_signals.status_text
+        ):
+            return SubmissionResult(success=True, confirmation_text=signals.status_text)
+
+        for phrase in signals.phrases:
+            if ignore_signals is None or phrase not in ignore_signals.phrases:
+                return SubmissionResult(success=True, confirmation_text=phrase)
         return None
 
     @staticmethod

@@ -1,7 +1,12 @@
+import tempfile
+from unittest import mock
+
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory, TestCase
 
-from apps.accounts.admin import UnresolvedTargetLocationFilter
+from apps.accounts.admin import ProfileAdmin, UnresolvedTargetLocationFilter
 from apps.accounts.models import Profile
 
 User = get_user_model()
@@ -40,14 +45,12 @@ class UnresolvedTargetLocationFilterTests(TestCase):
 
 
 class ProfileAdminSaveModelTests(TestCase):
+    def setUp(self):
+        media = tempfile.TemporaryDirectory()
+        self.addCleanup(media.cleanup)
+        self.enterContext(self.settings(MEDIA_ROOT=media.name))
+
     def test_changing_the_resume_does_not_drop_other_edited_fields(self):
-        from unittest import mock
-
-        from django.contrib.admin.sites import AdminSite
-        from django.core.files.uploadedfile import SimpleUploadedFile
-
-        from apps.accounts.admin import ProfileAdmin
-
         user = User.objects.create_user(username="grace", password="pw")
         profile = user.profile
         upload = SimpleUploadedFile("cv.pdf", b"%PDF-1.4 minimal", content_type="application/pdf")
@@ -55,9 +58,51 @@ class ProfileAdminSaveModelTests(TestCase):
         profile.resume = upload
 
         form = mock.Mock(changed_data=["resume", "full_name"], cleaned_data={"resume": upload}, initial={"resume": None})
-        with mock.patch("apps.accounts.tasks.parse_resume.delay"):
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse:
             ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, True)
 
         profile.refresh_from_db()
         self.assertEqual(profile.full_name, "Grace Hopper")
         self.assertTrue(profile.resume)
+        parse.assert_called_once_with(profile.pk)
+
+    def test_creating_a_profile_with_a_resume_saves_fields_and_queues_parsing(self):
+        user = User.objects.create_user(username="new-profile", password="pw")
+        user.profile.delete()
+        upload = SimpleUploadedFile("resume.txt", b"Grace Hopper")
+        profile = Profile(user=user, full_name="Grace Hopper", resume=upload)
+        form = mock.Mock(
+            changed_data=["resume", "full_name"], cleaned_data={"resume": upload}, initial={}
+        )
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse:
+            ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, False)
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.full_name, "Grace Hopper")
+        self.assertTrue(profile.resume)
+        self.assertEqual(profile.resume_text, "")
+        parse.assert_called_once_with(profile.pk)
+
+    def test_clearing_a_resume_clears_text_without_queuing_parsing(self):
+        profile = User.objects.create_user(username="clear-profile", password="pw").profile
+        profile.resume = SimpleUploadedFile("resume.txt", b"Old resume")
+        profile.resume_text = "Old resume"
+        profile.save()
+        initial_resume = profile.resume
+        profile.resume = None
+        profile.full_name = "Updated Name"
+        form = mock.Mock(
+            changed_data=["resume", "full_name"],
+            cleaned_data={"resume": False},
+            initial={"resume": initial_resume},
+        )
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse:
+            ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, True)
+
+        profile.refresh_from_db()
+        self.assertFalse(profile.resume)
+        self.assertEqual(profile.resume_text, "")
+        self.assertEqual(profile.full_name, "Updated Name")
+        parse.assert_not_called()
