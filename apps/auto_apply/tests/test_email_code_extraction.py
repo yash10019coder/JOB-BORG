@@ -19,6 +19,37 @@ class SenderAllowlistTests(SimpleTestCase):
         self.assertFalse(is_sender_allowed("no-reply@evil-greenhouse.io", ["greenhouse.io"]))
         self.assertFalse(is_sender_allowed("attacker@gmail.com", ["greenhouse.io"]))
 
+    def test_default_allowlist_accepts_greenhouses_real_sending_domain(self):
+        """Regression: Greenhouse sends verification codes from
+        no-reply@us.greenhouse-mail.io, not greenhouse.io, so the default
+        allowlist used to reject the real email and verification failed."""
+        from django.conf import settings
+
+        allowlist = settings.AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST
+        self.assertTrue(
+            is_sender_allowed("Greenhouse <no-reply@us.greenhouse-mail.io>", allowlist)
+        )
+        self.assertFalse(
+            is_sender_allowed("no-reply@evil-greenhouse-mail.io", allowlist)
+        )
+
+    def test_real_greenhouse_email_yields_code_under_default_allowlist(self):
+        from django.conf import settings
+
+        raw = (
+            b"From: Greenhouse <no-reply@us.greenhouse-mail.io>\r\n"
+            b"Subject: Security code for your application to Carr Allison\r\n"
+            b"Date: Tue, 29 Sep 2026 13:15:48 +0000\r\n"
+            b"\r\nCopy and paste this code into the security code field on your "
+            b"application: aB3dE5gH\r\nAfter you enter the code, resubmit your application."
+        )
+        code = evaluate_email_candidate(
+            raw,
+            datetime(2026, 9, 29, 13, 0, tzinfo=timezone.utc),
+            settings.AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST,
+        )
+        self.assertEqual(code, "aB3dE5gH")
+
     def test_full_email_matching(self):
         self.assertTrue(
             is_sender_allowed("no-reply@greenhouse.io", ["no-reply@greenhouse.io"])
