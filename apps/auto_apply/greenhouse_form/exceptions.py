@@ -44,6 +44,12 @@ class GreenhouseFormSubmissionFailed(GreenhouseFormError):
     """The form was filled and submitted but success could not be confirmed."""
 
 
+class GreenhouseFormSubmissionUnconfirmed(GreenhouseFormSubmissionFailed):
+    """Submit was clicked but no confirmation was seen (or the run broke
+    after the click). The employer may already have received the application,
+    so this must not be presented as a clean, safely retryable failure."""
+
+
 class GreenhouseFormVerificationFailed(GreenhouseFormError):
     """Greenhouse's post-submit email-verification interstitial was detected or failed verification."""
 

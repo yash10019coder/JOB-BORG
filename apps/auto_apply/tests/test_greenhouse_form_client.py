@@ -27,6 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
@@ -553,6 +554,28 @@ class GreenhouseFormClientTests(SimpleTestCase):
         )
 
         self.assertTrue(result.success)
+
+    def test_preexisting_status_text_is_not_treated_as_a_confirmation(self):
+        # A status region already on the page before Submit (e.g. an autosave
+        # notice) must not count as success; with nothing new after the click
+        # the submission is "unconfirmed", not silently marked applied.
+        html = _fixture_html("greenhouse_preexisting_status_form.html")
+        schema = self._client(html).inspect(JOB_URL)
+
+        with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+            self._client(html, confirmation_timeout_ms=800).submit(
+                JOB_URL, {"First Name": "Ada"}, expected_schema=schema
+            )
+
+    def test_no_confirmation_after_click_raises_unconfirmed_subclass_of_failed(self):
+        html = _fixture_html("greenhouse_preexisting_status_form.html")
+        schema = self._client(html).inspect(JOB_URL)
+
+        with self.assertRaises(GreenhouseFormSubmissionFailed) as ctx:
+            self._client(html, confirmation_timeout_ms=800).submit(
+                JOB_URL, {"First Name": "Ada"}, expected_schema=schema
+            )
+        self.assertIsInstance(ctx.exception, GreenhouseFormSubmissionUnconfirmed)
 
     # -- required unsupported field type ----------------------------------
 

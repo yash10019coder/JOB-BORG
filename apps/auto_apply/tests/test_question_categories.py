@@ -15,7 +15,7 @@ from apps.auto_apply.llm.categories import (
 
 
 class HardExcludedCategoriesContractTests(SimpleTestCase):
-    def test_hard_excluded_categories_are_exactly_the_sensitive_four(self):
+    def test_hard_excluded_categories_are_exactly_the_sensitive_five(self):
         self.assertEqual(
             HARD_EXCLUDED_CATEGORIES,
             frozenset(
@@ -24,6 +24,7 @@ class HardExcludedCategoriesContractTests(SimpleTestCase):
                     QuestionCategory.LEGAL_ATTESTATION,
                     QuestionCategory.BACKGROUND_CHECK,
                     QuestionCategory.SALARY_EXPECTATION,
+                    QuestionCategory.DEMOGRAPHIC,
                 }
             ),
         )
@@ -135,3 +136,26 @@ class ClassificationIsCaseInsensitiveTests(SimpleTestCase):
             classify("WILL YOU REQUIRE VISA SPONSORSHIP?"),
             QuestionCategory.WORK_AUTHORIZATION,
         )
+
+
+class DemographicClassificationTests(SimpleTestCase):
+    def test_self_identification_questions_are_demographic_and_hard_excluded(self):
+        for text in (
+            "What is your gender?",
+            "Please select your race/ethnicity",
+            "Are you a protected veteran?",
+            "Do you have a disability?",
+            "What are your pronouns?",
+            "Are you Hispanic or Latino?",
+            "What is your sexual orientation?",
+        ):
+            with self.subTest(text=text):
+                category = classify(text)
+                self.assertEqual(category, QuestionCategory.DEMOGRAPHIC)
+                self.assertIn(category, HARD_EXCLUDED_CATEGORIES)
+
+    def test_bare_salary_wording_is_salary_expectation(self):
+        self.assertEqual(classify("What salary are you looking for?"), QuestionCategory.SALARY_EXPECTATION)
+
+    def test_ordinary_questions_stay_generic(self):
+        self.assertEqual(classify("Why do you want to work here?"), QuestionCategory.GENERIC)

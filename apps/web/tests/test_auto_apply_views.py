@@ -435,6 +435,30 @@ class SendAutoApplyDraftTests(AutoApplyViewsTestCase):
         self.assertRedirects(response, reverse("auto_apply_queue"))
 
     @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_bumps_updated_at_so_the_sweep_leaves_a_fresh_send_alone(self, mock_task):
+        # `.update()` skips auto_now: a draft that sat in the queue before Send
+        # kept its old updated_at and the 5-minute sweep then recovered the
+        # in-flight send as "stuck".
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.auto_apply.tasks import sweep_stale_auto_apply_drafts
+
+        job = self._job()
+        draft = self._draft(self.alice, job)
+        AutoApplyDraft.objects.filter(pk=draft.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=10)
+        )
+        client = self._client_for(self.alice)
+
+        client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        sweep_stale_auto_apply_drafts()
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
     def test_send_blocked_when_required_field_still_blank(self, mock_task):
         job = self._job()
         draft = self._draft(

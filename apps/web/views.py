@@ -9,6 +9,7 @@ from django.core.paginator import Paginator
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
@@ -179,6 +180,10 @@ _REASON_CODE_MESSAGES = {
     ),
     AutoApplyDraft.ReasonCode.SUBMISSION_FAILED: (
         "The application couldn't be submitted; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED: (
+        "We couldn't confirm this application went through. It may already have been "
+        "submitted \u2014 check your email before trying again."
     ),
     AutoApplyDraft.ReasonCode.SENDING_TIMEOUT: (
         "Submission timed out and wasn't completed; you can try again."
@@ -408,9 +413,12 @@ def send_auto_apply_draft(request, pk):
         )
         return redirect("auto_apply_queue")
 
+    # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
+    # sweep keys off it, and a draft that sat in the queue before Send would
+    # otherwise look "stuck in SENDING" the moment it is sent.
     updated = AutoApplyDraft.objects.filter(
         pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
-    ).update(status=AutoApplyDraft.Status.SENDING)
+    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
     if not updated:
         raise Http404("Draft not found or not sendable.")
 

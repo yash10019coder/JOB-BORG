@@ -16,6 +16,8 @@ its one-call-per-batch behavior for the remainder.
 """
 from __future__ import annotations
 
+import re
+
 from apps.auto_apply.llm.base import (
     AnswerInferenceClient,
     Question,
@@ -46,6 +48,26 @@ _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     QuestionCategory.SALARY_EXPECTATION: (ExplicitAnswer.Category.SALARY_EXPECTATION,),
 }
+
+
+_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor|\bvisa\b", re.IGNORECASE)
+
+
+def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
+    """Which `ExplicitAnswer` categories may answer this question.
+
+    Both "Are you authorized to work?" and "Will you require visa
+    sponsorship?" classify as WORK_AUTHORIZATION, but their answers are not
+    interchangeable -- "No" to one means the opposite of "No" to the other, so
+    a saved answer for the wrong sub-category must never be used. Split them by
+    question wording; a question that mentions neither is a plain
+    work-authorization question.
+    """
+    if category == QuestionCategory.WORK_AUTHORIZATION:
+        if _SPONSORSHIP_QUESTION.search(question_text or ""):
+            return (ExplicitAnswer.Category.SPONSORSHIP,)
+        return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
+    return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
 
 
 def resolve_field_answers(
@@ -79,7 +101,7 @@ def resolve_field_answers(
     for question in questions:
         category = classify(question.text)
         explicit = None
-        for candidate_category in _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ()):
+        for candidate_category in _explicit_categories_for(question.text, category):
             if candidate_category in explicit_by_category:
                 explicit = explicit_by_category[candidate_category]
                 break

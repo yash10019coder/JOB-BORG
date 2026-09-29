@@ -37,7 +37,14 @@ class ProfileAdmin(admin.ModelAdmin):
         trigger convention `set_resume()` exists to centralize.
         """
         if "resume" in form.changed_data:
-            obj.set_resume(obj.resume)
+            # Save every other field first (this also creates the row on the
+            # add view), then apply the resume change through set_resume() --
+            # which only saves resume fields -- so nothing else edited in the
+            # same submit is silently dropped. Mirrors ProfileForm.save().
+            new_resume = form.cleaned_data.get("resume")
+            obj.resume = form.initial.get("resume") or None
+            super().save_model(request, obj, form, change)
+            obj.set_resume(new_resume)
             return
 
         super().save_model(request, obj, form, change)

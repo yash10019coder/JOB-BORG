@@ -100,6 +100,40 @@ class AutoApplyDraftModelTests(TestCase):
             application.delete()
 
 
+class JobApplicationRestrictTests(TestCase):
+    """RESTRICT (not PROTECT): deleting the owner still works even though an
+    APPLIED draft links to a JobApplication that is deleted in the same
+    cascade -- account deletion / job cleanup must not fail."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="erin", password="pw")
+        self.employer = Employer.objects.create(name="Acme", slug="acme-restrict")
+        self.job = Job.objects.create(
+            source_ats="greenhouse", source_job_id="r1", employer=self.employer,
+            title="Engineer", source_url="https://job-boards.greenhouse.io/acme/jobs/r1",
+        )
+        application = JobApplication.objects.create(
+            user=self.user, job=self.job, status=JobApplication.Status.APPLIED
+        )
+        AutoApplyDraft.objects.create(
+            user=self.user, job=self.job, status=AutoApplyDraft.Status.APPLIED,
+            job_application=application,
+        )
+
+    def test_deleting_the_user_cascades_through_an_applied_draft(self):
+        self.user.delete()
+        self.assertEqual(AutoApplyDraft.objects.count(), 0)
+        self.assertEqual(JobApplication.objects.count(), 0)
+
+    def test_deleting_the_job_cascades_through_an_applied_draft(self):
+        self.job.delete()
+        self.assertEqual(AutoApplyDraft.objects.count(), 0)
+
+    def test_deleting_only_the_job_application_is_still_refused(self):
+        with self.assertRaises(Exception):
+            JobApplication.objects.get().delete()
+
+
 class ExplicitAnswerModelTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="bob", password="pw")

@@ -83,6 +83,7 @@ class AutoApplyDraft(models.Model):
         UNANSWERABLE_REQUIRED = "unanswerable_required", "Required question unanswered"
         CAPTCHA_CHALLENGED = "captcha_challenged", "Bot-detection challenge"
         SUBMISSION_FAILED = "submission_failed", "Submission rejected"
+        SUBMISSION_UNCONFIRMED = "submission_unconfirmed", "Submission not confirmed"
         SENDING_TIMEOUT = "sending_timeout", "Submission timed out"
         UNEXPECTED_ERROR = "unexpected_error", "Unexpected error"
         NO_INBOX_CREDENTIALS = "no_inbox_credentials", "No inbox credentials connected"
@@ -109,14 +110,15 @@ class AutoApplyDraft(models.Model):
     )
     job_application = models.ForeignKey(
         "applications.JobApplication",
-        on_delete=models.PROTECT,
+        on_delete=models.RESTRICT,
         related_name="auto_apply_drafts",
         null=True,
         blank=True,
         help_text=(
             "Set only once a send succeeds and links to the real "
-            "JobApplication record; PROTECT so a completed auto-apply's "
-            "link to its submission never silently cascade-deletes."
+            "JobApplication record; RESTRICT (not PROTECT) so a direct "
+            "JobApplication delete is still refused, while deleting the "
+            "owning User or Job -- which cascades to both rows -- still works."
         ),
     )
     status = models.CharField(

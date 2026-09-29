@@ -261,3 +261,58 @@ class MultiValueOptionFieldTests(TestCase):
         self.assertIsNone(resolved.answer)
         self.assertTrue(resolved.needs_review)
         self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+
+class WorkAuthorizationSponsorshipSplitTests(TestCase):
+    """"Are you authorized to work?" and "Will you require sponsorship?" both
+    classify as WORK_AUTHORIZATION but are opposite in meaning; a saved answer
+    for one must never answer the other."""
+
+    AUTH_Q = "Are you legally authorized to work in the United States?"
+    SPONSOR_Q = "Will you now or in the future require visa sponsorship?"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="frank", password="pw", email="frank@example.com"
+        )
+        self.profile = self.user.profile
+        self.profile.resume_text = "Frank."
+        self.profile.save()
+
+    def _resolve(self, question_text):
+        question = Question(id=question_text, text=question_text, field_type="text", options=None)
+        return resolve_field_answers(
+            self.user, [question], self.profile.resume_text, self.profile, FakeLLMClient()
+        )[0]
+
+    def test_each_question_gets_its_own_saved_answer(self):
+        ExplicitAnswer.objects.create(
+            user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
+        )
+        ExplicitAnswer.objects.create(
+            user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
+        )
+
+        self.assertEqual(self._resolve(self.AUTH_Q).answer, "US Citizen")
+        self.assertEqual(self._resolve(self.SPONSOR_Q).answer, "No")
+
+    def test_saved_sponsorship_answer_is_not_used_for_the_authorization_question(self):
+        ExplicitAnswer.objects.create(
+            user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP,
+            answer_text="No, I do not require sponsorship.",
+        )
+
+        resolved = self._resolve(self.AUTH_Q)
+
+        self.assertNotEqual(resolved.answer, "No, I do not require sponsorship.")
+        self.assertTrue(resolved.needs_review)
+
+    def test_saved_authorization_answer_is_not_used_for_the_sponsorship_question(self):
+        ExplicitAnswer.objects.create(
+            user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
+        )
+
+        resolved = self._resolve(self.SPONSOR_Q)
+
+        self.assertNotEqual(resolved.answer, "US Citizen")
+        self.assertTrue(resolved.needs_review)

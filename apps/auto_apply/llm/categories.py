@@ -16,6 +16,7 @@ class QuestionCategory:
     LEGAL_ATTESTATION = "legal_attestation"
     BACKGROUND_CHECK = "background_check"
     SALARY_EXPECTATION = "salary_expectation"
+    DEMOGRAPHIC = "demographic"
     GENERIC = "generic"
 
 
@@ -33,6 +34,7 @@ HARD_EXCLUDED_CATEGORIES = frozenset(
         QuestionCategory.LEGAL_ATTESTATION,
         QuestionCategory.BACKGROUND_CHECK,
         QuestionCategory.SALARY_EXPECTATION,
+        QuestionCategory.DEMOGRAPHIC,
     }
 )
 
@@ -91,6 +93,27 @@ _CATEGORY_PATTERNS = [
             r"\bpay range\b",
             r"\bpay expectat",
             r"\btarget compensation\b",
+            r"\bsalary\b",
+            r"\bcompensation (range|requirement|expectation)s?\b",
+        ],
+    ),
+    (
+        # Voluntary self-identification / EEO questions: an LLM must never
+        # infer these from a resume or profile.
+        QuestionCategory.DEMOGRAPHIC,
+        [
+            r"\bgender\b",
+            r"\bpronouns?\b",
+            r"\btransgender\b",
+            r"\bsexual orientation\b",
+            r"\brace\b",
+            r"\bethnic(ity)?\b",
+            r"\bhispanic\b",
+            r"\blatino\b",
+            r"\bveteran\b",
+            r"\bdisabilit",
+            r"\bmarital status\b",
+            r"\bdate of birth\b",
         ],
     ),
 ]

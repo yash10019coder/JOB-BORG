@@ -349,6 +349,21 @@ class SubmitAutoApplyDraftFailureTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertIsNone(draft.job_application)
 
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_unconfirmed_submission_gets_its_own_reason_code(self, mock_client_cls):
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+
+        mock_client_cls.return_value.submit.side_effect = GreenhouseFormSubmissionUnconfirmed(
+            "No post-submit success signal found."
+        )
+        draft = self._make_draft()
+
+        submit_auto_apply_draft(draft.pk)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_schema_mismatch_marks_failed_with_distinct_error_message(self, mock_client_cls):
         mock_client_cls.return_value.submit.side_effect = GreenhouseFormSchemaMismatch(
             "Rendered schema has drifted since drafting."

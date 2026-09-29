@@ -40,6 +40,7 @@ from .exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
 from .education_api import education_type_for_control_id, fetch_full_list
@@ -347,16 +348,24 @@ class GreenhouseFormClient:
                     page,
                 )
 
+            clicked = False
             try:
                 self._fill_answers(page, schema_now, answers)
                 self._raise_on_newly_revealed_required_fields(page, job_url, schema_now)
+                # A status region / confirmation phrase already on the page
+                # before Submit is not evidence of success -- remember it so
+                # only a NEW signal counts.
+                pre_existing = self._check_success_signal(page)
+                ignore_text = pre_existing.confirmation_text if pre_existing else None
                 submitted_at = datetime.now(timezone.utc)
                 self._click_submit(page, schema_now)
+                clicked = True
                 result = self._confirm_success(
                     page,
                     provider=provider,
                     submitted_at=submitted_at,
                     deadline_monotonic=deadline_monotonic,
+                    ignore_text=ignore_text,
                 )
             except (
                 GreenhouseFormChallenged,
@@ -365,15 +374,18 @@ class GreenhouseFormClient:
             ):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
+                # After the click the application may already be with the
+                # employer, so a failure here is "unconfirmed", not a clean
+                # failure that is safe to retry blindly.
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed if clicked else GreenhouseFormSubmissionFailed,
                     f"Submitting the form at {job_url} failed: {exc}",
                     page,
                 )
 
             if result is None:
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed,
                     f"No post-submit success signal found at {job_url}.",
                     page,
                 )
@@ -1179,6 +1191,7 @@ class GreenhouseFormClient:
         provider: EmailCodeProvider | None = None,
         submitted_at: datetime | None = None,
         deadline_monotonic: float | None = None,
+        ignore_text: str | None = None,
     ) -> SubmissionResult | None:
 
         """Poll for a post-submit outcome until ``confirmation_timeout_ms``
@@ -1209,7 +1222,7 @@ class GreenhouseFormClient:
             else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
         )
         while True:
-            result = self._check_success_signal(page)
+            result = self._check_success_signal(page, ignore_text)
             if result is not None:
                 return result
             if self._verification_interstitial_detected(page):
@@ -1270,7 +1283,7 @@ class GreenhouseFormClient:
                     ).first
                     submit_button.click()
                     page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                    post_code_check = self._check_success_signal(page)
+                    post_code_check = self._check_success_signal(page, ignore_text)
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -1291,13 +1304,13 @@ class GreenhouseFormClient:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
 
-    def _check_success_signal(self, page) -> SubmissionResult | None:
+    def _check_success_signal(self, page, ignore_text: str | None = None) -> SubmissionResult | None:
         # Signal 1: an explicit ARIA status live region, if the board
         # renders one -- cheap and unambiguous when present.
         status = page.get_by_role("status")
         if status.count() > 0:
             text = status.first.inner_text().strip()
-            if text:
+            if text and text != ignore_text:
                 return SubmissionResult(success=True, confirmation_text=text)
 
         # Signal 2: known confirmation phrasing anywhere in the rendered
@@ -1307,7 +1320,7 @@ class GreenhouseFormClient:
         # submit (see _CONFIRMATION_TEXT_PATTERNS).
         body_text = page.locator("body").inner_text().lower()
         for phrase in _CONFIRMATION_TEXT_PATTERNS:
-            if phrase in body_text:
+            if phrase in body_text and phrase != ignore_text:
                 return SubmissionResult(success=True, confirmation_text=phrase)
 
         return None

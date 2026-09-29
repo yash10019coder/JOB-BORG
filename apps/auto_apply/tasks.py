@@ -30,6 +30,7 @@ from .greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
+    GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
 from .greenhouse_form.field_mapping import schema_from_dict
@@ -76,6 +77,8 @@ def _reason_code_for(exc: GreenhouseFormError) -> str:
         return AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED
     if isinstance(exc, GreenhouseFormSchemaMismatch):
         return AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH
+    if isinstance(exc, GreenhouseFormSubmissionUnconfirmed):
+        return AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED
     if isinstance(exc, GreenhouseFormVerificationFailed):
         outcome = getattr(exc, "outcome", None)
         outcome_map = {

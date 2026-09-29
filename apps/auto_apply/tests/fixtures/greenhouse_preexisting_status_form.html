@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <!-- A role="status" live region that is ALWAYS on the page (e.g. an autosave
+       notice) and a Submit that changes nothing: the pre-existing status text
+       must not be mistaken for a post-submit confirmation. -->
+  <main>
+    <div role="status">Your progress is saved automatically.</div>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    document.getElementById('application-form').addEventListener('submit', function (e) { e.preventDefault(); });
+  </script>
+</body>
+</html>
