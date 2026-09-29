@@ -1318,8 +1318,7 @@ class GreenhouseFormClient:
                         "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
                     ).first
                     submit_button.click()
-                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                    post_code_check = self._check_success_signal(page)
+                    post_code_check = self._poll_success_after_code(page, deadline)
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -1339,6 +1338,27 @@ class GreenhouseFormClient:
             if time.monotonic() >= deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+
+    def _poll_success_after_code(self, page, deadline: float) -> SubmissionResult | None:
+        """Poll for the success signal after the verification code is submitted.
+
+        Greenhouse confirms an application only after a network round-trip
+        (and often a navigation), so a single check right after the click
+        misreported applications that had actually gone through as a rejected
+        code. Bounded by ``confirmation_timeout_ms`` and the overall
+        ``deadline``; a wrong code leaves the page on the interstitial and
+        simply times out. A check that races the post-submit navigation
+        (e.g. "execution context was destroyed") is retried, not fatal.
+        """
+        poll_until = min(deadline, time.monotonic() + self.confirmation_timeout_ms / 1000)
+        while True:
+            page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+            try:
+                result = self._check_success_signal(page)
+            except Exception:  # noqa: BLE001 -- transient mid-navigation race; retry until poll_until
+                result = None
+            if result is not None or time.monotonic() >= poll_until:
+                return result
 
     def _check_success_signal(self, page) -> SubmissionResult | None:
         # Signal 1: an explicit ARIA status live region, if the board
