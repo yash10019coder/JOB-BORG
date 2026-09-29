@@ -23,6 +23,26 @@ reviews:
     - "!observability/**"
 
   path_instructions:
+    - path: "**"
+      instructions: >
+        Review every change for its impact, not just its correctness.
+        1) Impact on existing behavior: trace callers, tasks, signals and
+        templates that depend on what changed (the pipeline is
+        ingest -> classify -> match -> recommend). Flag regressions, changed
+        defaults, altered return shapes, and stale rows or data that existing
+        records would be left with (migrations, backfills, alias/version
+        bumps).
+        2) New features: check the new behavior against the PR description
+        and existing conventions, and flag missing tests for it.
+        3) Reuse before adding: search the repo for an existing helper,
+        model, task, client or setting that already does this, and flag
+        duplicated logic or a parallel implementation of something that
+        exists.
+        4) Keep it simple: flag over-engineering such as speculative
+        abstractions, unused flags or parameters, needless layers, config for
+        a single use, and new dependencies where the standard library or
+        Django already covers it. Prefer the smallest change that fits the
+        surrounding code's style.
     - path: "apps/locations/**"
       instructions: >
         Dependency-free leaf app: pure, deterministic, no DB/network, never
