@@ -37,7 +37,10 @@ class ProfileAdmin(admin.ModelAdmin):
         trigger convention `set_resume()` exists to centralize.
         """
         if "resume" in form.changed_data:
-            obj.set_resume(obj.resume)
+            replacement = obj.resume
+            obj.resume = Profile.objects.get(pk=obj.pk).resume if change else None
+            super().save_model(request, obj, form, change)
+            obj.set_resume(replacement)
             return
 
         super().save_model(request, obj, form, change)

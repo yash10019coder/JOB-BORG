@@ -12,11 +12,16 @@ for the draft create, and inline in `submit_auto_apply_draft` below for the
 (the Celery Beat staleness/stuck-SENDING sweep).
 """
 import logging
+import os
+import shutil
+from contextlib import ExitStack
 from datetime import timedelta
+from tempfile import NamedTemporaryFile
 
 from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
@@ -29,8 +34,9 @@ from .greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
+    GreenhouseFormSubmissionUnconfirmed,
 )
-from .greenhouse_form.field_mapping import schema_from_dict
+from .greenhouse_form.field_mapping import FILE, schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
@@ -57,6 +63,8 @@ def _reason_code_for(exc: GreenhouseFormError) -> str:
     signal; discarding it into free text and re-deriving it from prose
     elsewhere would let the two drift out of sync silently.
     """
+    if isinstance(exc, GreenhouseFormSubmissionUnconfirmed):
+        return AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED
     if isinstance(exc, GreenhouseFormChallenged):
         return AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED
     if isinstance(exc, GreenhouseFormSchemaMismatch):
@@ -182,12 +190,22 @@ def submit_auto_apply_draft(draft_id):
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
     )
     try:
-        form_client.submit(
-            job.source_url,
-            answers,
-            expected_schema=expected_schema,
-            captcha_solver=get_solver(),
-        )
+        with ExitStack() as files:
+            for label, entry in (draft.answers or {}).items():
+                if entry.get("field_type") != FILE:
+                    continue
+                storage_key = entry["value"]
+                local = files.enter_context(NamedTemporaryFile(suffix=os.path.splitext(storage_key)[1]))
+                with default_storage.open(storage_key, "rb") as stored:
+                    shutil.copyfileobj(stored, local)
+                local.flush()
+                answers[label] = local.name
+            form_client.submit(
+                job.source_url,
+                answers,
+                expected_schema=expected_schema,
+                captcha_solver=get_solver(),
+            )
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)

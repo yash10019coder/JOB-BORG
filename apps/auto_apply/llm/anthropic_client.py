@@ -1,6 +1,6 @@
 """Anthropic Claude implementation of ``AnswerInferenceClient``.
 
-The only registered provider in this slice (see ``base.CLIENT_REGISTRY``).
+One of the registered providers, alongside NVIDIA (see ``base.CLIENT_REGISTRY``).
 Uses the ``anthropic`` Python SDK's structured-output support
 (``client.messages.parse(..., output_format=<pydantic model>)``) to get
 schema-enforced JSON back instead of hand-parsing free text -- the SDK

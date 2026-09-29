@@ -26,6 +26,7 @@ constructed via an injectable ``context_factory`` and torn down after use.
 """
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -37,6 +38,7 @@ from .exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormSubmissionUnconfirmed,
 )
 from .field_mapping import (
     CHECKBOX_GROUP,
@@ -144,8 +146,17 @@ def _default_context_factory() -> "_PlaywrightContextHandle":
     from playwright.sync_api import sync_playwright  # local import: optional dep
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=True)
-    context = browser.new_context(accept_downloads=False)
+    browser = None
+    try:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(accept_downloads=False)
+    except Exception:
+        if browser is not None:
+            with suppress(Exception):
+                browser.close()
+        with suppress(Exception):
+            pw.stop()
+        raise
     return _PlaywrightContextHandle(pw, browser, context)
 
 
@@ -185,6 +196,7 @@ class GreenhouseFormClient:
         def _run(page):
             try:
                 self._goto_and_settle(page, job_url)
+                self._validate_url(page.url)
                 if self._challenge_detected(page):
                     raise GreenhouseFormChallenged(
                         f"Bot-detection challenge present on {job_url}; inspect() "
@@ -236,14 +248,16 @@ class GreenhouseFormClient:
                 is configured, or the configured solver fails/times out.
             GreenhouseFormSchemaMismatch: the live schema doesn't match
                 ``expected_schema``, or a required field is unsupported.
-            GreenhouseFormSubmissionFailed: the form was submitted but no
-                success signal was found.
+            GreenhouseFormSubmissionFailed: filling failed before submission.
+            GreenhouseFormSubmissionUnconfirmed: a submit click was attempted
+                but no success signal could be confirmed.
         """
         self._validate_url(job_url)
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
 
         def _run(page):
             self._goto_and_settle(page, job_url)
+            self._validate_url(page.url)
 
             if self._challenge_detected(page):
                 self._attempt_captcha_solve(page, job_url, solver)
@@ -254,6 +268,7 @@ class GreenhouseFormClient:
                         f"Challenge on {job_url} was not cleared after a solve attempt."
                     )
 
+            self._validate_url(page.url)
             schema_now = self._discover_schema(page, job_url)
             if expected_schema is not None and not schema_matches(expected_schema, schema_now):
                 self._raise_with_debug_artifacts(
@@ -263,22 +278,27 @@ class GreenhouseFormClient:
                     page,
                 )
 
+            submit_attempted = False
             try:
+                self._validate_url(page.url)
                 self._fill_answers(page, schema_now, answers)
+                before = self._success_snapshot(page)
+                self._validate_url(page.url)
+                submit_attempted = True
                 self._click_submit(page)
-                result = self._confirm_success(page)
+                result = self._confirm_success(page, before)
             except (GreenhouseFormChallenged, GreenhouseFormSchemaMismatch):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed if submit_attempted else GreenhouseFormSubmissionFailed,
                     f"Submitting the form at {job_url} failed: {exc}",
                     page,
                 )
 
             if result is None:
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed,
                     f"No post-submit success signal found at {job_url}.",
                     page,
                 )
@@ -756,7 +776,7 @@ class GreenhouseFormClient:
         """Resolve a FILE-field answer to a path Playwright may upload.
 
         Answers for FILE fields are meant to originate only from
-        ``drafting.py`` (a Profile's own ``resume.path``), never from user
+        ``drafting.py`` (a temporary local copy of the stored resume), never from user
         input -- ``edit_auto_apply_draft`` already refuses to let a user
         overwrite one (see apps/web/views.py). This is the last line of
         defense: without it, any bug or future code path that let a
@@ -777,7 +797,7 @@ class GreenhouseFormClient:
             submit_button = page.locator('button[type="submit"], input[type="submit"]')
         submit_button.first.click()
 
-    def _confirm_success(self, page) -> SubmissionResult | None:
+    def _confirm_success(self, page, before) -> SubmissionResult | None:
         """Poll for a post-submit success signal until ``confirmation_timeout_ms``
         elapses, checking every signal in ``_check_success_signal`` each pass
         rather than waiting out a full timeout on one selector before trying
@@ -786,32 +806,33 @@ class GreenhouseFormClient:
         """
         deadline = time.monotonic() + (self.confirmation_timeout_ms / 1000)
         while True:
-            result = self._check_success_signal(page)
+            result = self._check_success_signal(page, before)
             if result is not None:
                 return result
             if time.monotonic() >= deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
 
-    def _check_success_signal(self, page) -> SubmissionResult | None:
-        # Signal 1: an explicit ARIA status live region, if the board
-        # renders one -- cheap and unambiguous when present.
-        status = page.get_by_role("status")
-        if status.count() > 0:
-            text = status.first.inner_text().strip()
-            if text:
-                return SubmissionResult(success=True, confirmation_text=text)
+    @staticmethod
+    def _success_snapshot(page):
+        return {
+            "body": page.locator("body").inner_text().lower(),
+            "statuses": tuple(text.strip() for text in page.get_by_role("status").all_inner_texts()),
+        }
 
-        # Signal 2: known confirmation phrasing anywhere in the rendered
-        # page text. Only specific, positive multi-word phrases are
-        # matched -- never element presence/absence alone -- so this can't
-        # be tricked by an error banner that happens to render after
-        # submit (see _CONFIRMATION_TEXT_PATTERNS).
-        body_text = page.locator("body").inner_text().lower()
+    def _check_success_signal(self, page, before) -> SubmissionResult | None:
+        self._validate_url(page.url)
+        after = self._success_snapshot(page)
         for phrase in _CONFIRMATION_TEXT_PATTERNS:
-            if phrase in body_text:
+            # Status regions must contain an explicit confirmation, and
+            # neither a pre-existing region nor pre-submit body copy counts.
+            if phrase in before["body"] or any(phrase in text.lower() for text in before["statuses"]):
+                continue
+            for text in after["statuses"]:
+                if phrase in text.lower():
+                    return SubmissionResult(success=True, confirmation_text=text)
+            if phrase in after["body"]:
                 return SubmissionResult(success=True, confirmation_text=phrase)
-
         return None
 
     # -- failure debugging --------------------------------------------------

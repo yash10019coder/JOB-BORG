@@ -9,6 +9,7 @@ from django.core.paginator import Paginator
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
@@ -142,16 +143,7 @@ def job_action(request, job_id):
     # Preserve the toggle/search state the action was taken from (carried as
     # hidden fields on the action form) so Save/Apply/Dismiss doesn't silently
     # reset the user back to the unfiltered recommended-only view.
-    redirect_url = reverse("recommendations")
-    params = {}
-    if request.POST.get("all") == "1":
-        params["all"] = "1"
-    query = _clean_query(request.POST.get("q", ""))
-    if query:
-        params["q"] = query
-    if params:
-        redirect_url = f"{redirect_url}?{urlencode(params)}"
-    return redirect(redirect_url)
+    return _recommendations_redirect(request)
 
 
 # --- Auto-apply (U8) -------------------------------------------------------
@@ -177,6 +169,9 @@ _REASON_CODE_MESSAGES = {
     ),
     AutoApplyDraft.ReasonCode.SUBMISSION_FAILED: (
         "The application couldn't be submitted; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED: (
+        "Your application may have been submitted. Check with the employer before trying again."
     ),
     AutoApplyDraft.ReasonCode.SENDING_TIMEOUT: (
         "Submission timed out and wasn't completed; you can try again."
@@ -245,6 +240,13 @@ def trigger_auto_apply(request, job_id):
     )
     if already_applied:
         messages.info(request, "You've already applied to this job.")
+        return _recommendations_redirect(request)
+
+    if AutoApplyDraft.objects.filter(
+        user=request.user, job=job,
+        reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED,
+    ).exists():
+        messages.error(request, _REASON_CODE_MESSAGES[AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED])
         return _recommendations_redirect(request)
 
     draft_auto_apply.delay(request.user.id, job.id)
@@ -340,9 +342,17 @@ def send_auto_apply_draft(request, pk):
     row count (rather than get-then-save) is also what makes the guard
     atomic against a concurrent double-submit.
     """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    if any(entry.get("needs_review") for entry in (draft.answers or {}).values()):
+        messages.error(request, "Please review and save all flagged answers before sending.")
+        return redirect("auto_apply_queue")
+
     updated = AutoApplyDraft.objects.filter(
-        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
-    ).update(status=AutoApplyDraft.Status.SENDING)
+        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+        answers=draft.answers,
+    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
     if not updated:
         raise Http404("Draft not found or not sendable.")
 

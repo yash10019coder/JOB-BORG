@@ -121,7 +121,9 @@ class ProfileResumeFieldTests(TestCase):
             "resume.txt", b"Experienced engineer", content_type="text/plain"
         )
         with mock.patch("apps.accounts.tasks.parse_resume.delay") as mock_delay:
-            self.profile.set_resume(upload)
+            with self.captureOnCommitCallbacks(execute=True):
+                self.profile.set_resume(upload)
+                mock_delay.assert_not_called()
 
         self.profile.refresh_from_db()
         self.assertTrue(self.profile.resume)
@@ -139,3 +141,63 @@ class ProfileResumeFieldTests(TestCase):
 
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.resume_text, "")
+
+    def test_storage_name_is_random_and_extension_lowercase(self):
+        from apps.accounts.models import resume_upload_path
+        first = resume_upload_path(self.profile, "Jane Doe.PDF")
+        second = resume_upload_path(self.profile, "Jane Doe.PDF")
+        self.assertRegex(first, rf"^resumes/{self.user.pk}/[0-9a-f]{{32}}\.pdf$")
+        self.assertNotEqual(first, second)
+
+    def test_committed_resume_validation_does_not_access_storage(self):
+        self.profile.resume = "resumes/missing.pdf"
+        with mock.patch.object(self.profile.resume.storage, "size", side_effect=AssertionError), \
+             mock.patch.object(self.profile.resume.storage, "open", side_effect=AssertionError):
+            self.profile.full_clean(validate_unique=False)
+
+    def test_octet_stream_requires_supported_extension(self):
+        from apps.accounts.models import validate_resume_file
+        validate_resume_file(SimpleUploadedFile("resume.pdf", b"pdf", content_type="application/octet-stream"))
+        with self.assertRaises(ValidationError):
+            validate_resume_file(SimpleUploadedFile("resume.exe", b"exe", content_type="application/octet-stream"))
+
+    def test_replacing_clearing_and_retaining_resume_storage(self):
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("one.txt", b"one", content_type="text/plain"))
+        old = self.profile.resume.name
+        storage = self.profile.resume.storage
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(self.profile.resume)
+        self.assertTrue(storage.exists(old))
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("two.txt", b"two", content_type="text/plain"))
+            self.assertTrue(storage.exists(old))
+        self.assertFalse(storage.exists(old))
+        replacement = self.profile.resume.name
+        with self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(None)
+        self.assertFalse(storage.exists(replacement))
+
+    def test_admin_saves_other_fields_before_applying_resume_change(self):
+        from types import SimpleNamespace
+        from django.contrib.admin import AdminSite
+        from apps.accounts.admin import ProfileAdmin
+        self.profile.full_name = "Updated name"
+        self.profile.resume = SimpleUploadedFile("resume.txt", b"updated", content_type="text/plain")
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            ProfileAdmin(Profile, AdminSite()).save_model(None, self.profile, SimpleNamespace(changed_data=["resume", "full_name"]), True)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.full_name, "Updated name")
+        self.assertTrue(self.profile.resume)
+
+    def test_admin_can_create_profile_with_resume(self):
+        from types import SimpleNamespace
+        from django.contrib.admin import AdminSite
+        from apps.accounts.admin import ProfileAdmin
+        self.profile.delete()
+        profile = Profile(user=self.user, full_name="New profile", resume=SimpleUploadedFile("resume.txt", b"new", content_type="text/plain"))
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            ProfileAdmin(Profile, AdminSite()).save_model(None, profile, SimpleNamespace(changed_data=["resume"]), False)
+        profile.refresh_from_db()
+        self.assertTrue(profile.resume)
+        self.assertEqual(profile.full_name, "New profile")

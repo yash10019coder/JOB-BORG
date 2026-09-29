@@ -4,16 +4,19 @@ The built-in Django User is the auth/users table (see Key Decisions); Profile
 is a OneToOne extension holding everything the matching fan-out reads.
 """
 import os
+import uuid
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
+from django.db.models.fields.files import FieldFile
 
 
 def resume_upload_path(instance, filename):
     """Per-user resume path -- keeps uploads from colliding across users
     regardless of which storage backend (local/S3) is active."""
-    return f"resumes/{instance.user_id}/{filename}"
+    extension = os.path.splitext(filename)[1].lower()
+    return f"resumes/{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
 def validate_resume_file(file):
@@ -22,6 +25,9 @@ def validate_resume_file(file):
     defense against malicious uploads, independent of the parsing task's own
     bounded time limit (see apps/accounts/tasks.py).
     """
+    if isinstance(file, FieldFile) and file._committed:
+        return
+
     max_size = getattr(settings, "RESUME_MAX_UPLOAD_SIZE_BYTES", 10 * 1024 * 1024)
     if file.size > max_size:
         raise ValidationError(
@@ -57,7 +63,7 @@ def validate_resume_file(file):
             "text/plain",
         ],
     )
-    if content_type is not None and content_type not in allowed_content_types:
+    if content_type not in (None, "application/octet-stream") and content_type not in allowed_content_types:
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
@@ -142,15 +148,19 @@ class Profile(models.Model):
         path for clearing. Deliberately not a `post_save` signal, per U1's
         approach, so the trigger stays visible here instead of implicit.
         """
+        previous = self.resume
         self.resume = file or None
         self.resume_text = ""
         self.full_clean(validate_unique=False)
         self.save(update_fields=["resume", "resume_text", "updated_at"])
 
+        if previous and previous.name != self.resume.name:
+            transaction.on_commit(lambda: previous.storage.delete(previous.name))
+
         if file:
             from .tasks import parse_resume
 
-            parse_resume.delay(self.pk)
+            transaction.on_commit(lambda: parse_resume.delay(self.pk))
 
     def __str__(self):
         return f"Profile<{self.user.username}>"

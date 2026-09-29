@@ -150,6 +150,44 @@ class GreenhouseFormClientTests(SimpleTestCase):
         path.write_bytes(b"%PDF-1.4 fake resume content")
         return path
 
+    def test_preexisting_confirmation_and_arbitrary_status_do_not_confirm(self):
+        for message in ("Thank you for applying", "Uploading resume", "Please fix the errors"):
+            with self.subTest(message=message):
+                html = f'<body><p role="status">{message}</p><form onsubmit="event.preventDefault()"><button>Submit</button></form></body>'
+                client = self._client(html, confirmation_timeout_ms=10)
+                from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+                with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+                    client.submit(JOB_URL, {})
+
+    def test_changed_generic_status_does_not_confirm(self):
+        html = """<body><p role="status">Ready</p><form onsubmit="event.preventDefault();document.querySelector('p').textContent='Uploading resume'"><button>Submit</button></form></body>"""
+        client = self._client(html, confirmation_timeout_ms=10)
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+        with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+            client.submit(JOB_URL, {})
+
+    def test_redirect_to_disallowed_origin_rejected_before_inspecting_or_filling(self):
+        def factory():
+            context = self._browser.new_context()
+            redirect_html = f'<script>setTimeout(() => location.replace("{DISALLOWED_URL}"), 50)</script>'
+            context.route(JOB_URL, lambda route: route.fulfill(content_type="text/html", body=redirect_html))
+            context.route(DISALLOWED_URL, lambda route: route.fulfill(body='<form><button>Submit</button></form>'))
+            return _TestContextHandle(context)
+        client = GreenhouseFormClient(context_factory=factory)
+        for operation in (lambda: client.inspect(JOB_URL), lambda: client.submit(JOB_URL, {})):
+            with patch.object(client, "_discover_schema") as discover, patch.object(client, "_fill_answers") as fill:
+                with self.assertRaises(GreenhouseFormError):
+                    operation()
+                discover.assert_not_called()
+                fill.assert_not_called()
+
+    def test_origin_revalidated_immediately_before_submit(self):
+        client = self._client('<body><form><button>Submit</button></form></body>')
+        with patch.object(client, "_fill_answers", side_effect=lambda page, *_: page.goto("about:blank")), patch.object(client, "_click_submit") as click:
+            with self.assertRaises(GreenhouseFormError):
+                client.submit(JOB_URL, {})
+            click.assert_not_called()
+
     # -- inspect(): standard-fields-only fixture -------------------------
 
     def test_inspect_standard_form_returns_expected_fields(self):
@@ -564,3 +602,28 @@ class ValidatedFilePathTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaises(GreenhouseFormError):
                 GreenhouseFormClient._validated_file_path(tmpdir, "Resume/CV")
+
+
+class ContextInitializationCleanupTests(SimpleTestCase):
+    def test_initialization_failures_release_resources_and_preserve_error(self):
+        from unittest.mock import Mock
+        from apps.auto_apply.greenhouse_form.client import _default_context_factory
+        for failure_stage in ("launch", "context"):
+            with self.subTest(stage=failure_stage):
+                driver = Mock()
+                browser = driver.chromium.launch.return_value
+                original = RuntimeError("initialization failed")
+                if failure_stage == "launch":
+                    driver.chromium.launch.side_effect = original
+                else:
+                    browser.new_context.side_effect = original
+                    browser.close.side_effect = RuntimeError("cleanup failed")
+                driver.stop.side_effect = RuntimeError("stop failed")
+                with patch("playwright.sync_api.sync_playwright") as start:
+                    start.return_value.start.return_value = driver
+                    with self.assertRaises(RuntimeError) as raised:
+                        _default_context_factory()
+                self.assertIs(raised.exception, original)
+                driver.stop.assert_called_once()
+                if failure_stage == "context":
+                    browser.close.assert_called_once()

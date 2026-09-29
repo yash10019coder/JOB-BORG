@@ -91,14 +91,17 @@ apps/
   classification/  # rule engine + classification task
   matching/        # UserJobMatch, scorer, prefilter, fan-out
   applications/    # JobApplication (save/apply/dismiss)
+  auto_apply/      # Greenhouse application drafts, submission, and review queue
   web/             # views, forms, templates
 ```
 
-`apps.locations` and `apps.classification` are both "dependency-free leaf"
-apps: pure, deterministic, side-effect-free logic loaded once via
+`apps.locations` and `apps.classification.engine` are dependency-free leaves:
+pure, deterministic, side-effect-free logic loaded once via
 `lru_cache` over a versioned static dataset, no DB/network access, imported
 by `jobs`/`web`/`matching` but never importing back from them. When adding
-logic to either, preserve that boundary.
+logic to either, preserve that boundary. The classification task separately
+orchestrates loading jobs, persisting classification results, and enqueueing
+matching; keep those DB/task dependencies out of the pure engine.
 
 ### Multi-ATS ingestion (`apps/jobs/ingestion/`)
 
