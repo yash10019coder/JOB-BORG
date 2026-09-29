@@ -923,6 +923,17 @@ class GreenhouseFormClient:
                 # confirmed exists.
                 continue
 
+            # A blank answer to an *optional* field means "leave it empty" --
+            # drafting.py stores a blank needs_review placeholder for every
+            # question the LLM couldn't answer, and the send flow only blocks
+            # on the required ones. Filling that blank would fail for FILE
+            # (no such path), SINGLE/MULTI_SELECT (no option matches ""), and
+            # worse, COMBOBOX_SELECT (name="" substring-matches every option,
+            # so it would silently pick the first one). A blank *required*
+            # answer falls through to the per-type handling below unchanged.
+            if not form_field.required and self._is_blank_answer(value):
+                continue
+
             control = self._locate_control(page, form_field, label)
 
             if form_field.field_type in (TEXT, TEXTAREA):
@@ -954,16 +965,12 @@ class GreenhouseFormClient:
                         f"Not all selections registered for multi-select field {label!r}."
                     )
             elif form_field.field_type == FILE:
-                # Optional FILE fields with no value (empty string, None) should
-                # be skipped entirely, not passed to file validation. Only
-                # required FILE fields should fail closed if a value is missing.
-                if not value:
-                    if form_field.required:
-                        raise GreenhouseFormError(
-                            f"File {value!r} for field {label!r} does not exist."
-                        )
-                    # Optional field with no value: skip filling entirely
-                    continue
+                # Optional blanks are skipped above; a blank required FILE
+                # fails closed here instead of reaching file validation.
+                if self._is_blank_answer(value):
+                    raise GreenhouseFormError(
+                        f"File {value!r} for field {label!r} does not exist."
+                    )
                 control.set_input_files(str(self._validated_file_path(value, label)))
             elif form_field.field_type == COMBOBOX_SELECT:
                 self._fill_combobox(page, control, str(value), label)
@@ -984,6 +991,16 @@ class GreenhouseFormClient:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
                 )
+
+    @staticmethod
+    def _is_blank_answer(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, (list, tuple)):
+            return all(GreenhouseFormClient._is_blank_answer(v) for v in value)
+        return False
 
     @staticmethod
     def _locate_control(page, form_field: FormField, label: str):

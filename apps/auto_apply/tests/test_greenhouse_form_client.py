@@ -587,6 +587,39 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         self.assertTrue(result.success)
 
+    def test_submit_skips_blank_optional_answers_of_every_type(self):
+        """drafting.py stores a blank needs_review placeholder for every
+        question the LLM couldn't answer. For an optional field that must
+        mean "leave it empty" whatever the field type -- a blank combobox
+        answer used to substring-match every option and pick the first."""
+        html = _fixture_html("greenhouse_combobox_and_file_upload_form.html")
+        schema = self._client(html).inspect(JOB_URL)
+        resume_path = self._tmpdir / "resume.pdf"
+        resume_path.write_bytes(b"%PDF-1.4 fake resume")
+
+        result = self._client(html).submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Are you authorized to work?": "Yes",
+                "Resume/CV": str(resume_path),
+                "Cover Letter": "",
+                "Favorite Country": "  ",
+                "Which languages do you know?": ["Python", "Rust"],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+
+    def test_is_blank_answer(self):
+        blank = GreenhouseFormClient._is_blank_answer
+        for value in (None, "", "   ", [], [""], ("", None)):
+            self.assertTrue(blank(value), value)
+        for value in ("x", ["x"], ["", "x"], 0, False):
+            self.assertFalse(blank(value), value)
+
     # -- required unsupported field type ----------------------------------
 
     def test_required_unsupported_field_type_raises_schema_mismatch(self):
