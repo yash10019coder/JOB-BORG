@@ -37,7 +37,7 @@
             {% csrf_token %}
             {% for label, entry in draft.answers.items %}
             <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
-                <label for="value__{{ forloop.counter0 }}">
+                <label for="{{ entry.control_id }}">
                     {{ label }}
                     {% if label in draft.blocking_fields %}
                     <span class="tag" style="background:#fee2e2; color:#991b1b;" aria-label="This question must be answered before the application can be sent">Answer required</span>
@@ -46,8 +46,8 @@
                     {% endif %}
                 </label>
                 <input type="hidden" name="label__{{ forloop.counter0 }}" value="{{ label }}">
-                {% if draft.status == "drafted" %}
-                <input type="text" id="value__{{ forloop.counter0 }}" name="value__{{ forloop.counter0 }}" value="{{ entry.value }}">
+                {% if draft.status == "drafted" and entry.control %}
+                {{ entry.control }}
                 {% else %}
                 <p>{{ entry.value }}</p>
                 {% endif %}
@@ -60,6 +60,10 @@
         {% endif %}
 
         {% if draft.status == "drafted" %}
+            <form method="post" action="{% url 'discard_auto_apply_draft' draft.id %}">
+                {% csrf_token %}
+                <button type="submit">Discard draft</button>
+            </form>
             {% if draft.blocking_fields %}
             <p class="muted" role="status">
                 Answer {{ draft.blocking_fields|length }} required question{{ draft.blocking_fields|pluralize }} above before sending this application.

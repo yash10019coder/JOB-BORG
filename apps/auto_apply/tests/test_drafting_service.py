@@ -283,6 +283,22 @@ class RequiredFileQuestionUnanswerableTests(DraftingServiceTestCase):
         self.assertIn("Upload your portfolio", draft.exclusion_reason)
         self.assertNotIn("Upload your portfolio", draft.answers)
 
+    def test_optional_unanswerable_file_question_remains_sendable(self):
+        from apps.web.views import _blocking_required_fields
+
+        schema = FormSchema(fields=STANDARD_ONLY_SCHEMA.fields + (
+            FormField("Upload your portfolio", FILE, False),
+        ))
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema), llm_client=FakeLLMClient(),
+        )
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        entry = draft.answers["Upload your portfolio"]
+        self.assertEqual(entry["value"], "")
+        self.assertFalse(entry["required"])
+        self.assertEqual(_blocking_required_fields(draft.answers, draft.form_schema_snapshot), [])
+
 
 class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):
     """A required custom question the LLM couldn't answer *because the LLM

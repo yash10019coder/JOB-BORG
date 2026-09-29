@@ -14,7 +14,14 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from apps.applications.models import JobApplication
+from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT,
+    FormField, FormSchema, schema_to_dict,
+)
 from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.services.drafting import draft_for
+from apps.auto_apply.tests.test_drafting_service import FakeFormClient, FakeLLMClient
+from apps.web.views import _blocking_required_fields
 from apps.employers.models import Employer
 from apps.jobs.models import Job
 
@@ -503,6 +510,164 @@ class SendAutoApplyDraftTests(AutoApplyViewsTestCase):
         response = Client().post(reverse("send_auto_apply_draft", args=[draft.id]))
         self.assertEqual(response.status_code, 302)
         self.assertIn(reverse("login"), response.url)
+
+
+class DraftReviewRegressionTests(AutoApplyViewsTestCase):
+    def _custom_draft(self, field_type=TEXT, *, required=True, options=()):
+        return draft_for(
+            self.alice, self._job(),
+            form_client=FakeFormClient(FormSchema(fields=(
+                FormField("Custom question", field_type, required, options=options),
+            ))),
+            llm_client=FakeLLMClient(),
+        )
+
+    def test_required_fallback_preserves_explicit_answer_flags(self):
+        snapshot = schema_to_dict(FormSchema(fields=(FormField("Q", TEXT, True),)))
+        for entry, expected in (
+            ({"value": ""}, ["Q"]),
+            ({"value": "  "}, ["Q"]),
+            ({"value": "answered"}, []),
+            ({"value": "", "required": False}, []),
+            ({"value": "", "required": True}, ["Q"]),
+        ):
+            with self.subTest(entry=entry):
+                self.assertEqual(_blocking_required_fields({"Q": entry}, snapshot), expected)
+        self.assertEqual(_blocking_required_fields({"Q": {"value": ""}}), [])
+        snapshot["fields"][0]["required"] = False
+        self.assertEqual(
+            _blocking_required_fields({"Q": {"value": "", "required": True}}, snapshot), ["Q"]
+        )
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_legacy_blank_answer_blocks_queue_and_send(self, task):
+        draft = self._custom_draft()
+        del draft.answers["Custom question"]["required"]
+        draft.save(update_fields=["answers"])
+        client = self._client_for(self.alice)
+        queue = client.get(reverse("auto_apply_queue"))
+        self.assertContains(queue, "Answer required</span>")
+        self.assertNotContains(queue, "Send application")
+        client.post(reverse("send_auto_apply_draft", args=[draft.pk]))
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        task.delay.assert_not_called()
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_edit_required_placeholder_then_send_same_draft(self, task):
+        draft = self._custom_draft()
+        client = self._client_for(self.alice)
+        response = client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+            "label__0": "Custom question", "value__0": "My answer",
+        })
+        self.assertRedirects(response, reverse("auto_apply_queue"))
+        client.post(reverse("send_auto_apply_draft", args=[draft.pk]))
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers["Custom question"]["value"], "My answer")
+        self.assertFalse(draft.answers["Custom question"]["needs_review"])
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        task.delay.assert_called_once_with(draft.pk)
+
+    def test_option_controls_validate_and_round_trip_selected_values(self):
+        client = self._client_for(self.alice)
+        for field_type in (SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
+            with self.subTest(field_type=field_type):
+                draft = self._custom_draft(field_type, options=("Yes", "No"))
+                queue = client.get(reverse("auto_apply_queue"))
+                self.assertContains(queue, '<select name="value__0"')
+                self.assertContains(queue, '<option value="Yes">Yes</option>', html=True)
+                original = draft.answers
+                response = client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+                    "label__0": "Custom question", "value__0": "Not an option",
+                }, follow=True)
+                self.assertContains(response, "Choose a valid answer for Custom question")
+                draft.refresh_from_db()
+                self.assertEqual(draft.answers, original)
+                multiple = field_type in (MULTI_SELECT, CHECKBOX_GROUP)
+                value = ["Yes", "No"] if multiple else "Yes"
+                client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+                    "label__0": "Custom question", "value__0": value,
+                })
+                draft.refresh_from_db()
+                self.assertEqual(draft.answers["Custom question"]["value"], value)
+                self.assertFalse(draft.answers["Custom question"]["needs_review"])
+                queue = client.get(reverse("auto_apply_queue"))
+                self.assertContains(queue, '<option value="Yes" selected>Yes</option>', html=True)
+                if multiple:
+                    self.assertContains(queue, '<option value="No" selected>No</option>', html=True)
+                draft.delete()
+
+    def test_empty_multiple_choice_remains_blocking(self):
+        draft = self._custom_draft(MULTI_SELECT, options=("Yes", "No"))
+        client = self._client_for(self.alice)
+        # Browsers omit an unselected multiple select from POST entirely.
+        client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+            "label__0": "Custom question",
+        })
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers["Custom question"]["value"], [])
+        self.assertTrue(draft.answers["Custom question"]["needs_review"])
+        self.assertEqual(_blocking_required_fields(draft.answers), ["Custom question"])
+
+    def test_combobox_without_snapshot_options_accepts_typed_answer(self):
+        draft = self._custom_draft(COMBOBOX_SELECT)
+        client = self._client_for(self.alice)
+        client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+            "label__0": "Custom question", "value__0": "London",
+        })
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers["Custom question"]["value"], "London")
+        self.assertFalse(draft.answers["Custom question"]["needs_review"])
+
+    def test_file_answers_stay_read_only_even_with_legacy_metadata(self):
+        draft = self._custom_draft(FILE, required=False)
+        client = self._client_for(self.alice)
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                if legacy:
+                    del draft.answers["Custom question"]["field_type"]
+                    draft.save(update_fields=["answers"])
+                original = draft.answers
+                queue = client.get(reverse("auto_apply_queue"))
+                self.assertNotContains(queue, 'name="value__0"')
+                client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+                    "label__0": "Custom question", "value__0": "/etc/passwd",
+                })
+                draft.refresh_from_db()
+                self.assertEqual(draft.answers, original)
+
+    def test_discard_blocked_draft_allows_fresh_draft_for_same_job(self):
+        draft = self._custom_draft()
+        client = self._client_for(self.alice)
+        queue = client.get(reverse("auto_apply_queue"))
+        self.assertContains(queue, reverse("discard_auto_apply_draft", args=[draft.pk]))
+        response = client.post(reverse("discard_auto_apply_draft", args=[draft.pk]))
+        self.assertRedirects(response, reverse("auto_apply_queue"))
+        self.assertFalse(AutoApplyDraft.objects.filter(pk=draft.pk).exists())
+        fresh = draft_for(
+            self.alice, draft.job,
+            form_client=FakeFormClient(FormSchema(fields=(FormField("Q", TEXT, True),))),
+            llm_client=FakeLLMClient(),
+        )
+        self.assertIsNotNone(fresh)
+        self.assertNotEqual(fresh.pk, draft.pk)
+        self.assertEqual(fresh.status, AutoApplyDraft.Status.DRAFTED)
+
+    def test_discard_requires_owner_login_post_and_drafted_status(self):
+        draft = self._custom_draft()
+        url = reverse("discard_auto_apply_draft", args=[draft.pk])
+        self.assertEqual(Client().post(url).status_code, 302)
+        self.assertEqual(self._client_for(self.bob).post(url).status_code, 404)
+        client = self._client_for(self.alice)
+        self.assertEqual(client.get(url).status_code, 405)
+        for status in AutoApplyDraft.Status.values:
+            if status == AutoApplyDraft.Status.DRAFTED:
+                continue
+            with self.subTest(status=status):
+                draft.status = status
+                draft.save(update_fields=["status"])
+                self.assertEqual(client.post(url).status_code, 404)
+                self.assertTrue(AutoApplyDraft.objects.filter(pk=draft.pk, status=status).exists())
 
 
 class NewVerificationReasonCodeMessageTests(AutoApplyQueueViewTests):

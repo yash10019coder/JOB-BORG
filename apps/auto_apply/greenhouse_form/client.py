@@ -773,6 +773,9 @@ class GreenhouseFormClient:
                 # confirmed exists.
                 continue
 
+            if form_field.field_type == FILE and not form_field.required and not value:
+                continue
+
             control = self._locate_control(page, form_field, label)
 
             if form_field.field_type in (TEXT, TEXTAREA):
