@@ -73,7 +73,8 @@ def fetch_full_list(
     discovered from the live DOM rather than losing the field entirely.
     Cached per (board_token, education_type): see module docstring.
     """
-    cache_key = f"greenhouse_education_api:{board_token}:{education_type}"
+    # Earlier cache entries could contain incomplete pagination results.
+    cache_key = f"greenhouse_education_api:v2:{board_token}:{education_type}"
     cached = cache.get(cache_key)
     if cached is not None:
         return tuple(cached)
@@ -107,6 +108,8 @@ def fetch_full_list(
             page_number += 1
             if page_number > _MAX_PAGES:
                 break
+        if total_count is None or len(items) < total_count:
+            return None
     except Exception:  # noqa: BLE001 -- any failure here just means "no complete list available"
         return None
 

@@ -335,8 +335,8 @@ def edit_auto_apply_draft(request, pk):
     404s rather than mutating it. The template posts one `label__<i>` /
     `value__<i>` pair per answer (indexed rather than keyed by the raw label,
     since labels are arbitrary employer-supplied text); any answer present
-    in the POST has its stored value updated and `needs_review` cleared --
-    the user has now confirmed it.
+    in the POST is validated against its options, when present. Nonblank
+    values clear `needs_review`; blanks remain unconfirmed.
     """
     draft = get_object_or_404(
         AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
@@ -361,8 +361,13 @@ def edit_auto_apply_draft(request, pk):
             # by re-drafting.
             and answers[label].get("field_type") != FILE
         ):
-            answers[label]["value"] = request.POST[value_field]
-            answers[label]["needs_review"] = False
+            value = request.POST[value_field]
+            options = answers[label].get("options")
+            if value.strip() and options and value not in options:
+                messages.error(request, f"Choose an allowed option for {label}.")
+                return redirect("auto_apply_queue")
+            answers[label]["value"] = value
+            answers[label]["needs_review"] = not bool(value.strip())
         index += 1
 
     draft.answers = answers

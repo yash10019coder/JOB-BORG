@@ -410,6 +410,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
             set(school_field.options), {"API School A", "API School B", "API School C"}
         )
         self.assertNotIn("DOM Sample School A", school_field.options)
+        self.assertTrue(school_field.options_complete)
         # JOB_URL's board token is "acme" -- confirms the real request URL
         # shape, not just that *a* request happened.
         self.assertEqual(
@@ -432,6 +433,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         school_field = schema.by_label()["School"]
         self.assertEqual(set(school_field.options), {"DOM Sample School A", "DOM Sample School B"})
+        self.assertFalse(school_field.options_complete)
 
     def test_inspect_does_not_call_education_api_for_non_education_combobox(self):
         # A combobox whose control_id doesn't match Greenhouse's Education
@@ -959,6 +961,30 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
     # -- submit(): bounded post-fill re-discovery for revealed fields -------
 
+    def test_post_fill_discovery_is_passive_and_checks_control_identity(self):
+        html = '''<form>
+            <label for="school--0">School</label><input id="school--0" role="combobox" required>
+            <span id="degree-label">Degree</span><input id="degree--0" role="combobox" aria-labelledby="degree-label" required>
+            </form>'''
+        client = self._client(html)
+        known = FormSchema((
+            FormField("School", COMBOBOX_SELECT, True, control_id="school--0"),
+            FormField("Degree", COMBOBOX_SELECT, True, control_id="degree--0"),
+        ))
+
+        def check(page):
+            page.goto(JOB_URL)
+            with patch.object(GreenhouseFormClient, "_extract_options") as extract, patch.object(client, "_maybe_full_education_options") as education:
+                client._raise_on_newly_revealed_required_fields(page, JOB_URL, known)
+                extract.assert_not_called()
+                education.assert_not_called()
+            page.locator("form").evaluate("el => el.insertAdjacentHTML('beforeend', '<label for=school--1>School</label><input id=school--1 required>')")
+            with self.assertRaisesRegex(GreenhouseFormSchemaMismatch, "School"):
+                client._raise_on_newly_revealed_required_fields(page, JOB_URL, known)
+
+        client._with_fresh_page(check)
+
+
     def test_submit_no_revealed_fields_behaves_identically(self):
         # R7 happy path: choosing "Referral" never reveals the "specify"
         # field -- the extra re-discovery pass finds nothing new and
@@ -1114,6 +1140,28 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(calls, [])  # context_factory (and thus navigation) never invoked
 
 
+class RediscoveryIdentityTests(SimpleTestCase):
+    def test_ids_take_precedence_with_label_fallback_when_either_id_is_missing(self):
+        client = GreenhouseFormClient()
+        for old_id, new_id, old_label, new_label, is_new in (
+            ("first", "second", "School", "School", True),
+            ("first", "first", "School", "Renamed", False),
+            ("", "first", "School", "School", False),
+            ("first", "", "School", "School", False),
+            ("", "", "School", "Degree", True),
+        ):
+            with self.subTest(old_id=old_id, new_id=new_id, new_label=new_label):
+                known = FormSchema((FormField(old_label, TEXT, True, control_id=old_id),))
+                fresh = FormSchema((FormField(new_label, TEXT, True, control_id=new_id),))
+                with patch.object(client, "_discover_schema", return_value=fresh):
+                    if is_new:
+                        with self.assertRaises(GreenhouseFormSchemaMismatch):
+                            client._raise_on_newly_revealed_required_fields(None, JOB_URL, known)
+                    else:
+                        client._raise_on_newly_revealed_required_fields(None, JOB_URL, known)
+
+
+
 class SchemaMatchesTests(SimpleTestCase):
     """Direct unit coverage of the option-set-aware drift comparison, since
     the integration tests above exercise it only indirectly."""
@@ -1163,6 +1211,7 @@ class SchemaSerializationTests(SimpleTestCase):
                 FormField("Email", TEXT, True),
                 FormField("Auth", SINGLE_SELECT, True, ("Yes", "No")),
                 FormField("Stack", MULTI_SELECT, False, ("Python", "Go")),
+                FormField("School", COMBOBOX_SELECT, True, ("School A",), "school--0", True),
             )
         )
 

@@ -4,6 +4,9 @@
 made. Each test uses a distinct board_token so the shared process-wide
 LocMemCache (see config/settings/test.py) never leaks state between tests.
 """
+from unittest.mock import patch
+
+from django.core.cache import cache
 from django.test import SimpleTestCase
 
 from apps.auto_apply.greenhouse_form.education_api import (
@@ -120,7 +123,25 @@ class FetchFullListTests(SimpleTestCase):
 
         result = fetch_full_list("acme-empty-page", "schools", session=session)
 
-        self.assertEqual(result, ("Only School",))
+        self.assertIsNone(result)
+        session.responses_by_page = {1: _page(["Complete School"], 1)}
+        self.assertEqual(
+            fetch_full_list("acme-empty-page", "schools", session=session),
+            ("Complete School",),
+        )
+
+    def test_missing_total_count_is_not_cached(self):
+        session = FakeSession({1: _page(["Sample"], None)})
+        self.assertIsNone(fetch_full_list("acme-no-total", "schools", session=session))
+        session.responses_by_page = {1: _page(["Full list"], 1)}
+        self.assertEqual(fetch_full_list("acme-no-total", "schools", session=session), ("Full list",))
+
+    @patch("apps.auto_apply.greenhouse_form.education_api._MAX_PAGES", 1)
+    def test_page_limit_does_not_cache_partial_list(self):
+        session = FakeSession({1: _page(["Sample"], 2)})
+        self.assertIsNone(fetch_full_list("acme-page-limit", "schools", session=session))
+        session.responses_by_page = {1: _page(["Full list"], 1)}
+        self.assertEqual(fetch_full_list("acme-page-limit", "schools", session=session), ("Full list",))
 
     def test_result_is_cached_across_calls_for_same_board_and_type(self):
         session = FakeSession({1: _page(["Cached School"], 1)})
@@ -130,6 +151,17 @@ class FetchFullListTests(SimpleTestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(len(session.calls), 1, "second call should be served from cache")
+
+    def test_legacy_partial_cache_is_not_reused(self):
+        cache.set("greenhouse_education_api:acme-legacy:schools", ("Partial",))
+        self.addCleanup(cache.delete, "greenhouse_education_api:acme-legacy:schools")
+        session = FakeSession({1: _page(["Complete"], 1)})
+        self.assertEqual(fetch_full_list("acme-legacy", "schools", session=session), ("Complete",))
+        self.assertEqual(len(session.calls), 1)
+
+    def test_empty_page_with_invalid_total_count_returns_none(self):
+        session = FakeSession({1: _page([], "invalid")})
+        self.assertIsNone(fetch_full_list("acme-invalid-total", "schools", session=session))
 
     def test_duplicate_items_are_deduplicated(self):
         session = FakeSession({1: _page(["Duplicate U", "Duplicate U", "Unique U"], 3)})

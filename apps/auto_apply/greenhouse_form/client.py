@@ -481,7 +481,7 @@ class GreenhouseFormClient:
 
     # -- schema discovery --------------------------------------------------
 
-    def _discover_schema(self, page, job_url: str) -> FormSchema:
+    def _discover_schema(self, page, job_url: str, *, interactive: bool = True) -> FormSchema:
         fields: list[FormField] = []
         seen_control_ids: set[str] = set()
         labels = page.locator("form label")
@@ -556,15 +556,20 @@ class GreenhouseFormClient:
                 # on the surrounding group instead. Prefer it when present.
                 label_text = self._group_label_for(control) or label_text
             required = self._is_required(control)
-            options = self._extract_options(page, control, field_type)
-            if field_type == COMBOBOX_SELECT:
-                options = self._maybe_full_education_options(job_url, control_id, options)
+            options = self._extract_options(page, control, field_type) if interactive else ()
+            options_complete = False
+            if interactive and field_type == COMBOBOX_SELECT:
+                full_options = self._maybe_full_education_options(job_url, control_id)
+                if full_options is not None:
+                    options = full_options
+                    options_complete = True
             form_field = FormField(
                 label=label_text,
                 field_type=field_type,
                 required=required,
                 options=options,
                 control_id=control_id,
+                options_complete=options_complete,
             )
             if required and not form_field.is_supported:
                 raise GreenhouseFormSchemaMismatch(
@@ -573,7 +578,9 @@ class GreenhouseFormClient:
                 )
             fields.append(form_field)
 
-        fields.extend(self._discover_aria_labelledby_only_fields(page, job_url, seen_control_ids))
+        fields.extend(self._discover_aria_labelledby_only_fields(
+            page, job_url, seen_control_ids, interactive=interactive
+        ))
         return FormSchema(fields=tuple(fields))
 
     def _raise_on_newly_revealed_required_fields(
@@ -592,10 +599,15 @@ class GreenhouseFormClient:
         left as-is -- this pass only ever fails closed on the required
         case, matching every other fail-closed check in this file.
         """
-        rediscovered = self._discover_schema(page, job_url)
-        known_labels = {f.label for f in filled_schema.fields}
+        rediscovered = self._discover_schema(page, job_url, interactive=False)
         newly_required = [
-            f.label for f in rediscovered.fields if f.required and f.label not in known_labels
+            field.label for field in rediscovered.fields
+            if field.required and not any(
+                field.control_id == known.control_id
+                if field.control_id and known.control_id
+                else field.label == known.label
+                for known in filled_schema.fields
+            )
         ]
         if newly_required:
             raise GreenhouseFormSchemaMismatch(
@@ -606,7 +618,7 @@ class GreenhouseFormClient:
 
     @staticmethod
     def _discover_aria_labelledby_only_fields(
-        page, job_url: str, seen_control_ids: set[str]
+        page, job_url: str, seen_control_ids: set[str], *, interactive: bool = True
     ) -> list[FormField]:
         """Second discovery pass for controls with no `<label>` at all.
 
@@ -670,13 +682,18 @@ class GreenhouseFormClient:
                 seen_control_ids.add(control_id)
             field_type = GreenhouseFormClient._classify_field_type(control)
             required = GreenhouseFormClient._is_required(control)
-            options = GreenhouseFormClient._extract_options(page, control, field_type)
+            options_complete = False
+            options = (
+                GreenhouseFormClient._extract_options(page, control, field_type)
+                if interactive else ()
+            )
             form_field = FormField(
                 label=label_text,
                 field_type=field_type,
                 required=required,
                 options=options,
                 control_id=control_id,
+                options_complete=options_complete,
             )
             if required and not form_field.is_supported:
                 raise GreenhouseFormSchemaMismatch(
@@ -880,25 +897,25 @@ class GreenhouseFormClient:
         return ()
 
     def _maybe_full_education_options(
-        self, job_url: str, control_id: str, dom_options: tuple[str, ...]
-    ) -> tuple[str, ...]:
+        self, job_url: str, control_id: str
+    ) -> tuple[str, ...] | None:
         """Replace a DOM-scraped, possibly-partial option list with the
         complete one when this control is backed by Greenhouse's public
         education API (School/Degree/Discipline) -- see `education_api`
-        module docstring. Falls back to `dom_options` unchanged when the
+        module docstring. Returns None when the
         control isn't API-backed, or the API call fails for any reason
         (network error, unexpected shape, board without this endpoint).
         """
         education_type = education_type_for_control_id(control_id)
         if education_type is None:
-            return dom_options
+            return None
         board_token = self._extract_board_token(job_url)
         if not board_token:
-            return dom_options
+            return None
         full_options = fetch_full_list(
             board_token, education_type, session=self._education_api_session
         )
-        return full_options if full_options else dom_options
+        return full_options
 
     @staticmethod
     def _extract_board_token(job_url: str) -> str:

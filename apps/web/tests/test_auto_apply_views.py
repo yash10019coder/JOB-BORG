@@ -366,6 +366,30 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
 
 
 class EditAutoApplyDraftTests(AutoApplyViewsTestCase):
+    def test_edit_validates_choices_and_leaves_blank_answers_unconfirmed(self):
+        for value, options, accepted, needs_review in (
+            ("Forged", ["Yes", "No"], False, True),
+            ("Yes", ["Yes", "No"], True, False),
+            ("", ["Yes", "No"], True, True),
+            ("  ", [], True, True),
+        ):
+            with self.subTest(value=value):
+                draft = self._draft(self.alice, self._job(), answers={
+                    "Q": {"value": "No", "options": options, "needs_review": True},
+                    "Text": {"value": "original", "needs_review": True},
+                })
+                response = self._client_for(self.alice).post(
+                    reverse("edit_auto_apply_draft", args=[draft.id]),
+                    {"label__0": "Text", "value__0": "changed", "label__1": "Q", "value__1": value},
+                    follow=True,
+                )
+                draft.refresh_from_db()
+                self.assertEqual(draft.answers["Q"]["value"], value if accepted else "No")
+                self.assertEqual(draft.answers["Q"]["needs_review"], needs_review)
+                self.assertEqual(draft.answers["Text"]["value"], "changed" if accepted else "original")
+                if not accepted:
+                    self.assertContains(response, "Choose an allowed option for Q.")
+
     def test_edit_updates_answers_and_clears_needs_review(self):
         job = self._job()
         draft = self._draft(

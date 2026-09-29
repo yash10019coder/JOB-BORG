@@ -14,6 +14,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_ACKNOWLEDGEMENT,
+    COMBOBOX_SELECT,
     FILE,
     FormField,
     FormSchema,
@@ -93,6 +94,24 @@ class DraftingServiceTestCase(TestCase):
             employer=self.employer,
             title="Backend Engineer",
         )
+
+
+class OptionCompletenessTests(DraftingServiceTestCase):
+    def test_only_complete_combobox_options_constrain_questions(self):
+        for complete in (False, True):
+            with self.subTest(complete=complete):
+                llm = FakeLLMClient()
+                field = FormField("School", COMBOBOX_SELECT, True, ("Sample School",), options_complete=complete)
+                draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema((field,))), llm_client=llm)
+                question = llm.calls[0][0][0]
+                self.assertEqual(question.options, field.options if complete else ())
+                self.assertEqual(tuple(draft.answers["School"]["options"]), field.options)
+                draft.delete()  # Each case must start without an existing draft.
+
+    def test_standard_field_retains_options(self):
+        field = FormField("First Name", SINGLE_SELECT, True, ("Alice", "Other"))
+        draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema((field,))), llm_client=FakeLLMClient())
+        self.assertEqual(tuple(draft.answers["First Name"]["options"]), field.options)
 
 
 class NonGreenhouseJobTests(DraftingServiceTestCase):

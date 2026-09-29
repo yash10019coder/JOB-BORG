@@ -27,7 +27,7 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
-from apps.auto_apply.greenhouse_form.field_mapping import FILE, FormField, schema_to_dict
+from apps.auto_apply.greenhouse_form.field_mapping import COMBOBOX_SELECT, FILE, FormField, schema_to_dict
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
 from apps.auto_apply.models import AutoApplyDraft
@@ -177,13 +177,17 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "category": "standard",
                 "reason": "profile",
                 "field_type": form_field.field_type,
+                "options": form_field.options,
             }
         elif form_field.required:
             unanswerable_required.append(form_field.label)
 
     # -- Custom fields (R5): explicit answer, then LLM inference. -----------
     questions = [
-        Question(id=f.label, text=f.label, field_type=f.field_type, options=f.options)
+        Question(
+            id=f.label, text=f.label, field_type=f.field_type,
+            options=f.options if f.field_type != COMBOBOX_SELECT or f.options_complete else (),
+        )
         for f in custom_fields
     ]
     resolved = answer_resolution.resolve_field_answers(
