@@ -109,6 +109,24 @@ DJANGO_SETTINGS_MODULE=config.settings.test \
 python manage.py test
 ```
 
+## CI/CD
+
+GitHub Actions (`.github/workflows/`):
+
+- **CI** (`ci.yml`) runs on every pull request and every push to `master`:
+  - `test` — `manage.py check`, `makemigrations --check --dry-run` (fails if a
+    model change has no migration), then the full suite against a
+    `pgvector/pgvector:pg16` service container.
+  - `docker-build` — builds the `Dockerfile` without pushing.
+- **CD** (`cd.yml`) runs after CI succeeds on `master` and publishes a
+  production image (`requirements/base.txt` only) to
+  `ghcr.io/<owner>/<repo>` tagged `latest` and with the commit SHA. There is no
+  deploy step yet; add one after `publish-image` once a target exists.
+- **Dependabot** opens weekly update PRs for pip, GitHub Actions, and Docker.
+
+To make CI a merge gate, mark `test` and `docker-build` as required status checks
+in the `master` branch protection rules (repo settings).
+
 ## Layout
 
 ```

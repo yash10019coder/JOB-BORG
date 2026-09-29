@@ -1,0 +1,99 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  tone_instructions: >-
+    Be a skeptical pessimist. Assume the change breaks something until shown
+    otherwise; look for failure modes, edge cases and unhandled errors first.
+    Report every finding with a "Trust: NN/100" score; never skip any.
+  request_changes_workflow: false
+  high_level_summary: true
+  poll_status: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+
+  path_filters:
+    # Large generated/versioned data; review the generator, not the output.
+    - "!apps/locations/geodata/**"
+    - "!**/tests/fixtures/**"
+    - "!**/__pycache__/**"
+    # Pipeline artifacts, reviewed by the authoring workflow.
+    - "!docs/plans/**"
+    - "!docs/brainstorms/**"
+    - "!observability/**"
+
+  path_instructions:
+    - path: "**"
+      instructions: >
+        Take a pessimistic stance: assume the change is wrong, incomplete or
+        will fail in production until the diff proves otherwise. Ask what
+        happens on empty/null input, partial failure, retries, concurrent
+        runs, timeouts and bad upstream data, and flag anything that is
+        unhandled or untested.
+        Never withhold a finding. Publish every issue you notice, including
+        speculative, low-severity and nitpick ones, instead of filtering
+        out the ones you are unsure about. Prefix each finding with a trust
+        score, formatted as "Trust: NN/100", meaning how confident you are
+        that it is a real problem: 90-100 verified in the code, 60-89 likely,
+        30-59 plausible but unverified, 0-29 speculative. Add one line
+        saying what evidence the score rests on.
+        Review every change for its impact, not just its correctness.
+        1) Impact on existing behavior: trace callers, tasks, signals and
+        templates that depend on what changed (the pipeline is
+        ingest -> classify -> match -> recommend). Flag regressions, changed
+        defaults, altered return shapes, and stale rows or data that existing
+        records would be left with (migrations, backfills, alias/version
+        bumps).
+        2) New features: check the new behavior against the PR description
+        and existing conventions, and flag missing tests for it.
+        3) Reuse before adding: search the repo for an existing helper,
+        model, task, client or setting that already does this, and flag
+        duplicated logic or a parallel implementation of something that
+        exists.
+        4) Keep it simple: flag over-engineering such as speculative
+        abstractions, unused flags or parameters, needless layers, config for
+        a single use, and new dependencies where the standard library or
+        Django already covers it. Prefer the smallest change that fits the
+        surrounding code's style.
+    - path: "apps/locations/**"
+      instructions: >
+        Dependency-free leaf app: pure, deterministic, no DB/network, never
+        imports from jobs/web/matching. A confidently wrong location
+        resolution is worse than an unresolved one. If resolution logic
+        changes, CURRENT_LOCATION_ALIAS_VERSION must be bumped.
+    - path: "apps/classification/**"
+      instructions: >
+        Dependency-free leaf app: pure rule engine, no DB/network, must not
+        import from jobs/web/matching.
+    - path: "apps/*/migrations/**"
+      instructions: >
+        Check migrations are reversible and safe to run while old code is
+        still serving (no destructive changes without a deploy plan).
+    - path: "apps/matching/**"
+      instructions: >
+        Disqualification deletes the UserJobMatch row; JobApplication rows
+        are never touched by rematch. Keep prefilter and scorer logic shared
+        between match_job and rematch_profile_obj.
+    - path: "apps/jobs/ingestion/**"
+      instructions: >
+        Ingestion must stay idempotent on (source_ats, source_job_id). Each
+        ATS client is DB-free and raises its own *Unavailable/*ParseError.
+    - path: ".github/workflows/**"
+      instructions: >
+        Least-privilege permissions per job, no untrusted PR code with
+        write tokens (watch workflow_run), no secrets in plain text.
+
+  tools:
+    ruff:
+      enabled: true
+    gitleaks:
+      enabled: false   # GitGuardian already covers secret scanning.
+    actionlint:
+      enabled: true
+
+chat:
+  auto_reply: true

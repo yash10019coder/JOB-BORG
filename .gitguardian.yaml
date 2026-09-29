@@ -1,0 +1,8 @@
+version: 2
+
+secret:
+  ignored_matches:
+    # Throwaway credentials for the local dev/CI Postgres container
+    # (docker-compose.yml and the CI service container). Not a real secret.
+    - name: Dev/CI Postgres password
+      match: jobborg
