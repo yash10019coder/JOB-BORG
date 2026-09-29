@@ -7,21 +7,26 @@ around single-row writes (handled inside `services.drafting._persist_draft`
 for the draft create, and inline in `submit_auto_apply_draft` below for the
 `JobApplication` upsert + draft status write).
 """
+from contextlib import contextmanager, closing
+from copy import copy
 from datetime import timedelta, datetime, timezone
+import gzip
 import logging
 import os
-import shutil
 import tempfile
 import time
 import uuid
 
+from botocore.config import Config
+from boto3.s3.transfer import S3Transfer
 from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.core.files.storage import default_storage
+from django.core.files.storage import storages
 from django.db import transaction
 from django.utils import timezone as django_timezone
+from storages.backends.s3 import S3Storage
 
 from apps.applications.models import JobApplication
 from apps.jobs.models import Job
@@ -68,28 +73,92 @@ def _submit_budget_seconds() -> float:
     return max(30.0, float(sending_timeout) - _SWEEP_SAFETY_MARGIN_SECONDS)
 
 
-def _materialize_file_answers(entries: dict, answers: dict, temp_files: list[str]) -> None:
-    """Replace each FILE answer that is a `default_storage` key with a local
-    temp-file path Playwright can upload.
+def _remaining_file_budget(deadline_monotonic: float) -> float:
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise GreenhouseFormError("Submission deadline expired while preparing file uploads.")
+    return remaining
 
-    Drafting stores the storage key (see `_standard_field_value`) so the
-    draft works with remote storage and with a worker that does not share
-    `MEDIA_ROOT` with web. A value that already is an existing local file
-    (drafts created before this change stored an absolute path) is left as is.
-    Every temp file created is appended to `temp_files` for the caller to
-    delete, including on a mid-way failure.
+
+@contextmanager
+def _file_answer_storage(deadline_monotonic: float):
+    storage = storages["default"]
+    if not isinstance(storage, S3Storage):
+        yield storage
+        return
+
+    # S3Storage's copy protocol resets cached connections. Keep timeout changes
+    # local to this submission, without mutating the shared default backend.
+    storage = copy(storage)
+    remaining = _remaining_file_budget(deadline_monotonic)
+    storage.client_config = storage.client_config.merge(Config(
+        connect_timeout=min(storage.client_config.connect_timeout, remaining),
+        read_timeout=min(storage.client_config.read_timeout, remaining),
+        retries={"total_max_attempts": 1},
+    ))
+    with closing(storage.connection.meta.client):
+        yield storage
+
+
+@contextmanager
+def _file_answer_stream(storage, source):
+    if not isinstance(storage, S3Storage):
+        yield source, source
+        return
+
+    # S3File.read() first downloads the ENTIRE object into a spool. Stream the
+    # object directly so each network read can honor the remaining budget.
+    params = {
+        key: value for key, value in storage.get_object_parameters(source.name).items()
+        if key in S3Transfer.ALLOWED_DOWNLOAD_ARGS
+    }
+    response = source.obj.get(**params)
+    with closing(response["Body"]) as body:
+        if storage.gzip and response.get("ContentEncoding") == "gzip":
+            with gzip.GzipFile(fileobj=body, mode="rb") as stream:
+                yield stream, body
+        else:
+            yield body, body
+
+
+def _materialize_file_answers(
+    entries: dict, answers: dict, temp_files: list[str], *, deadline_monotonic: float,
+) -> None:
+    """Resolve storage keys to local uploads, retaining legacy absolute paths.
+
+    Missing keys retain their existing fallback. Register partial temp files
+    immediately so the caller also cleans up failed or timed-out copies.
     """
     for label, entry in entries.items():
         value = answers.get(label)
         if entry.get("field_type") != FILE or not value:
             continue
-        if os.path.isfile(str(value)) or not default_storage.exists(str(value)):
+        value = str(value)
+        # Absolute paths are legacy answers, not storage keys. In particular,
+        # FileSystemStorage rejects paths outside MEDIA_ROOT in exists().
+        if os.path.isabs(value) and os.path.isfile(value):
             continue
-        suffix = os.path.splitext(str(value))[1]
-        with default_storage.open(str(value), "rb") as source:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as target:
-                temp_files.append(target.name)
-                shutil.copyfileobj(source, target)
+        with _file_answer_storage(deadline_monotonic) as storage:
+            _remaining_file_budget(deadline_monotonic)
+            if not storage.exists(value):
+                continue
+            _remaining_file_budget(deadline_monotonic)
+            with storage.open(value, "rb") as source:
+                _remaining_file_budget(deadline_monotonic)
+                with _file_answer_stream(storage, source) as streams:
+                    stream, timeout_source = streams
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(value)[1]) as target:
+                        temp_files.append(target.name)
+                        while True:
+                            remaining = _remaining_file_budget(deadline_monotonic)
+                            set_timeout = getattr(timeout_source, "set_socket_timeout", None)
+                            if callable(set_timeout):
+                                set_timeout(remaining)
+                            chunk = stream.read(64 * 1024)
+                            _remaining_file_budget(deadline_monotonic)
+                            if not chunk:
+                                break
+                            target.write(chunk)
         answers[label] = temp_files[-1]
 
 
@@ -219,7 +288,9 @@ def submit_auto_apply_draft(draft_id):
     )
     try:
         try:
-            _materialize_file_answers(draft.answers or {}, answers, temp_files)
+            _materialize_file_answers(
+                draft.answers or {}, answers, temp_files, deadline_monotonic=deadline,
+            )
             form_client.submit(
                 job.source_url,
                 answers,

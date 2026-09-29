@@ -9,9 +9,10 @@ tests patch `GreenhouseFormClient` at the `apps.auto_apply.tasks` import
 site instead. `CELERY_TASK_ALWAYS_EAGER` (test settings) makes `.delay()`
 run synchronously, so tasks are simply called directly here.
 """
+import io
 import os
 from datetime import timedelta
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
@@ -254,6 +255,44 @@ class SubmitAutoApplyDraftSuccessTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertFalse(os.path.exists(seen["path"]))
         draft.refresh_from_db()
         self.assertEqual(draft.status, AutoApplyDraft.Status.APPLIED)
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_file_copy_deadline_fails_before_submit_and_cleans_partial_file(self, mock_client_cls):
+        draft = self._make_draft(answers={
+            "Resume": {"value": "resume.pdf", "field_type": "file"},
+        })
+        source = io.BytesIO(b"resume")
+        storage = Mock()
+        storage.exists.return_value = True
+        storage.open.return_value = source
+        created = []
+        from tempfile import NamedTemporaryFile
+
+        def track_temp_file(**kwargs):
+            target = NamedTemporaryFile(**kwargs)
+            created.append(target.name)
+            return target
+
+        with patch("apps.auto_apply.tasks.time.monotonic", return_value=0.0) as clock:
+            def stalled_read(size):
+                clock.return_value = 1000.0
+                return b"resume"
+
+            source.read = stalled_read
+            with patch("apps.auto_apply.tasks.storages", {"default": storage}), patch(
+                "apps.auto_apply.tasks.tempfile.NamedTemporaryFile", side_effect=track_temp_file,
+            ):
+                submit_auto_apply_draft(draft.pk)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.SUBMISSION_FAILED)
+        self.assertIn("deadline expired", draft.error_message)
+        mock_client_cls.return_value.submit.assert_not_called()
+        self.assertFalse(JobApplication.objects.filter(user=self.user, job=self.job).exists())
+        self.assertEqual(len(created), 1)
+        self.assertFalse(os.path.exists(created[0]))
+        self.assertTrue(source.closed)
 
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_existing_saved_job_application_is_upserted_to_applied(self, mock_client_cls):
