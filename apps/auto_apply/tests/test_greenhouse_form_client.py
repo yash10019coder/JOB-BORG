@@ -620,6 +620,27 @@ class GreenhouseFormClientTests(SimpleTestCase):
         for value in ("x", ["x"], ["", "x"], 0, False):
             self.assertFalse(blank(value), value)
 
+    def test_submit_waits_for_async_resume_upload_to_finish(self):
+        """Regression: Greenhouse registers an uploaded file only after a
+        browser-side upload finishes (a [role=progressbar] is shown until
+        then), though the filename preview appears at once. Clicking Submit
+        in that window fails validation with "Resume/CV is required." even
+        though the file visibly looks attached."""
+        html = _fixture_html("greenhouse_async_resume_upload_form.html")
+        schema = self._client(html).inspect(JOB_URL)
+
+        result = self._client(html, confirmation_timeout_ms=1000).submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+
     # -- required unsupported field type ----------------------------------
 
     def test_required_unsupported_field_type_raises_schema_mismatch(self):
