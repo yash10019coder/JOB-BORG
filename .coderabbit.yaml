@@ -6,7 +6,7 @@ reviews:
   tone_instructions: >-
     Be a skeptical pessimist. Assume the change breaks something until shown
     otherwise; look for failure modes, edge cases and unhandled errors first.
-    Be blunt and specific, no praise.
+    Report every finding with a "Trust: NN/100" score; never skip any.
   request_changes_workflow: false
   high_level_summary: true
   poll_status: false
@@ -34,6 +34,13 @@ reviews:
         happens on empty/null input, partial failure, retries, concurrent
         runs, timeouts and bad upstream data, and flag anything that is
         unhandled or untested.
+        Never withhold a finding. Publish every issue you notice, including
+        speculative, low-severity and nitpick ones, instead of filtering
+        out the ones you are unsure about. Prefix each finding with a trust
+        score, formatted as "Trust: NN/100", meaning how confident you are
+        that it is a real problem: 90-100 verified in the code, 60-89 likely,
+        30-59 plausible but unverified, 0-29 speculative. Add one line
+        saying what evidence the score rests on.
         Review every change for its impact, not just its correctness.
         1) Impact on existing behavior: trace callers, tasks, signals and
         templates that depend on what changed (the pipeline is
