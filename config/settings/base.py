@@ -340,8 +340,11 @@ AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS = env.int(
 AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS = env.int(
     "AUTO_APPLY_VERIFICATION_POLL_INTERVAL_SECONDS", default=4
 )
+# Greenhouse sends the code from no-reply@us.greenhouse-mail.io (confirmed live),
+# a different registrable domain than greenhouse.io -- both must be allowed.
 AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST = env.list(
-    "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST", default=["greenhouse.io"]
+    "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST",
+    default=["greenhouse.io", "greenhouse-mail.io"],
 )
 
 
