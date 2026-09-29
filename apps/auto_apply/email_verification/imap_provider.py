@@ -1,6 +1,7 @@
 """IMAP-backed EmailCodeProvider implementation."""
 from datetime import datetime, timezone
 import imaplib
+import io
 import logging
 import socket
 import ssl
@@ -18,6 +19,49 @@ if TYPE_CHECKING:
     from apps.accounts.models import EmailInboxCredential
 
 logger = logging.getLogger(__name__)
+
+
+def _remaining_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise socket.timeout("IMAP verification deadline expired")
+    return min(10.0, remaining)
+
+
+class _DeadlineSocketReader(socket.SocketIO):
+    """Refresh the timeout for every raw read, including partial literals/lines."""
+
+    def __init__(self, sock, deadline):
+        super().__init__(sock, "rb")
+        self.deadline = deadline
+
+    def readinto(self, buffer):
+        self._sock.settimeout(_remaining_timeout(self.deadline))
+        return super().readinto(buffer)
+
+
+class _DeadlineIMAP4_SSL(imaplib.IMAP4_SSL):
+    def __init__(self, *args, deadline_monotonic, **kwargs):
+        self.deadline = deadline_monotonic
+        super().__init__(*args, **kwargs)
+
+    def _create_socket(self, timeout):
+        sock = imaplib.IMAP4._create_socket(self, _remaining_timeout(self.deadline))
+        try:
+            sock.settimeout(_remaining_timeout(self.deadline))
+            return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+        except Exception:
+            sock.close()
+            raise
+
+    def open(self, host="", port=imaplib.IMAP4_SSL_PORT, timeout=None):
+        super().open(host, port, timeout)
+        self.file.close()
+        self.file = io.BufferedReader(_DeadlineSocketReader(self.sock, self.deadline))
+
+    def send(self, data):
+        self.sock.settimeout(_remaining_timeout(self.deadline))
+        super().send(data)
 
 
 def build_email_code_provider(user) -> EmailCodeProvider | None:
@@ -74,95 +118,26 @@ class ImapEmailCodeProvider:
         sender_allowlist = getattr(settings, "AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST", ["greenhouse.io"])
 
         imap_client = None
+        logging_in = False
+
+        def command(method, *args, **kwargs):
+            imap_client.sock.settimeout(_remaining_timeout(deadline_monotonic))
+            return method(*args, **kwargs)
+
         try:
-            # Calculate remaining budget for connection attempt (RH2)
-            remaining_for_connection = deadline_monotonic - time.monotonic()
-            if remaining_for_connection <= 0:
-                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-
-            # Cap socket timeout to remaining budget, but keep at least 3s minimum
-            # to avoid making the timeout 0 on a nearly-expired deadline
-            socket_timeout = max(3.0, min(10.0, remaining_for_connection))
-
-            # Connect to IMAP server with deadline-aware socket timeout
             ssl_context = ssl.create_default_context()
-            imap_client = imaplib.IMAP4_SSL(
+            socket_timeout = _remaining_timeout(deadline_monotonic)
+            imap_client = _DeadlineIMAP4_SSL(
                 host=self.credential.imap_host,
                 port=self.credential.imap_port,
                 ssl_context=ssl_context,
                 timeout=socket_timeout,
+                deadline_monotonic=deadline_monotonic,
             )
-        except socket.timeout as exc:
-            logger.warning(
-                "IMAP connection timeout for user_id=%s host=%s",
-                self.credential.user_id,
-                self.credential.imap_host,
-            )
-            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-        except (socket.error, OSError, ssl.SSLError) as exc:
-            logger.warning(
-                "IMAP connection failed for user_id=%s host=%s: %s",
-                self.credential.user_id,
-                self.credential.imap_host,
-                type(exc).__name__,
-            )
-            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
-
-        # Login with deadline check (RH2)
-        try:
-            if time.monotonic() >= deadline_monotonic:
-                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-
-            imap_client.login(self.credential.email_address, raw_password)
-        except imaplib.IMAP4.error as exc:
-            logger.warning(
-                "IMAP login rejected for user_id=%s host=%s",
-                self.credential.user_id,
-                self.credential.imap_host,
-            )
-            try:
-                imap_client.logout()
-            except Exception:
-                pass
-            # R7: Auth failure deactivates credential
-            self.credential.mark_auth_failed("inbox_auth_failed")
-            return CodeLookupResult(outcome=VerificationOutcome.INBOX_AUTH_FAILED)
-        except socket.timeout as exc:
-            logger.warning(
-                "IMAP login timeout for user_id=%s",
-                self.credential.user_id,
-            )
-            try:
-                imap_client.logout()
-            except Exception:
-                pass
-            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-        except (socket.error, OSError, ssl.SSLError) as exc:
-            logger.warning(
-                "IMAP socket error during login for user_id=%s: %s",
-                self.credential.user_id,
-                type(exc).__name__,
-            )
-            try:
-                imap_client.logout()
-            except Exception:
-                pass
-            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
-
-        try:
-            # Select inbox in read-only mode (D2)
-            if time.monotonic() >= deadline_monotonic:
-                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-
-            try:
-                status, _ = imap_client.select("INBOX", readonly=True)
-            except socket.timeout:
-                logger.warning(
-                    "IMAP select() timeout for user_id=%s",
-                    self.credential.user_id,
-                )
-                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-
+            logging_in = True
+            command(imap_client.login, self.credential.email_address, raw_password)
+            logging_in = False
+            status, _ = command(imap_client.select, "INBOX", readonly=True)
             if status != "OK":
                 return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
 
@@ -173,10 +148,10 @@ class ImapEmailCodeProvider:
             while time.monotonic() < deadline_monotonic:
                 try:
                     # CRITICAL (D2): Must execute NOOP before SEARCH to force server sync!
-                    imap_client.noop()
+                    command(imap_client.noop)
 
                     # Search messages from today onwards
-                    search_status, data = imap_client.search(None, f'(SINCE "{imap_since_str}")')
+                    search_status, data = command(imap_client.search, None, f'(SINCE "{imap_since_str}")')
                     if search_status == "OK" and data and data[0]:
                         msg_ids = data[0].split()
                         # Inspect newest messages first (limit to 15 newest to bound I/O)
@@ -184,7 +159,7 @@ class ImapEmailCodeProvider:
 
                         found_codes: list[str] = []
                         for msg_id in reversed(recent_ids):
-                            fetch_status, msg_data = imap_client.fetch(msg_id, "(BODY.PEEK[])")
+                            fetch_status, msg_data = command(imap_client.fetch, msg_id, "(BODY.PEEK[])")
                             if fetch_status != "OK" or not msg_data:
                                 continue
 
@@ -240,12 +215,24 @@ class ImapEmailCodeProvider:
 
             return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
 
+        except socket.timeout:
+            return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+        except imaplib.IMAP4.error:
+            if logging_in:
+                self.credential.mark_auth_failed("inbox_auth_failed")
+                return CodeLookupResult(outcome=VerificationOutcome.INBOX_AUTH_FAILED)
+            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
+        except OSError:
+            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
         finally:
-            try:
-                imap_client.close()
-            except Exception:
-                pass
-            try:
-                imap_client.logout()
-            except Exception:
-                pass
+            if imap_client is not None:
+                for method in (imap_client.close, imap_client.logout):
+                    try:
+                        command(method)
+                    except Exception:
+                        pass
+                # Local shutdown requires no server response, even after expiry.
+                try:
+                    imap_client.shutdown()
+                except Exception:
+                    pass

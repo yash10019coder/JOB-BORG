@@ -1249,7 +1249,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         mock_page.locator.side_effect = mock_locator
         mock_page.get_by_role.return_value = status_reg
 
-        def on_click():
+        def on_click(**kwargs):
             call_count["val"] = 1
 
         submit_btn.click.side_effect = on_click
@@ -1264,7 +1264,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             mock_page, provider=mock_provider, deadline_monotonic=time.monotonic() + 300
         )
         self.assertTrue(result.success)
-        code_input.fill.assert_called_with("654321")
+        code_input.fill.assert_called_with("654321", timeout=client.navigation_timeout_ms)
 
     def test_post_code_failure_suppresses_debug_artifacts(self):
         from apps.auto_apply.email_verification.base import VerificationOutcome
@@ -1356,3 +1356,53 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
 
 
+class VerificationDeadlineTests(SimpleTestCase):
+    @patch("apps.auto_apply.greenhouse_form.client.time.monotonic")
+    def test_expiry_during_fill_prevents_submit(self, clock):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        clock.return_value = 100.0
+        client = GreenhouseFormClient()
+        page = MagicMock()
+        provider = MagicMock()
+        def lookup(**kwargs):
+            clock.return_value = 129.5
+            return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="123456")
+        provider.get_code.side_effect = lookup
+        field = MagicMock()
+        button = MagicMock()
+        page.locator.side_effect = lambda sel: MagicMock(first=button) if "button" in sel else MagicMock(count=lambda: 1, first=field)
+        def fill(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], 500.0)
+            clock.return_value = 130.0
+        field.fill.side_effect = fill
+        with patch.object(client, "_check_success_signal", return_value=None), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), self.assertRaises(GreenhouseFormVerificationFailed) as caught:
+            client._confirm_success(page, provider=provider, deadline_monotonic=130.0)
+        self.assertEqual(caught.exception.outcome, VerificationOutcome.CODE_TIMEOUT)
+        self.assertIsNone(caught.exception.debug_artifacts)
+        button.click.assert_not_called()
+
+    @patch("apps.auto_apply.greenhouse_form.client.time.monotonic")
+    def test_multibox_fill_recalculates_timeout_and_stops_at_deadline(self, clock):
+        from apps.auto_apply.email_verification.base import VerificationOutcome
+        clock.return_value = 100.0
+        client = GreenhouseFormClient()
+        page = MagicMock()
+        single = MagicMock()
+        single.count.return_value = 3
+        boxes = MagicMock()
+        boxes.count.return_value = 3
+        fields = [MagicMock() for _ in range(3)]
+        boxes.nth.side_effect = fields.__getitem__
+        page.locator.side_effect = [single, boxes]
+        def fill(*args, **kwargs):
+            clock.return_value += 0.25
+        for field in fields:
+            field.fill.side_effect = fill
+        with self.assertRaises(GreenhouseFormVerificationFailed) as caught:
+            client._fill_verification_code(page, "123", deadline_monotonic=100.5)
+        self.assertEqual(caught.exception.outcome, VerificationOutcome.CODE_TIMEOUT)
+        fields[0].fill.assert_called_once_with("1", timeout=500.0)
+        fields[1].fill.assert_called_once_with("2", timeout=250.0)
+        fields[2].fill.assert_not_called()

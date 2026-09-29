@@ -1264,14 +1264,22 @@ class GreenhouseFormClient:
                 # submit-triggered navigation (e.g. "execution context was destroyed") must not
                 # escape this suppression and capture a screenshot of the just-typed code.
                 try:
-                    self._fill_verification_code(page, lookup_res.code)
+                    self._fill_verification_code(page, lookup_res.code, deadline_monotonic=deadline)
                     submit_button = page.locator(
                         "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
                     ).first
-                    submit_button.click()
+                    click_timeout = self._verification_timeout_ms(deadline)
+                    submit_button.click(timeout=click_timeout)
                     page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
                     post_code_check = self._check_success_signal(page)
+                except GreenhouseFormVerificationFailed:
+                    raise
                 except Exception as exc:
+                    if time.monotonic() >= deadline:
+                        raise GreenhouseFormVerificationFailed(
+                            "Deadline expired while submitting verification code",
+                            outcome=VerificationOutcome.CODE_TIMEOUT,
+                        ) from exc
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
                         "Failed while submitting verification code",
@@ -1312,8 +1320,16 @@ class GreenhouseFormClient:
 
         return None
 
-    @staticmethod
-    def _fill_verification_code(page, code: str) -> None:
+    def _verification_timeout_ms(self, deadline: float) -> float:
+        remaining_ms = (deadline - time.monotonic()) * 1000
+        if remaining_ms <= 0:
+            raise GreenhouseFormVerificationFailed(
+                "Deadline expired while submitting verification code",
+                outcome=VerificationOutcome.CODE_TIMEOUT,
+            )
+        return min(self.navigation_timeout_ms, remaining_ms) if self.navigation_timeout_ms else remaining_ms
+
+    def _fill_verification_code(self, page, code: str, *, deadline_monotonic: float) -> None:
         """Fill Greenhouse's verification-code control.
 
         Handles both shapes confirmed to occur live: a single input holding
@@ -1326,7 +1342,7 @@ class GreenhouseFormClient:
         """
         single = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
         if single.count() == 1:
-            single.first.fill(code)
+            single.first.fill(code, timeout=self._verification_timeout_ms(deadline_monotonic))
             return
 
         # Check the multi-box shape BEFORE falling back to "any single
@@ -1342,7 +1358,7 @@ class GreenhouseFormClient:
         if box_count >= 2:
             if box_count == len(code):
                 for i, char in enumerate(code):
-                    boxes.nth(i).fill(char)
+                    boxes.nth(i).fill(char, timeout=self._verification_timeout_ms(deadline_monotonic))
                 return
             raise RuntimeError(
                 f"Verification code length ({len(code)}) does not match the "
@@ -1350,7 +1366,7 @@ class GreenhouseFormClient:
             )
 
         if single.count() > 0:
-            single.first.fill(code)
+            single.first.fill(code, timeout=self._verification_timeout_ms(deadline_monotonic))
             return
 
         raise RuntimeError(

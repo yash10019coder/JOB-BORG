@@ -9,12 +9,17 @@ for the draft create, and inline in `submit_auto_apply_draft` below for the
 """
 from datetime import timedelta, datetime, timezone
 import logging
+import math
+import pickle
 import time
+import uuid
 
 from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
+from django.core.cache import cache, caches
+from django.core.cache.backends.locmem import LocMemCache
+from django.core.cache.backends.redis import RedisCache
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
@@ -51,14 +56,6 @@ _SWEEP_SAFETY_MARGIN_SECONDS = 60
 # occupying a worker slot with no AutoApplyDraft ever created.
 _DRAFT_HARD_KILL_SECONDS = 180
 
-# Per-user verification lock timeout (RH4). Much shorter than the overall
-# submission budget to ensure stale locks don't accumulate for very long if a
-# task is killed (SIGKILL) before the finally block runs to clean up. If a
-# legitimate submission takes longer than this to complete, the lock is freed
-# anyway and a concurrent submission can start (both will fail closed if
-# verification actually succeeds for one but the other races ahead).
-_VERIFICATION_LOCK_TIMEOUT_SECONDS = 120
-
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
@@ -68,6 +65,30 @@ def _submit_budget_seconds() -> float:
     """Compute current submission time budget from settings at call time (D1)."""
     sending_timeout = getattr(settings, "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", 600)
     return max(30.0, float(sending_timeout) - _SWEEP_SAFETY_MARGIN_SECONDS)
+
+
+def _release_verification_lock(lock_key: str, token: str) -> None:
+    """Atomically release only our lease on the configured cache backend."""
+    backend = caches["default"]
+    key = backend.make_and_validate_key(lock_key)
+    if isinstance(backend, RedisCache):
+        client = backend._cache.get_client(key, write=True)
+        client.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            key,
+            backend._cache._serializer.dumps(token),
+        )
+    elif isinstance(backend, LocMemCache):
+        # Tests use LocMemCache; comparison and deletion share its mutex.
+        with backend._lock:
+            if not backend._has_expired(key) and pickle.loads(backend._cache[key]) == token:
+                backend._delete(key)
+    else:
+        # An unsupported backend must expire the lease rather than risk
+        # deleting a newer owner's lock with a non-atomic get/delete pair.
+        logger.warning("Cannot atomically release verification lock on %s", type(backend).__name__)
 
 
 def _reason_code_for(exc: GreenhouseFormError) -> str:
@@ -160,10 +181,10 @@ def submit_auto_apply_draft(draft_id):
 
     lock_key = f"auto_apply:verification_lock:{draft.user_id}"
     acquired_lock = False
+    lock_token = uuid.uuid4().hex
     if provider is not None:
-        # RH4: Use fixed, safe lock timeout independent of submission budget
-        # to prevent stale locks if task is killed before cleanup runs
-        acquired_lock = bool(cache.add(lock_key, "1", timeout=_VERIFICATION_LOCK_TIMEOUT_SECONDS))
+        # Round up for Redis's integer TTL and cover the entire submission budget.
+        acquired_lock = bool(cache.add(lock_key, lock_token, timeout=math.ceil(budget)))
         if not acquired_lock:
             logger.warning(
                 "submit_auto_apply_draft(draft_id=%s): could not acquire verification lock for user_id=%s.",
@@ -176,11 +197,11 @@ def submit_auto_apply_draft(draft_id):
             draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
             return draft.pk
 
-    form_client = GreenhouseFormClient(
-        debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
-    )
     try:
         try:
+            form_client = GreenhouseFormClient(
+                debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
+            )
             form_client.submit(
                 job.source_url,
                 answers,
@@ -192,7 +213,7 @@ def submit_auto_apply_draft(draft_id):
         finally:
             if acquired_lock:
                 try:
-                    cache.delete(lock_key)
+                    _release_verification_lock(lock_key, lock_token)
                 except Exception:
                     pass
     except GreenhouseFormError as exc:
