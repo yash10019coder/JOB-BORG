@@ -108,9 +108,10 @@ class FetchFullListTests(SimpleTestCase):
 
         self.assertIsNone(result)
 
-    def test_empty_page_before_total_count_reached_stops_without_error(self):
-        # Defensive: if the API ever returns fewer items than total_count
-        # implies and then an empty page, stop rather than looping forever.
+    def test_empty_page_before_total_count_reached_returns_none_and_is_not_cached(self):
+        # If the API returns fewer items than total_count implies and then an
+        # empty page, stop rather than looping forever -- and do NOT hand back
+        # the truncated list as if it were complete.
         session = FakeSession(
             {
                 1: _page(["Only School"], 500),
@@ -120,7 +121,10 @@ class FetchFullListTests(SimpleTestCase):
 
         result = fetch_full_list("acme-empty-page", "schools", session=session)
 
-        self.assertEqual(result, ("Only School",))
+        self.assertIsNone(result)
+        from django.core.cache import cache
+
+        self.assertIsNone(cache.get("greenhouse_education_api:acme-empty-page:schools"))
 
     def test_result_is_cached_across_calls_for_same_board_and_type(self):
         session = FakeSession({1: _page(["Cached School"], 1)})

@@ -1221,6 +1221,12 @@ class GreenhouseFormClient:
             if deadline_monotonic is not None
             else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
         )
+        # Two deadlines: `deadline` (the task budget) bounds the email-code
+        # lookup only; a page showing neither a success nor a verification
+        # signal is given just `confirmation_timeout_ms` to resolve, so a
+        # rejected form doesn't hold a browser and worker slot for the whole
+        # multi-minute task budget.
+        poll_deadline = min(deadline, time.monotonic() + self.confirmation_timeout_ms / 1000)
         while True:
             result = self._check_success_signal(page, ignore_text)
             if result is not None:
@@ -1265,7 +1271,7 @@ class GreenhouseFormClient:
                 # RH3: Deadline check after code fetch completes. If code fetching
                 # consumed most of the remaining budget, fail closed rather than
                 # attempting to fill/submit with no time left.
-                if time.monotonic() >= deadline:
+                if self._deadline_expired(deadline):
                     raise GreenhouseFormVerificationFailed(
                         "Deadline expired after fetching verification code",
                         outcome=VerificationOutcome.CODE_TIMEOUT,
@@ -1276,20 +1282,31 @@ class GreenhouseFormClient:
                 # success check too (not just fill/submit): a Playwright race right after a
                 # submit-triggered navigation (e.g. "execution context was destroyed") must not
                 # escape this suppression and capture a screenshot of the just-typed code.
+                out_of_time = False
                 try:
                     self._fill_verification_code(page, lookup_res.code)
-                    submit_button = page.locator(
-                        "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
-                    ).first
-                    submit_button.click()
-                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                    post_code_check = self._check_success_signal(page, ignore_text)
+                    # Filling can itself take a while; don't submit the code
+                    # once the task budget is spent.
+                    out_of_time = self._deadline_expired(deadline)
+                    if not out_of_time:
+                        submit_button = page.locator(
+                            "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
+                        ).first
+                        submit_button.click()
+                        page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+                        post_code_check = self._check_success_signal(page, ignore_text)
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
                         "Failed while submitting verification code",
                         outcome=VerificationOutcome.CODE_REJECTED,
                     ) from exc
+
+                if out_of_time:
+                    raise GreenhouseFormVerificationFailed(
+                        "Deadline expired while entering the verification code",
+                        outcome=VerificationOutcome.CODE_TIMEOUT,
+                    )
 
                 if post_code_check is not None:
                     return post_code_check
@@ -1300,9 +1317,13 @@ class GreenhouseFormClient:
                     outcome=VerificationOutcome.CODE_REJECTED,
                 )
 
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= poll_deadline:
                 return None
             page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+
+    @staticmethod
+    def _deadline_expired(deadline: float) -> bool:
+        return time.monotonic() >= deadline
 
     def _check_success_signal(self, page, ignore_text: str | None = None) -> SubmissionResult | None:
         # Signal 1: an explicit ARIA status live region, if the board

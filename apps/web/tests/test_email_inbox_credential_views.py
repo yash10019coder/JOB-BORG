@@ -49,6 +49,25 @@ class EmailInboxCredentialViewTests(TestCase):
         self.assertEqual(cred.email_address, "usera@gmail.com")
         self.assertEqual(decrypt_secret(cred.app_password_encrypted), "abcdefghijklmnop")
 
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=[])
+    @patch("imaplib.IMAP4_SSL")
+    def test_missing_encryption_config_saves_nothing_and_shows_an_error(self, mock_imap_cls):
+        mock_imap_cls.return_value.login.return_value = ("OK", [b"Logged in"])
+        self.client.login(username="usera", password="pw")
+
+        response = self.client.post(
+            self.url,
+            {
+                "email_address": "usera@gmail.com",
+                "imap_host": "imap.gmail.com",
+                "imap_port": 993,
+                "app_password": "abcd efgh ijkl mnop",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)   # re-rendered with an error, not a 500
+        self.assertFalse(EmailInboxCredential.objects.filter(user=self.user_a).exists())
+
     @patch("imaplib.IMAP4_SSL")
     def test_failed_imap_login_shows_error(self, mock_imap_cls):
         mock_imap = MagicMock()

@@ -380,3 +380,50 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         timeout = call_kwargs["timeout"]
         self.assertGreaterEqual(timeout, 3.0)
         self.assertLessEqual(timeout, 10.0)
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_connection_abort_during_login_does_not_deactivate_the_credential(self, mock_imap_cls):
+        """`IMAP4.abort` subclasses `IMAP4.error` but means the connection
+        dropped -- it must not be treated as a rejected password (R7)."""
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.login.side_effect = imaplib.IMAP4.abort("connection dropped")
+
+        result = ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc),
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+
+        self.assertEqual(result.outcome, VerificationOutcome.INBOX_UNAVAILABLE)
+        self.credential.refresh_from_db()
+        self.assertTrue(self.credential.is_active)
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_connect_timeout_is_never_longer_than_the_remaining_budget(self, mock_imap_cls):
+        mock_imap_cls.side_effect = socket.timeout("slow")
+
+        ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc),
+            deadline_monotonic=time.monotonic() + 0.5,
+        )
+
+        self.assertLessEqual(mock_imap_cls.call_args.kwargs["timeout"], 0.5)
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_socket_timeout_is_rearmed_to_the_remaining_budget_before_commands(self, mock_imap_cls):
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.login.return_value = ("OK", [b"ok"])
+        mock_imap.select.return_value = ("OK", [b"0"])
+        mock_imap.noop.return_value = ("OK", [b"ok"])
+        mock_imap.search.return_value = ("OK", [b""])
+
+        ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime.now(timezone.utc), deadline_monotonic=time.monotonic() + 1.5
+        )
+
+        # Every re-arm before a command fits the budget; the last call is the
+        # fixed 2s cleanup cap.
+        timeouts = [c.args[0] for c in mock_imap.sock.settimeout.call_args_list][:-1]
+        self.assertTrue(timeouts)
+        self.assertTrue(all(t <= 1.5 for t in timeouts), timeouts)

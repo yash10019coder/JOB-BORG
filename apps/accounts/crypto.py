@@ -21,7 +21,7 @@ limits computed from settings at import time) broke `@override_settings` in
 tests because the frozen value was read once and never revisited -- this
 module deliberately avoids repeating that mistake.
 """
-from django.core.checks import Warning, register
+from django.core.checks import Error, Warning, register
 from django.core.exceptions import ImproperlyConfigured
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
@@ -115,4 +115,21 @@ def check_credential_encryption_keys(app_configs, **kwargs):
                 id="accounts.W001",
             )
         ]
-    return []
+    errors = []
+    if not settings.DEBUG:
+        # A malformed key (e.g. a JSON array pasted into a comma-separated
+        # env var) would otherwise only blow up with a bare ValueError on the
+        # first encrypt/decrypt call. Never echo the key itself.
+        for index, key in enumerate(settings.CREDENTIAL_ENCRYPTION_KEYS):
+            try:
+                Fernet(key.encode() if isinstance(key, str) else key)
+            except Exception:  # noqa: BLE001 -- any construction failure means "not a valid key"
+                errors.append(
+                    Error(
+                        f"CREDENTIAL_ENCRYPTION_KEYS[{index}] is not a valid Fernet key "
+                        "(expected 32 url-safe base64-encoded bytes; the variable is "
+                        "comma-separated, not a JSON array).",
+                        id="accounts.E001",
+                    )
+                )
+    return errors

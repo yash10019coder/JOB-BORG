@@ -157,6 +157,11 @@ _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         init_model="google_genai",
         default_model="gemini-2.5-flash",
         api_key_setting="GOOGLE_API_KEY",
+        # langchain-google-genai retries up to 6 attempts by default; with a
+        # per-request timeout that can exceed draft_auto_apply's hard time
+        # limit and kill the task before it persists anything. 1 = a single
+        # attempt (0 would fall back to the SDK default).
+        model_kwargs={"max_retries": 1},
     ),
     "nvidia": ProviderConfig(
         # NIM exposes an OpenAI-compatible chat-completions endpoint, so the

@@ -348,6 +348,45 @@ class SubmitAutoApplyDraftFailureTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertFalse(JobApplication.objects.filter(user=self.user, job=self.job).exists())
         self.assertIsNone(draft.job_application)
 
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_verification_lock_contention_uses_its_own_reason_code(self, mock_client_cls, mock_build):
+        from django.core.cache import cache
+
+        mock_build.return_value = object()
+        lock_key = f"auto_apply:verification_lock:{self.user.pk}"
+        cache.set(lock_key, "someone-else", timeout=60)
+        self.addCleanup(cache.delete, lock_key)
+        draft = self._make_draft()
+
+        submit_auto_apply_draft(draft.pk)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.VERIFICATION_BUSY)
+        mock_client_cls.return_value.submit.assert_not_called()
+        self.assertEqual(cache.get(lock_key), "someone-else")   # not released by a non-owner
+
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_lock_release_only_deletes_the_tasks_own_lock(self, mock_client_cls, mock_build):
+        from django.core.cache import cache
+
+        mock_build.return_value = object()
+        lock_key = f"auto_apply:verification_lock:{self.user.pk}"
+        self.addCleanup(cache.delete, lock_key)
+
+        def _lock_taken_over_mid_run(*args, **kwargs):
+            cache.set(lock_key, "later-task", timeout=60)   # our lease expired; another task took it
+            return SubmissionResult(success=True)
+
+        mock_client_cls.return_value.submit.side_effect = _lock_taken_over_mid_run
+        draft = self._make_draft()
+
+        submit_auto_apply_draft(draft.pk)
+
+        self.assertEqual(cache.get(lock_key), "later-task")
+
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_unconfirmed_submission_gets_its_own_reason_code(self, mock_client_cls):
         from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed

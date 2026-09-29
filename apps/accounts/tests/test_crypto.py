@@ -136,3 +136,21 @@ class SystemCheckTests(SimpleTestCase):
     @override_settings(CREDENTIAL_ENCRYPTION_KEYS=[], DEBUG=True)
     def test_no_warning_in_debug_even_when_unconfigured(self):
         self.assertEqual(check_credential_encryption_keys(app_configs=None), [])
+
+
+class SystemCheckKeyFormatTests(SimpleTestCase):
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=['["not-a-real-key"]'], DEBUG=False)
+    def test_json_array_pasted_into_the_comma_separated_variable_is_an_error(self):
+        errors = check_credential_encryption_keys(app_configs=None)
+        self.assertEqual([e.id for e in errors], ["accounts.E001"])
+        self.assertNotIn("not-a-real-key", errors[0].msg)   # never echo key material
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=[KEY_A, "garbage"], DEBUG=False)
+    def test_only_the_invalid_key_is_reported(self):
+        errors = check_credential_encryption_keys(app_configs=None)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("[1]", errors[0].msg)
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=["garbage"], DEBUG=True)
+    def test_not_enforced_in_debug(self):
+        self.assertEqual(check_credential_encryption_keys(app_configs=None), [])

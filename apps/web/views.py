@@ -5,7 +5,9 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.postgres.search import SearchQuery, SearchVector
+from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -205,6 +207,10 @@ _REASON_CODE_MESSAGES = {
     ),
     AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS: (
         "Multiple verification emails arrived. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_BUSY: (
+        "Another application on your account is waiting for email verification. "
+        "Please try sending again in a few minutes."
     ),
     AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED: (
         "Verification code was rejected by the employer. Please try sending again."
@@ -438,14 +444,25 @@ def email_inbox_credential(request):
     if request.method == "POST":
         form = EmailInboxCredentialForm(request.POST, instance=credential)
         if form.is_valid():
-            inst = form.save(commit=False)
-            inst.user = request.user
-            inst.save()
-            app_password = form.cleaned_data.get("app_password")
-            if app_password:
-                inst.set_app_password(app_password)
-            messages.success(request, "Inbox credentials updated and verified successfully.")
-            return redirect("email_inbox_credential")
+            try:
+                # Atomic: a failed encryption must not leave an active
+                # credential row with an empty ciphertext behind.
+                with transaction.atomic():
+                    inst = form.save(commit=False)
+                    inst.user = request.user
+                    inst.save()
+                    app_password = form.cleaned_data.get("app_password")
+                    if app_password:
+                        inst.set_app_password(app_password)
+            except ImproperlyConfigured:
+                messages.error(
+                    request,
+                    "Saving inbox credentials isn't available right now (encryption "
+                    "isn't configured). Please contact the administrator.",
+                )
+            else:
+                messages.success(request, "Inbox credentials updated and verified successfully.")
+                return redirect("email_inbox_credential")
     else:
         form = EmailInboxCredentialForm(instance=credential)
 

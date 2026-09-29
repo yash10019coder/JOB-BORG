@@ -91,6 +91,7 @@ class AutoApplyDraft(models.Model):
         INBOX_AUTH_FAILED = "inbox_auth_failed", "Inbox authentication failed"
         INBOX_UNAVAILABLE = "inbox_unavailable", "Inbox connection unavailable"
         VERIFICATION_CODE_AMBIGUOUS = "verification_code_ambiguous", "Multiple verification codes found"
+        VERIFICATION_BUSY = "verification_busy", "Another verification in progress"
         VERIFICATION_CODE_REJECTED = "verification_code_rejected", "Verification code rejected"
 
 

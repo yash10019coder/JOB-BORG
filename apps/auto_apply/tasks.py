@@ -10,6 +10,7 @@ for the draft create, and inline in `submit_auto_apply_draft` below for the
 from datetime import timedelta, datetime, timezone
 import logging
 import time
+import uuid
 
 from celery import shared_task
 from django.conf import settings
@@ -51,14 +52,6 @@ _SWEEP_SAFETY_MARGIN_SECONDS = 60
 # timeout let a single draft_auto_apply invocation hang indefinitely,
 # occupying a worker slot with no AutoApplyDraft ever created.
 _DRAFT_HARD_KILL_SECONDS = 180
-
-# Per-user verification lock timeout (RH4). Much shorter than the overall
-# submission budget to ensure stale locks don't accumulate for very long if a
-# task is killed (SIGKILL) before the finally block runs to clean up. If a
-# legitimate submission takes longer than this to complete, the lock is freed
-# anyway and a concurrent submission can start (both will fail closed if
-# verification actually succeeds for one but the other races ahead).
-_VERIFICATION_LOCK_TIMEOUT_SECONDS = 120
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +155,14 @@ def submit_auto_apply_draft(draft_id):
     provider = build_email_code_provider(draft.user)
 
     lock_key = f"auto_apply:verification_lock:{draft.user_id}"
+    # Owner token: the lease must outlive the whole run (a submission can
+    # legitimately take the full budget, and a shorter lease would let a second
+    # submission poll the same inbox concurrently), and release must only
+    # delete OUR lock -- never one a later task acquired after ours expired.
+    lock_token = uuid.uuid4().hex
     acquired_lock = False
     if provider is not None:
-        # RH4: Use fixed, safe lock timeout independent of submission budget
-        # to prevent stale locks if task is killed before cleanup runs
-        acquired_lock = bool(cache.add(lock_key, "1", timeout=_VERIFICATION_LOCK_TIMEOUT_SECONDS))
+        acquired_lock = bool(cache.add(lock_key, lock_token, timeout=int(budget) + 30))
         if not acquired_lock:
             logger.warning(
                 "submit_auto_apply_draft(draft_id=%s): could not acquire verification lock for user_id=%s.",
@@ -175,7 +171,7 @@ def submit_auto_apply_draft(draft_id):
             )
             draft.status = AutoApplyDraft.Status.FAILED
             draft.error_message = "Another application for your account is currently waiting for email verification."
-            draft.reason_code = AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS
+            draft.reason_code = AutoApplyDraft.ReasonCode.VERIFICATION_BUSY
             draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
             return draft.pk
 
@@ -195,7 +191,8 @@ def submit_auto_apply_draft(draft_id):
         finally:
             if acquired_lock:
                 try:
-                    cache.delete(lock_key)
+                    if cache.get(lock_key) == lock_token:
+                        cache.delete(lock_key)
                 except Exception:
                     pass
     except GreenhouseFormError as exc:

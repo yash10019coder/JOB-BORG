@@ -1099,6 +1099,51 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 },
             )
 
+    def test_neither_signal_uses_confirmation_timeout_not_the_task_deadline(self):
+        # The task passes its whole (multi-minute) budget as deadline_monotonic;
+        # that must only bound the email-code lookup, not how long a page that
+        # shows neither a success nor a verification signal is polled.
+        client = self._client(
+            _fixture_html("greenhouse_submission_rejected_form.html"),
+            confirmation_timeout_ms=500,
+        )
+        start = time.monotonic()
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+                deadline_monotonic=time.monotonic() + 600,
+            )
+        self.assertLess(time.monotonic() - start, 4.0)
+
+    def test_verification_code_is_not_submitted_once_the_deadline_passes_during_fill(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="87654321")
+
+        client = self._client(_fixture_html("greenhouse_email_verification_multibox_form.html"))
+        # First check (after the code lookup) passes; the second (after the
+        # boxes are filled, before clicking) reports the budget as spent.
+        with patch.object(GreenhouseFormClient, "_deadline_expired", side_effect=[False, True]):
+            with self.assertRaises(GreenhouseFormVerificationFailed) as ctx:
+                client.submit(
+                    JOB_URL,
+                    {
+                        "First Name": "Ada",
+                        "Email": "ada@example.com",
+                        "Resume/CV": str(self._resume_file()),
+                    },
+                    email_code_provider=_FakeProvider(),
+                    deadline_monotonic=time.monotonic() + 60,
+                )
+        self.assertEqual(ctx.exception.outcome, VerificationOutcome.CODE_TIMEOUT)
+
     def test_submit_neither_signal_respects_single_shared_timeout_budget(self):
         # Worst-case timing: a page matching neither success nor
         # verification must still respect the EXISTING poll/timeout

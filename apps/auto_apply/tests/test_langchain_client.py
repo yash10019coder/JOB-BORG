@@ -318,3 +318,10 @@ class ProviderConfigTests(SimpleTestCase):
         )
         with self.assertRaises(dataclasses.FrozenInstanceError):
             config.default_model = "other"
+
+
+class GoogleRetryBoundTests(SimpleTestCase):
+    def test_google_retries_are_bounded_to_a_single_attempt(self):
+        # langchain-google-genai defaults to 6 attempts, which with a 30s
+        # request timeout can outlive draft_auto_apply's hard time limit.
+        self.assertEqual(_PROVIDER_CONFIGS["google"].model_kwargs.get("max_retries"), 1)

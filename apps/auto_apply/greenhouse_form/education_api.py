@@ -110,6 +110,11 @@ def fetch_full_list(
     except Exception:  # noqa: BLE001 -- any failure here just means "no complete list available"
         return None
 
+    # An early stop (empty page, page cap, or no total_count) means the list is
+    # truncated: never cache or return it as if it were the complete option set.
+    if total_count is None or len(items) < total_count:
+        return None
+
     result = tuple(dict.fromkeys(items))  # de-dup while preserving order
     cache.set(cache_key, result, timeout=_CACHE_TTL_SECONDS)
     return result

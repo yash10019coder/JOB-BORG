@@ -32,6 +32,23 @@ def build_email_code_provider(user) -> EmailCodeProvider | None:
     return ImapEmailCodeProvider(credential)
 
 
+def _bound_socket(imap_client, deadline_monotonic: float, cap: float = 10.0) -> float:
+    """Re-arm the socket timeout to the time left before `deadline_monotonic`.
+
+    A single timeout passed at connect time bounds each read separately, so a
+    slow server could keep a multi-command exchange going well past the
+    deadline. Called before every command so no read can outlive the budget.
+    Returns the remaining seconds (may be <= 0)."""
+    remaining = deadline_monotonic - time.monotonic()
+    sock = getattr(imap_client, "sock", None)
+    if sock is not None and remaining > 0:
+        try:
+            sock.settimeout(min(cap, remaining))
+        except Exception:  # noqa: BLE001 -- best effort; the pre-command deadline checks still apply
+            pass
+    return remaining
+
+
 class ImapEmailCodeProvider:
     """IMAP client polling an inbox for verification codes."""
 
@@ -80,9 +97,9 @@ class ImapEmailCodeProvider:
             if remaining_for_connection <= 0:
                 return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
 
-            # Cap socket timeout to remaining budget, but keep at least 3s minimum
-            # to avoid making the timeout 0 on a nearly-expired deadline
-            socket_timeout = max(3.0, min(10.0, remaining_for_connection))
+            # Never let the connection attempt outlive the remaining budget
+            # (remaining_for_connection > 0 is guaranteed just above).
+            socket_timeout = min(10.0, remaining_for_connection)
 
             # Connect to IMAP server with deadline-aware socket timeout
             ssl_context = ssl.create_default_context()
@@ -113,7 +130,21 @@ class ImapEmailCodeProvider:
             if time.monotonic() >= deadline_monotonic:
                 return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
 
+            _bound_socket(imap_client, deadline_monotonic)
             imap_client.login(self.credential.email_address, raw_password)
+        except imaplib.IMAP4.abort:
+            # `abort` subclasses `IMAP4.error`, but it means the connection
+            # dropped (or the server said BYE) -- a transient failure, not a
+            # rejected password. Deactivating the credential here would break
+            # every later submission until the user re-enters it (R7).
+            logger.warning(
+                "IMAP connection aborted during login for user_id=%s", self.credential.user_id
+            )
+            try:
+                imap_client.logout()
+            except Exception:
+                pass
+            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
         except imaplib.IMAP4.error as exc:
             logger.warning(
                 "IMAP login rejected for user_id=%s host=%s",
@@ -155,6 +186,7 @@ class ImapEmailCodeProvider:
                 return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
 
             try:
+                _bound_socket(imap_client, deadline_monotonic)
                 status, _ = imap_client.select("INBOX", readonly=True)
             except socket.timeout:
                 logger.warning(
@@ -173,6 +205,7 @@ class ImapEmailCodeProvider:
             while time.monotonic() < deadline_monotonic:
                 try:
                     # CRITICAL (D2): Must execute NOOP before SEARCH to force server sync!
+                    _bound_socket(imap_client, deadline_monotonic)
                     imap_client.noop()
 
                     # Search messages from today onwards
@@ -184,6 +217,7 @@ class ImapEmailCodeProvider:
 
                         found_codes: list[str] = []
                         for msg_id in reversed(recent_ids):
+                            _bound_socket(imap_client, deadline_monotonic)
                             fetch_status, msg_data = imap_client.fetch(msg_id, "(BODY.PEEK[])")
                             if fetch_status != "OK" or not msg_data:
                                 continue
@@ -241,6 +275,13 @@ class ImapEmailCodeProvider:
             return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
 
         finally:
+            # Cleanup must not outlive the budget either: cap it at 2s.
+            sock = getattr(imap_client, "sock", None)
+            if sock is not None:
+                try:
+                    sock.settimeout(2.0)
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 imap_client.close()
             except Exception:
