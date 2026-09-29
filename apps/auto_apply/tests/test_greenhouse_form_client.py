@@ -942,6 +942,32 @@ class GreenhouseFormClientTests(SimpleTestCase):
         )
         self.assertTrue(result.success)
 
+    def test_submit_waits_for_confirmation_after_verification_code(self):
+        # Greenhouse confirms an application only after a network round-trip
+        # once the code is submitted. A single check ~250ms after the click
+        # misreported an application that had actually gone through as
+        # CODE_REJECTED.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="87654321")
+
+        client = self._client(
+            _fixture_html("greenhouse_email_verification_slow_confirmation_form.html")
+        )
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            email_code_provider=_FakeProvider(),
+            deadline_monotonic=time.monotonic() + 60,
+        )
+        self.assertTrue(result.success)
+
     def test_submit_verification_multibox_length_mismatch_raises_code_rejected(self):
         # Regression test for a code-review finding (P1, adversarial +
         # testing agreement): every multi-box character input also matches
