@@ -77,6 +77,10 @@ _DEFAULT_CONFIRMATION_TIMEOUT_MS = 10_000
 _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
 _COMBOBOX_OPTION_TIMEOUT_MS = 5_000
+# File-upload wait: how long to give the uploader to show its progressbar after
+# `set_input_files()`, and how long to let a started upload finish.
+_UPLOAD_START_GRACE_MS = 1_500
+_UPLOAD_COMPLETE_TIMEOUT_MS = 30_000
 _SETTLE_TIMEOUT_MS = 5_000
 # Some Greenhouse combobox widgets (confirmed live: the "School" field,
 # backed by a remote paginated API of 2,466 entries at 100/page) only ever
@@ -972,6 +976,7 @@ class GreenhouseFormClient:
                         f"File {value!r} for field {label!r} does not exist."
                     )
                 control.set_input_files(str(self._validated_file_path(value, label)))
+                self._wait_for_upload_complete(page, label)
             elif form_field.field_type == COMBOBOX_SELECT:
                 self._fill_combobox(page, control, str(value), label)
             elif form_field.field_type == CHECKBOX_GROUP:
@@ -991,6 +996,32 @@ class GreenhouseFormClient:
                 raise GreenhouseFormSchemaMismatch(
                     f"No fill strategy for field {label!r} of type {form_field.field_type!r}."
                 )
+
+    @staticmethod
+    def _wait_for_upload_complete(page, label: str) -> None:
+        """Block until Greenhouse has finished uploading a just-attached file.
+
+        `set_input_files()` returns as soon as the change event fires, but the
+        board's uploader registers the file with the form only after a
+        browser-side upload completes (~2-3s), showing a `role="progressbar"`
+        meanwhile -- the filename preview appears at once regardless. Clicking
+        Submit inside that window fails validation with "<label> is required."
+        even though the file visibly looks attached. Forms with no such
+        uploader never render a progressbar, so the first wait is a short,
+        non-fatal grace period for it to appear.
+        """
+        progress = page.locator('[role="progressbar"]')
+        try:
+            progress.first.wait_for(state="visible", timeout=_UPLOAD_START_GRACE_MS)
+        except Exception:  # noqa: BLE001 -- no uploader progress UI on this form
+            return
+        try:
+            progress.first.wait_for(state="detached", timeout=_UPLOAD_COMPLETE_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 -- convert to typed submission failure
+            raise GreenhouseFormSubmissionFailed(
+                f"Upload for file field {label!r} did not finish within "
+                f"{_UPLOAD_COMPLETE_TIMEOUT_MS // 1000}s."
+            ) from exc
 
     @staticmethod
     def _is_blank_answer(value: Any) -> bool:

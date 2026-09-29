@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <!--
+    Mirrors job-boards.greenhouse.io's React file uploader: choosing a file
+    swaps in a [role=progressbar] and the form value is only registered when
+    the (here simulated, 1.5s) upload finishes -- yet the filename preview and
+    the "Remove file" affordance can appear before then. Submitting while the
+    upload is still in flight shows "Resume/CV is required." even though a
+    file visibly appears attached. Verified against a live board.
+  -->
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume">
+        <div id="resume-status"></div>
+        <div id="resume-error" role="alert"></div>
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    var uploaded = false;
+    document.getElementById('resume').addEventListener('change', function (e) {
+      var status = document.getElementById('resume-status');
+      status.innerHTML = '<div role="progressbar" aria-valuenow="0"></div>';
+      setTimeout(function () {
+        uploaded = true;
+        status.innerHTML = '<p>' + e.target.files[0].name + '</p>';
+      }, 1500);
+    });
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (!uploaded) {
+        document.getElementById('resume-error').textContent = 'Resume/CV is required.';
+        return;
+      }
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>
