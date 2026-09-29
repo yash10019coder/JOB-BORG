@@ -90,13 +90,11 @@ def _standard_field_value(key: str, profile, user) -> str:
         resume = getattr(profile, "resume", None)
         if not resume:
             return ""
-        try:
-            return resume.path
-        except (ValueError, NotImplementedError):
-            # No file associated with the FieldFile, or a storage backend
-            # with no filesystem path (e.g. remote object storage) -- fall
-            # back to the stored name rather than raising.
-            return resume.name or ""
+        # Store the storage key, not a filesystem path: with remote storage
+        # (S3) there is no path, and the worker may not share MEDIA_ROOT with
+        # the web process. `submit_auto_apply_draft` copies the file out of
+        # `default_storage` into a local temp file just before submitting.
+        return resume.name or ""
     return ""
 
 

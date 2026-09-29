@@ -9,6 +9,9 @@ for the draft create, and inline in `submit_auto_apply_draft` below for the
 """
 from datetime import timedelta, datetime, timezone
 import logging
+import os
+import shutil
+import tempfile
 import time
 import uuid
 
@@ -16,6 +19,7 @@ from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
@@ -34,7 +38,7 @@ from .greenhouse_form.exceptions import (
     GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
-from .greenhouse_form.field_mapping import schema_from_dict
+from .greenhouse_form.field_mapping import FILE, schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
@@ -62,6 +66,40 @@ def _submit_budget_seconds() -> float:
     """Compute current submission time budget from settings at call time (D1)."""
     sending_timeout = getattr(settings, "AUTO_APPLY_SENDING_TIMEOUT_SECONDS", 600)
     return max(30.0, float(sending_timeout) - _SWEEP_SAFETY_MARGIN_SECONDS)
+
+
+def _materialize_file_answers(entries: dict, answers: dict, temp_files: list[str]) -> None:
+    """Replace each FILE answer that is a `default_storage` key with a local
+    temp-file path Playwright can upload.
+
+    Drafting stores the storage key (see `_standard_field_value`) so the
+    draft works with remote storage and with a worker that does not share
+    `MEDIA_ROOT` with web. A value that already is an existing local file
+    (drafts created before this change stored an absolute path) is left as is.
+    Every temp file created is appended to `temp_files` for the caller to
+    delete, including on a mid-way failure.
+    """
+    for label, entry in entries.items():
+        value = answers.get(label)
+        if entry.get("field_type") != FILE or not value:
+            continue
+        if os.path.isfile(str(value)) or not default_storage.exists(str(value)):
+            continue
+        suffix = os.path.splitext(str(value))[1]
+        with default_storage.open(str(value), "rb") as source:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as target:
+                temp_files.append(target.name)
+                shutil.copyfileobj(source, target)
+        answers[label] = temp_files[-1]
+
+
+def _cleanup_temp_files(temp_files: list[str]) -> None:
+    for path in temp_files:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    temp_files.clear()
 
 
 def _reason_code_for(exc: GreenhouseFormError) -> str:
@@ -147,6 +185,7 @@ def submit_auto_apply_draft(draft_id):
         return draft.pk
 
     answers = {label: entry.get("value") for label, entry in (draft.answers or {}).items()}
+    temp_files: list[str] = []
     expected_schema = schema_from_dict(draft.form_schema_snapshot)
 
     budget = _submit_budget_seconds()
@@ -180,6 +219,7 @@ def submit_auto_apply_draft(draft_id):
     )
     try:
         try:
+            _materialize_file_answers(draft.answers or {}, answers, temp_files)
             form_client.submit(
                 job.source_url,
                 answers,
@@ -189,6 +229,7 @@ def submit_auto_apply_draft(draft_id):
                 deadline_monotonic=deadline,
             )
         finally:
+            _cleanup_temp_files(temp_files)
             if acquired_lock:
                 try:
                     if cache.get(lock_key) == lock_token:
