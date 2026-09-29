@@ -12,11 +12,24 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+# Serialize publishes so an older run can't overwrite `latest` after a newer one.
+concurrency:
+  group: cd-publish
+  cancel-in-progress: false
 
 jobs:
   publish-image:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    # Only publish images built from trusted pushes to this repo. `branches`
+    # matches the head branch *name*, so a fork PR from a branch called
+    # `master` would otherwise reach this job with packages: write.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -35,7 +48,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
-            type=sha,format=long
+            type=raw,value=${{ github.event.workflow_run.head_sha }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -44,5 +57,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=cd-prod
+          cache-to: type=gha,mode=max,scope=cd-prod
