@@ -30,6 +30,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+
 from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
 from apps.auto_apply.email_verification.base import EmailCodeProvider, VerificationOutcome
 
@@ -331,12 +334,14 @@ class GreenhouseFormClient:
                     page,
                     provider=provider,
                     submitted_at=submitted_at,
+                    schema_now=schema_now,
                     deadline_monotonic=deadline_monotonic,
                 )
             except (
                 GreenhouseFormChallenged,
                 GreenhouseFormSchemaMismatch,
                 GreenhouseFormVerificationFailed,
+                ImproperlyConfigured,
             ):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
@@ -1005,13 +1010,15 @@ class GreenhouseFormClient:
         *,
         provider: EmailCodeProvider | None = None,
         submitted_at: datetime | None = None,
+        schema_now: FormSchema | None = None,
         deadline_monotonic: float | None = None,
     ) -> SubmissionResult | None:
 
         """Poll for a post-submit outcome until ``confirmation_timeout_ms``
         elapses -- a three-way classifier (success / verification-required /
-        neither-yet) evaluated once per pass under this ONE shared deadline,
-        rather than a separate timeout per signal:
+        neither-yet) evaluated once per pass under one classification deadline.
+        Inbox polling has its own configured timeout capped by the task deadline;
+        confirmation after entering a code is also capped by the task deadline.
 
         1. Success (``_check_success_signal``) -- checked first, every
            pass. Success always wins a tie against the verification signal
@@ -1019,27 +1026,26 @@ class GreenhouseFormClient:
            phrasing (e.g. a success page saying "check your email for next
            steps") can never be misclassified as the interstitial.
         2. The verification interstitial (``_verification_interstitial_detected``)
-           -- checked only when success didn't match this pass. Raises
-           immediately on detection rather than waiting out the rest of the
-           budget: unlike a genuine failure (which might still resolve to
-           success on a later pass, e.g. a slow redirect), the interstitial
-           is a stable, terminal page state once rendered.
+           -- checked only when success didn't match this pass. Starts inbox
+           polling immediately when a provider is configured, or raises when
+           no provider is available.
         3. Neither yet -- keep polling until the deadline, same as before.
 
         Returns ``None`` (a plain "no signal found" -- ``submit()`` raises
         ``GreenhouseFormSubmissionFailed``) when the deadline elapses with
         neither classified.
         """
+        classification_deadline = time.monotonic() + self.confirmation_timeout_ms / 1000
         deadline = (
             deadline_monotonic
             if deadline_monotonic is not None
-            else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
+            else classification_deadline
         )
         while True:
             result = self._check_success_signal(page)
             if result is not None:
                 return result
-            if self._verification_interstitial_detected(page):
+            if self._verification_interstitial_detected(page, schema_now):
                 if provider is None:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
@@ -1049,7 +1055,10 @@ class GreenhouseFormClient:
                     )
 
                 now = time.monotonic()
-                if deadline - now < 20.0:
+                verification_deadline = min(
+                    deadline, now + settings.AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS
+                )
+                if verification_deadline - now < 20.0:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
                         "Remaining budget too low for email verification polling",
@@ -1059,7 +1068,9 @@ class GreenhouseFormClient:
 
                 since = submitted_at or datetime.now(timezone.utc)
                 try:
-                    lookup_res = provider.get_code(since=since, deadline_monotonic=deadline)
+                    lookup_res = provider.get_code(since=since, deadline_monotonic=verification_deadline)
+                except ImproperlyConfigured:
+                    raise
                 except Exception as exc:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
@@ -1087,8 +1098,17 @@ class GreenhouseFormClient:
                         "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
                     ).first
                     submit_button.click()
-                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                    post_code_check = self._check_success_signal(page)
+                    post_code_deadline = min(
+                        deadline, time.monotonic() + self.confirmation_timeout_ms / 1000
+                    )
+                    while True:
+                        post_code_check = self._check_success_signal(page)
+                        if post_code_check is not None:
+                            return post_code_check
+                        remaining = post_code_deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        page.wait_for_timeout(min(_CONFIRMATION_POLL_INTERVAL_MS, remaining * 1000))
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -1096,18 +1116,16 @@ class GreenhouseFormClient:
                         outcome=VerificationOutcome.CODE_REJECTED,
                     ) from exc
 
-                if post_code_check is not None:
-                    return post_code_check
-
                 # Still on verification page: post-code path, raise WITHOUT debug artifacts
                 raise GreenhouseFormVerificationFailed(
                     "Verification code entered but application success not confirmed",
                     outcome=VerificationOutcome.CODE_REJECTED,
                 )
 
-            if time.monotonic() >= deadline:
+            remaining = classification_deadline - time.monotonic()
+            if remaining <= 0:
                 return None
-            page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+            page.wait_for_timeout(min(_CONFIRMATION_POLL_INTERVAL_MS, remaining * 1000))
 
     def _check_success_signal(self, page) -> SubmissionResult | None:
         # Signal 1: an explicit ARIA status live region, if the board
@@ -1177,10 +1195,15 @@ class GreenhouseFormClient:
         )
 
     @staticmethod
-    def _verification_interstitial_detected(page) -> bool:
-        """Detect Greenhouse's post-submit email-verification interstitial."""
+    def _verification_interstitial_detected(page, schema_now: FormSchema | None = None) -> bool:
+        """Detect visible verification controls introduced after application submission."""
+        known_ids = {field.control_id for field in schema_now.fields if field.control_id} if schema_now else set()
         code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
-        if code_input.count() == 0:
+        if not any(
+            code_input.nth(i).is_visible()
+            and code_input.nth(i).get_attribute("id") not in known_ids
+            for i in range(code_input.count())
+        ):
             return False
         body_text = page.locator("body").inner_text().lower()
         return any(phrase in body_text for phrase in _VERIFICATION_TEXT_PATTERNS)

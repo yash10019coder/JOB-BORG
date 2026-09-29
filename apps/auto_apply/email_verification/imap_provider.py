@@ -1,7 +1,8 @@
 """IMAP-backed EmailCodeProvider implementation."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import imaplib
 import logging
+import re
 import socket
 import ssl
 import time
@@ -18,6 +19,18 @@ if TYPE_CHECKING:
     from apps.accounts.models import EmailInboxCredential
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_internal_date(metadata: bytes) -> datetime | None:
+    if not isinstance(metadata, bytes):
+        return None
+    match = re.search(rb'INTERNALDATE "([^"\r\n]+)"', metadata)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1).decode("ascii"), "%d-%b-%Y %H:%M:%S %z")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def build_email_code_provider(user) -> EmailCodeProvider | None:
@@ -48,7 +61,7 @@ class ImapEmailCodeProvider:
         # Decrypt password
         try:
             raw_password = decrypt_secret(self.credential.app_password_encrypted)
-        except (SecretDecryptionError, Exception) as exc:
+        except SecretDecryptionError as exc:
             logger.error(
                 "Failed to decrypt IMAP app password for user_id=%s: %s",
                 self.credential.user_id,
@@ -82,6 +95,12 @@ class ImapEmailCodeProvider:
         # Login
         try:
             imap_client.login(self.credential.email_address, raw_password)
+        except imaplib.IMAP4.abort:
+            try:
+                imap_client.logout()
+            except Exception:
+                pass
+            return CodeLookupResult(outcome=VerificationOutcome.INBOX_UNAVAILABLE)
         except imaplib.IMAP4.error as exc:
             logger.warning(
                 "IMAP login rejected for user_id=%s host=%s",
@@ -115,23 +134,40 @@ class ImapEmailCodeProvider:
 
             # Convert since for IMAP SINCE query format (e.g. 04-Aug-2026)
             since_utc = since.astimezone(timezone.utc) if since.tzinfo else since.replace(tzinfo=timezone.utc)
-            imap_since_str = since_utc.strftime("%d-%b-%Y")
+            imap_since_str = (since_utc - timedelta(minutes=2)).strftime("%d-%b-%Y")
+            sender_filters = []
+            for sender in sender_allowlist:
+                sender = sender.strip()
+                if not sender or "\r" in sender or "\n" in sender:
+                    continue
+                quoted_sender = sender.replace("\\", "\\\\").replace('"', '\\"')
+                sender_filters.append(f'FROM "{quoted_sender}"')
+            if not sender_filters:
+                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+            sender_query = sender_filters[-1]
+            for sender_filter in reversed(sender_filters[:-1]):
+                sender_query = f"OR {sender_filter} ({sender_query})"
+            search_query = f'(SINCE "{imap_since_str}" {sender_query})'
+            evaluated_uids: set[bytes] = set()
 
             while time.monotonic() < deadline_monotonic:
                 try:
                     # CRITICAL (D2): Must execute NOOP before SEARCH to force server sync!
                     imap_client.noop()
 
-                    # Search messages from today onwards
-                    search_status, data = imap_client.search(None, f'(SINCE "{imap_since_str}")')
+                    # FROM is a server-side prefilter; exact sender validation remains below.
+                    search_status, data = imap_client.uid("SEARCH", None, search_query)
                     if search_status == "OK" and data and data[0]:
-                        msg_ids = data[0].split()
-                        # Inspect newest messages first (limit to 15 newest to bound I/O)
+                        msg_ids = [uid for uid in data[0].split() if uid not in evaluated_uids]
+                        # Inspect at most 15 new matching messages per poll.
                         recent_ids = msg_ids[-15:]
 
                         found_codes: list[str] = []
                         for msg_id in reversed(recent_ids):
-                            fetch_status, msg_data = imap_client.fetch(msg_id, "(BODY.PEEK[])")
+                            evaluated_uids.add(msg_id)
+                            fetch_status, msg_data = imap_client.uid(
+                                "FETCH", msg_id, "(INTERNALDATE BODY.PEEK[])"
+                            )
                             if fetch_status != "OK" or not msg_data:
                                 continue
 
@@ -139,8 +175,9 @@ class ImapEmailCodeProvider:
                                 if isinstance(response_part, tuple) and len(response_part) > 1:
                                     msg_bytes = response_part[1]
                                     if isinstance(msg_bytes, bytes):
+                                        server_date = _parse_internal_date(response_part[0])
                                         code = evaluate_email_candidate(
-                                            msg_bytes, since, sender_allowlist
+                                            msg_bytes, since, sender_allowlist, server_date
                                         )
                                         if code:
                                             found_codes.append(code)

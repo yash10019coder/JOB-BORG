@@ -5,7 +5,9 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.postgres.search import SearchQuery, SearchVector
+from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -385,12 +387,20 @@ def email_inbox_credential(request):
         if form.is_valid():
             inst = form.save(commit=False)
             inst.user = request.user
-            inst.save()
-            app_password = form.cleaned_data.get("app_password")
-            if app_password:
-                inst.set_app_password(app_password)
-            messages.success(request, "Inbox credentials updated and verified successfully.")
-            return redirect("email_inbox_credential")
+            try:
+                with transaction.atomic():
+                    inst.save()
+                    app_password = form.cleaned_data.get("app_password")
+                    if app_password:
+                        inst.set_app_password(app_password)
+            except ImproperlyConfigured:
+                form.add_error(
+                    None,
+                    "Inbox credentials could not be saved because credential encryption is not configured correctly. Contact the administrator.",
+                )
+            else:
+                messages.success(request, "Inbox credentials updated and verified successfully.")
+                return redirect("email_inbox_credential")
     else:
         form = EmailInboxCredentialForm(instance=credential)
 

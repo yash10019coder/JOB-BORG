@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
@@ -741,6 +741,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
                     "Email": "ada@example.com",
                     "Resume/CV": str(self._resume_file()),
                 },
+                deadline_monotonic=time.monotonic() + 300,
             )
         elapsed = time.monotonic() - start
         # Generous upper bound: comfortably under 2x the configured
@@ -748,6 +749,23 @@ class GreenhouseFormClientTests(SimpleTestCase):
         # wait being added for the verification check), with slack for
         # real browser/navigation overhead.
         self.assertLess(elapsed, 3.0)
+
+    def test_existing_zip_code_and_confirm_email_label_do_not_trigger_verification(self):
+        client = self._client(
+            _fixture_html("greenhouse_zip_code_confirm_email_form.html"),
+            confirmation_timeout_ms=100,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(JOB_URL, {"Zip Code": "12345", "Confirm your email": "ada@example.com"})
+
+    def test_hidden_verification_control_is_ignored(self):
+        context = self._browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content('<p>Confirm your email</p><input name="code" style="display:none">')
+            self.assertFalse(GreenhouseFormClient._verification_interstitial_detected(page))
+        finally:
+            context.close()
 
     # -- hostname allowlist -------------------------------------------------
 
@@ -1003,3 +1021,84 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
 
 
+
+    @override_settings(AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS=45)
+    def test_provider_deadline_respects_configured_timeout_and_shared_budget(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        for shared_deadline, expected in ((500, 145), (130, 130)):
+            with self.subTest(shared_deadline=shared_deadline):
+                client = GreenhouseFormClient(context_factory=_TestContextHandle)
+                provider = MagicMock()
+                provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+                with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", return_value=100), patch.object(
+                    client, "_check_success_signal", return_value=None
+                ), patch.object(client, "_verification_interstitial_detected", return_value=True):
+                    with self.assertRaises(GreenhouseFormVerificationFailed):
+                        client._confirm_success(MagicMock(), provider=provider, deadline_monotonic=shared_deadline)
+                self.assertEqual(provider.get_code.call_args.kwargs["deadline_monotonic"], expected)
+
+    def test_post_code_polls_for_delayed_success(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        from apps.auto_apply.greenhouse_form.field_mapping import SubmissionResult
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
+        page = MagicMock()
+        provider = MagicMock()
+        provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+        success = SubmissionResult(success=True)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", return_value=100), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"), patch.object(
+            client, "_check_success_signal", side_effect=[None, None, None, success]
+        ):
+            self.assertIs(client._confirm_success(page, provider=provider, deadline_monotonic=200), success)
+        self.assertEqual(page.wait_for_timeout.call_count, 2)
+
+    def test_post_code_polling_stops_at_shared_deadline_without_artifacts(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
+        provider = MagicMock()
+        provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+        page = MagicMock()
+        clock = [100.0]
+        provider.get_code.side_effect = lambda **kwargs: (clock.__setitem__(0, 129.9) or provider.get_code.return_value)
+        page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", side_effect=lambda: clock[0]), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_capture_debug_artifacts") as capture:
+            with self.assertRaises(GreenhouseFormVerificationFailed) as raised:
+                client._confirm_success(page, provider=provider, deadline_monotonic=130)
+        self.assertEqual(raised.exception.outcome, VerificationOutcome.CODE_REJECTED)
+        self.assertAlmostEqual(clock[0], 130)
+        capture.assert_not_called()
+
+    def test_large_task_deadline_does_not_extend_classification_timeout(self):
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=500)
+        page = MagicMock()
+        clock = [100.0]
+        page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", side_effect=lambda: clock[0]), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_verification_interstitial_detected", return_value=False):
+            self.assertIsNone(client._confirm_success(page, deadline_monotonic=1000))
+        self.assertEqual(clock[0], 100.5)
+
+    def test_provider_configuration_error_propagates_out_of_submit(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        client = GreenhouseFormClient(context_factory=MagicMock())
+        provider = MagicMock()
+        provider.get_code.side_effect = ImproperlyConfigured("Missing keys")
+        with patch.object(client, "_goto_and_settle"), patch.object(
+            client, "_challenge_detected", return_value=False
+        ), patch.object(client, "_discover_schema"), patch.object(
+            client, "_fill_answers"
+        ), patch.object(client, "_click_submit"), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_verification_interstitial_detected", return_value=True):
+            with self.assertRaises(ImproperlyConfigured):
+                client.submit(JOB_URL, {}, email_code_provider=provider, deadline_monotonic=time.monotonic() + 300)

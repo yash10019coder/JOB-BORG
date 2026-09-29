@@ -109,9 +109,11 @@ def draft_auto_apply(user_id, job_id):
 
 @shared_task(
     name="apps.auto_apply.submit_auto_apply_draft",
+    bind=True,
+    max_retries=None,
     time_limit=_SUBMIT_HARD_KILL_SECONDS,
 )
-def submit_auto_apply_draft(draft_id):
+def submit_auto_apply_draft(self, draft_id):
     """Drive the real Greenhouse submission for a `SENDING` `AutoApplyDraft`."""
     try:
         draft = AutoApplyDraft.objects.select_related("user", "job").get(pk=draft_id)
@@ -160,11 +162,7 @@ def submit_auto_apply_draft(draft_id):
                 draft_id,
                 draft.user_id,
             )
-            draft.status = AutoApplyDraft.Status.FAILED
-            draft.error_message = "Another application for your account is currently waiting for email verification."
-            draft.reason_code = AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS
-            draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
-            return draft.pk
+            raise self.retry(countdown=10)
 
     form_client = GreenhouseFormClient(
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None

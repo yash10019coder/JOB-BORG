@@ -448,3 +448,22 @@ class SweepStaleAutoApplyDraftsTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertIn("timed out", stuck_draft.error_message.lower())
         self.assertEqual(fresh_sending_draft.status, AutoApplyDraft.Status.SENDING)
         self.assertEqual(stats["recovered_sending"], 1)
+
+
+class SubmitVerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    @patch("apps.auto_apply.tasks.build_email_code_provider", return_value=object())
+    @patch("apps.auto_apply.tasks.cache.add", return_value=False)
+    def test_lock_contention_retries_without_changing_draft(self, add, provider, client):
+        from celery.exceptions import Retry
+
+        draft = self._make_draft()
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()) as retry:
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
+        retry.assert_called_once_with(countdown=10)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        self.assertIsNone(draft.reason_code)
+        self.assertIsNone(draft.error_message)
+        client.assert_not_called()
