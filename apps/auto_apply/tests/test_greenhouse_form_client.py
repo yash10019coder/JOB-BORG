@@ -914,6 +914,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle)
         mock_page = MagicMock()
+        mock_page.url = JOB_URL
         mock_page.locator.side_effect = lambda sel: (
             MagicMock(count=lambda: 1)
             if "code" in sel
@@ -933,6 +934,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle)
         mock_page = MagicMock()
+        mock_page.url = JOB_URL
 
         code_input = MagicMock()
         submit_btn = MagicMock()
@@ -983,6 +985,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
             )
             mock_page = MagicMock()
+            mock_page.url = JOB_URL
 
             code_input = MagicMock()
             submit_btn = MagicMock()
@@ -1033,6 +1036,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
             )
             mock_page = MagicMock()
+            mock_page.url = JOB_URL
 
             code_input = MagicMock()
             submit_btn = MagicMock()
@@ -1143,6 +1147,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         from django.core.exceptions import ImproperlyConfigured
 
         client = GreenhouseFormClient(context_factory=MagicMock())
+        client._context_factory.return_value.new_page.return_value.url = JOB_URL
         provider = MagicMock()
         provider.get_code.side_effect = ImproperlyConfigured("Missing keys")
         with patch.object(client, "_goto_and_settle"), patch.object(
