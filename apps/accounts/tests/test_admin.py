@@ -106,3 +106,27 @@ class ProfileAdminSaveModelTests(TestCase):
         self.assertEqual(profile.resume_text, "")
         self.assertEqual(profile.full_name, "Updated Name")
         parse.assert_not_called()
+
+    def test_replacing_an_existing_resume_swaps_it_and_queues_parsing(self):
+        profile = User.objects.create_user(username="replace-profile", password="pw").profile
+        profile.resume = SimpleUploadedFile("old.txt", b"Old resume")
+        profile.resume_text = "Old resume"
+        profile.save()
+        original_resume_name = profile.resume.name
+        initial_resume = profile.resume
+        new_upload = SimpleUploadedFile("new.txt", b"New resume")
+        profile.resume = new_upload
+        form = mock.Mock(
+            changed_data=["resume"],
+            cleaned_data={"resume": new_upload},
+            initial={"resume": initial_resume},
+        )
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse, self.captureOnCommitCallbacks(execute=True):
+            ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, True)
+
+        profile.refresh_from_db()
+        self.assertTrue(profile.resume)
+        self.assertNotEqual(profile.resume.name, original_resume_name)
+        self.assertEqual(profile.resume_text, "")
+        parse.assert_called_once_with(profile.pk)
