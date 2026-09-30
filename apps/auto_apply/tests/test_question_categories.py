@@ -15,7 +15,7 @@ from apps.auto_apply.llm.categories import (
 
 
 class HardExcludedCategoriesContractTests(SimpleTestCase):
-    def test_hard_excluded_categories_are_exactly_the_sensitive_five(self):
+    def test_hard_excluded_categories_are_exactly_the_sensitive_categories(self):
         self.assertEqual(
             HARD_EXCLUDED_CATEGORIES,
             frozenset(
@@ -142,6 +142,17 @@ class DemographicClassificationTests(SimpleTestCase):
     def test_self_identification_questions_are_demographic_and_hard_excluded(self):
         for text in (
             "What is your gender?",
+            "What is your sex?",
+            "What is your religion?",
+            "What is your religious affiliation?",
+            "Do you identify as LGBTQ+?",
+            "Do you identify as LGBTQIA+?",
+            "What is your national origin?",
+            "Are you a member of a protected class?",
+            "Please disclose protected-class membership.",
+            "What is your age?",
+            "How old are you?",
+            "Are you at least 18 years old?",
             "Please select your race/ethnicity",
             "Are you a protected veteran?",
             "Do you have a disability?",
@@ -154,8 +165,34 @@ class DemographicClassificationTests(SimpleTestCase):
                 self.assertEqual(category, QuestionCategory.DEMOGRAPHIC)
                 self.assertIn(category, HARD_EXCLUDED_CATEGORIES)
 
+    def test_earlier_categories_keep_first_match_precedence(self):
+        for text, expected in (
+            ("Are you authorized to work regardless of national origin?", QuestionCategory.WORK_AUTHORIZATION),
+            ("I certify that my age is accurate", QuestionCategory.LEGAL_ATTESTATION),
+            ("Do you consent to an age and background check?", QuestionCategory.BACKGROUND_CHECK),
+            ("What salary do you expect at your age?", QuestionCategory.SALARY_EXPECTATION),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(classify(text), expected)
+
     def test_bare_salary_wording_is_salary_expectation(self):
         self.assertEqual(classify("What salary are you looking for?"), QuestionCategory.SALARY_EXPECTATION)
 
     def test_ordinary_questions_stay_generic(self):
-        self.assertEqual(classify("Why do you want to work here?"), QuestionCategory.GENERIC)
+        for text in ("Why do you want to work here?", "Are you 100% available for this role?"):
+            with self.subTest(text=text):
+                self.assertEqual(classify(text), QuestionCategory.GENERIC)
+
+
+class AdditionalSensitiveQuestionTests(SimpleTestCase):
+    def test_demographics_are_excluded(self):
+        for question in ("Gender", "Race/ethnicity", "Veteran status", "Disability status", "Sexual orientation", "Are you Hispanic or Latino?"):
+            with self.subTest(question=question):
+                self.assertEqual(classify(question), QuestionCategory.DEMOGRAPHIC)
+                self.assertIn(classify(question), HARD_EXCLUDED_CATEGORIES)
+
+    def test_compensation_variants_are_excluded(self):
+        for question in ("Salary requirements?", "Compensation requirement", "Desired compensation", "Desired pay"):
+            with self.subTest(question=question):
+                self.assertEqual(classify(question), QuestionCategory.SALARY_EXPECTATION)
+                self.assertIn(classify(question), HARD_EXCLUDED_CATEGORIES)

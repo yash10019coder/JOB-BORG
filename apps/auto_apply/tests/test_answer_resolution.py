@@ -33,7 +33,11 @@ class OptionConstraintEnforcementTests(TestCase):
             username="bob", password="pw", email="bob@example.com"
         )
         self.profile = self.user.profile
-        self.profile.resume_text = "Bob Jones. Graduated from State University."
+        self.profile.resume_text = (
+            "Bob Jones. Graduated from State University with a Bachelor's degree. "
+            "Five years of backend engineering experience. "
+            "Proficient in Python and Go."
+        )
         self.profile.save()
 
     def _resolve(self, question, answer):
@@ -52,7 +56,7 @@ class OptionConstraintEnforcementTests(TestCase):
         answer = QuestionAnswer(
             question_id=question.id,
             answer="Bachelor's",
-            evidence=["State University"],
+            evidence=["Bachelor's degree"],
             self_reported_confidence=0.9,
         )
 
@@ -76,6 +80,46 @@ class OptionConstraintEnforcementTests(TestCase):
             answer="Community College of Somewhere Else",
             evidence=["Graduated from State University"],
             self_reported_confidence=0.95,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+    def test_multi_select_answer_with_all_valid_options_passes_through(self):
+        question = Question(
+            id="Which languages do you know?",
+            text="Which languages do you know?",
+            field_type="multi_select",
+            options=("Python", "Go", "Rust"),
+        )
+        answer = QuestionAnswer(
+            question_id=question.id,
+            answer=["Python", "Go"],
+            evidence=["Proficient in Python and Go"],
+            self_reported_confidence=0.9,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertEqual(resolved.answer, ["Python", "Go"])
+        self.assertFalse(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.OK)
+
+    def test_multi_select_answer_with_one_invalid_option_is_rejected(self):
+        question = Question(
+            id="Which languages do you know?",
+            text="Which languages do you know?",
+            field_type="multi_select",
+            options=("Python", "Go", "Rust"),
+        )
+        answer = QuestionAnswer(
+            question_id=question.id,
+            answer=["Python", "COBOL"],
+            evidence=["Proficient in Python and Go"],
+            self_reported_confidence=0.9,
         )
 
         resolved = self._resolve(question, answer)
@@ -109,7 +153,7 @@ class OptionConstraintEnforcementTests(TestCase):
         answer = QuestionAnswer(
             question_id="q1",
             answer="Five years of backend engineering.",
-            evidence=["Graduated from State University"],
+            evidence=["Five years of backend engineering experience"],
             self_reported_confidence=0.9,
         )
 
@@ -316,3 +360,30 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
 
         self.assertNotEqual(resolved.answer, "US Citizen")
         self.assertTrue(resolved.needs_review)
+
+    def test_ambiguous_questions_require_review_despite_saved_answers(self):
+        for category in (ExplicitAnswer.Category.WORK_AUTHORIZATION, ExplicitAnswer.Category.SPONSORSHIP):
+            ExplicitAnswer.objects.create(user=self.user, category=category, answer_text="No")
+
+        for text in (
+            "Do you currently hold H-1B status?",
+            "Do you currently hold a valid H1B visa?",
+            "Do you need H-1B sponsorship?",
+            "What is your immigration status?",
+            "Do you hold a work permit?",
+            "Do you have a visa?",
+            "What is your citizenship status?",
+            "Are you authorized to work or do you require sponsorship?",
+            "Are you eligible to work without visa sponsorship?",
+            "Do you have the right to work without sponsorship?",
+        ):
+            with self.subTest(text=text):
+                client = FakeLLMClient()
+                question = Question(id="q", text=text, field_type="text")
+                resolved = resolve_field_answers(
+                    self.user, [question], self.profile.resume_text, self.profile, client
+                )[0]
+                self.assertIsNone(resolved.answer)
+                self.assertTrue(resolved.needs_review)
+                self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
+                self.assertEqual(client.calls, [])

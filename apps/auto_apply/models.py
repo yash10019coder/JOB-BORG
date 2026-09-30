@@ -93,7 +93,7 @@ class AutoApplyDraft(models.Model):
         VERIFICATION_CODE_AMBIGUOUS = "verification_code_ambiguous", "Multiple verification codes found"
         VERIFICATION_BUSY = "verification_busy", "Another verification in progress"
         VERIFICATION_CODE_REJECTED = "verification_code_rejected", "Verification code rejected"
-
+        RESUME_REPLACED = "resume_replaced", "Resume was replaced"
 
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.

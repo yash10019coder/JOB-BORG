@@ -42,6 +42,14 @@ HARD_EXCLUDED_CATEGORIES = frozenset(
 # case-insensitive regexes matched against the rendered question text.
 _CATEGORY_PATTERNS = [
     (
+        QuestionCategory.DEMOGRAPHIC,
+        [
+            r"\b(gender|sex|race|racial|ethnicity|ethnic|demographic)\b",
+            r"\b(veteran|disability|disabled|sexual orientation|pronouns)\b",
+            r"\b(hispanic|latino|latina|latinx)\b",
+        ],
+    ),
+    (
         QuestionCategory.WORK_AUTHORIZATION,
         [
             r"\bwork authoriz",
@@ -86,7 +94,8 @@ _CATEGORY_PATTERNS = [
         [
             r"\bsalary expectat",
             r"\bcompensation expectat",
-            r"\bdesired salary\b",
+            r"\bdesired (salary|compensation|pay)\b",
+            r"\b(salary|compensation|pay) requirements?\b",
             r"\bexpected (pay|salary|compensation)\b",
             r"\bcurrent[\w\s]{0,20}salary\b",
             r"\bcurrent[\w\s]{0,20}compensation\b",
@@ -103,6 +112,14 @@ _CATEGORY_PATTERNS = [
         QuestionCategory.DEMOGRAPHIC,
         [
             r"\bgender\b",
+            r"\bsex\b",
+            r"\breligio(n|us)\b",
+            r"\blgbt[qia]*\b",
+            r"\bnational origin\b",
+            r"\bprotected[ -]class\b",
+            r"\bage\b",
+            r"\bhow old\b",
+            r"\b\d{1,3} years? old\b",
             r"\bpronouns?\b",
             r"\btransgender\b",
             r"\bsexual orientation\b",

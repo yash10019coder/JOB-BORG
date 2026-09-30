@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import RestrictedError
 from django.test import TestCase
 
 from apps.applications.models import JobApplication
@@ -18,6 +19,16 @@ class AutoApplyDraftModelTests(TestCase):
             source_ats="greenhouse", source_job_id="1",
             employer=self.employer, title="Backend Engineer",
         )
+
+    def test_application_direct_delete_restricted_but_parent_cascades_allowed(self):
+        from django.db.models import RestrictedError
+        application = JobApplication.objects.create(user=self.user, job=self.job)
+        AutoApplyDraft.objects.create(user=self.user, job=self.job, job_application=application)
+        with self.assertRaises(RestrictedError):
+            application.delete()
+        self.user.delete()
+        self.assertFalse(AutoApplyDraft.objects.exists())
+        self.assertFalse(JobApplication.objects.exists())
 
     def test_create_draft_with_valid_user_job_answers_succeeds(self):
         draft = AutoApplyDraft.objects.create(
@@ -130,7 +141,7 @@ class JobApplicationRestrictTests(TestCase):
         self.assertEqual(AutoApplyDraft.objects.count(), 0)
 
     def test_deleting_only_the_job_application_is_still_refused(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(RestrictedError):
             JobApplication.objects.get().delete()
 
 

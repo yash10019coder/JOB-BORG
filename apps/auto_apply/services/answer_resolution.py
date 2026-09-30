@@ -44,13 +44,21 @@ EXPLICIT_ANSWER_REASON = "explicit_answer"
 _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
     QuestionCategory.WORK_AUTHORIZATION: (
         ExplicitAnswer.Category.WORK_AUTHORIZATION,
-        ExplicitAnswer.Category.SPONSORSHIP,
     ),
     QuestionCategory.SALARY_EXPECTATION: (ExplicitAnswer.Category.SALARY_EXPECTATION,),
 }
 
 
-_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor|\bvisa\b", re.IGNORECASE)
+_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor", re.IGNORECASE)
+_AMBIGUOUS_AUTHORIZATION_QUESTION = re.compile(
+    r"\bh-?1b\b|\bimmigration\b|\bwork[ -]permit\b|\bcitizenship\b",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_QUESTION = re.compile(
+    r"\bwork authoriz|\bauthoriz(?:ed|ation) to work\b|"
+    r"\beligib(?:le|ility) to work\b|\bright to work\b",
+    re.IGNORECASE,
+)
 
 
 def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
@@ -60,13 +68,20 @@ def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ..
     sponsorship?" classify as WORK_AUTHORIZATION, but their answers are not
     interchangeable -- "No" to one means the opposite of "No" to the other, so
     a saved answer for the wrong sub-category must never be used. Split them by
-    question wording; a question that mentions neither is a plain
-    work-authorization question.
+    question wording; ambiguous status questions and combined questions
+    require human review.
     """
     if category == QuestionCategory.WORK_AUTHORIZATION:
-        if _SPONSORSHIP_QUESTION.search(question_text or ""):
+        text = question_text or ""
+        sponsorship = _SPONSORSHIP_QUESTION.search(text)
+        authorization = _AUTHORIZATION_QUESTION.search(text)
+        if _AMBIGUOUS_AUTHORIZATION_QUESTION.search(text) or (sponsorship and authorization):
+            return ()
+        if sponsorship:
             return (ExplicitAnswer.Category.SPONSORSHIP,)
-        return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
+        if authorization:
+            return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
+        return ()
     return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
 
 
@@ -135,8 +150,8 @@ def resolve_field_answers(
 
 def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> ResolvedAnswer:
     """Deterministic backstop for option-bearing questions (`SINGLE_SELECT`,
-    `MULTI_SELECT`, `CHECKBOX_GROUP`): an LLM answer is trusted only when it
-    is an exact match against `question.options`.
+    `MULTI_SELECT`, `CHECKBOX_GROUP`): an LLM answer is trusted only when
+    every selected value is an exact match against `question.options`.
 
     LLM instruction-following (the system prompt in `langchain_client.py`)
     is the first line of defense, not the enforcement boundary -- a model
@@ -145,11 +160,16 @@ def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> Re
     unanswerable question (empty, `needs_review=True`) rather than letting
     an invalid value reach `answers_payload` and fail later at submit time
     (or silently misrepresent the applicant). Free-text questions
-    (`question.options` empty) are untouched.
+    (`question.options` empty) are untouched. A list-shaped answer (multiple
+    simultaneous selections for MULTI_SELECT/CHECKBOX_GROUP) is valid only
+    when every item in the list is a real option.
     """
     if not question.options or not answer.answer:
         return answer
-    if answer.answer in question.options:
+    if isinstance(answer.answer, (list, tuple)):
+        if all(value in question.options for value in answer.answer):
+            return answer
+    elif answer.answer in question.options:
         return answer
     return ResolvedAnswer(
         question_id=answer.question_id,
