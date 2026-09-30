@@ -16,6 +16,7 @@ vendor.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from html import escape
 
 from django.conf import settings
 from langchain.chat_models import init_chat_model
@@ -78,8 +79,8 @@ def _build_prompt(questions: list[Question], resume_text: str, profile) -> str:
         "<questions>",
     ]
     for question in questions:
-        lines.append(f'<question id="{question.id}">')
-        lines.append(question.text)
+        lines.append(f'<question id="{escape(question.id, quote=True)}">')
+        lines.append(escape(question.text, quote=True))
         lines.append("</question>")
     lines.append("</questions>")
     return "\n".join(lines)
@@ -117,6 +118,8 @@ class ProviderConfig:
     # these constrained today -- carried over from the deleted hand-rolled
     # nvidia_client.py, which set them for the same reason.
     model_kwargs: dict = field(default_factory=dict)
+    # Preserve Anthropic/OpenAI defaults; Google needs a smaller retry budget.
+    max_retries: int = 2
 
 
 _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
@@ -134,6 +137,7 @@ _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
         init_model="google_genai",
         default_model="gemini-2.5-flash",
         api_key_setting="GOOGLE_API_KEY",
+        max_retries=1,
     ),
     "nvidia": ProviderConfig(
         # NIM exposes an OpenAI-compatible chat-completions endpoint, so the
@@ -182,6 +186,7 @@ class LangChainAnswerInferenceClient:
             # This must hold for every provider constructed here, not only
             # the ones that had this fix before LangChain.
             timeout=settings.AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS,
+            max_retries=provider_config.max_retries,
             base_url=provider_config.base_url,
             **provider_config.model_kwargs,
         )

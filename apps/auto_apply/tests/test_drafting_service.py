@@ -156,8 +156,8 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         sponsorship_answer = draft.answers[
             "Will you now or in the future require visa sponsorship?"
         ]
-        self.assertEqual(sponsorship_answer["value"], "No, I do not require sponsorship.")
-        self.assertFalse(sponsorship_answer["needs_review"])
+        self.assertEqual(sponsorship_answer["value"], "")
+        self.assertTrue(sponsorship_answer["needs_review"])
         self.assertEqual(sponsorship_answer["reason"], "explicit_answer")
         self.assertTrue(sponsorship_answer["required"])
 
@@ -483,3 +483,65 @@ class ConcurrentTriggerGuardTests(DraftingServiceTestCase):
         self.assertEqual(
             AutoApplyDraft.objects.filter(user=self.user, job=self.job).count(), 1
         )
+
+
+class DraftingBoundaryTests(DraftingServiceTestCase):
+    def test_custom_files_never_reach_llm(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import FILE
+        for required in (False, True):
+            with self.subTest(required=required):
+                AutoApplyDraft.objects.all().delete()
+                client = FakeLLMClient()
+                draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema(fields=(FormField("Cover letter", FILE, required),))), llm_client=client)
+                self.assertEqual(client.calls, [])
+                self.assertNotIn("Cover letter", draft.answers)
+                self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED if required else AutoApplyDraft.Status.DRAFTED)
+
+    def test_near_miss_labels_are_not_standard(self):
+        from apps.auto_apply.services.drafting import _classify_standard_field
+        for label in ("First name of reference", "Email consent", "Phone interview availability", "LinkedIn experience", "Resume summary", "Firstname"):
+            self.assertIsNone(_classify_standard_field(label), label)
+        self.assertEqual(_classify_standard_field("Resume/CV"), "resume")
+
+    def test_resume_value_is_storage_key(self):
+        from apps.auto_apply.services.drafting import _standard_field_value
+        self.profile.resume = "resumes/123/random.pdf"
+        self.assertEqual(_standard_field_value("resume", self.profile, self.user), "resumes/123/random.pdf")
+
+    def test_profile_labels_on_selects_follow_custom_resolution(self):
+        client = FakeLLMClient()
+        draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema(fields=(FormField("Email", SINGLE_SELECT, True, ("Yes", "No")),))), llm_client=client)
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(draft.answers["Email"]["needs_review"])
+
+    def test_invalid_choice_values_need_review(self):
+        from unittest.mock import patch
+        from apps.auto_apply.greenhouse_form.field_mapping import MULTI_SELECT, CHECKBOX_GROUP
+        from apps.auto_apply.llm.base import ResolvedAnswer
+        for kind, value in ((SINGLE_SELECT, "Maybe"), (MULTI_SELECT, ["Yes", "Maybe"]), (CHECKBOX_GROUP, ["Maybe"])):
+            with self.subTest(kind=kind):
+                AutoApplyDraft.objects.all().delete()
+                schema = FormSchema(fields=(FormField("Question", kind, True, ("Yes", "No")),))
+                with patch("apps.auto_apply.services.drafting.answer_resolution.resolve_field_answers", return_value=[ResolvedAnswer("Question", "generic", value, False, "ok")]):
+                    draft = draft_for(self.user, self.job, form_client=FakeFormClient(schema), llm_client=FakeLLMClient())
+                self.assertEqual(draft.answers["Question"]["value"], "")
+                self.assertTrue(draft.answers["Question"]["needs_review"])
+
+    def test_authorization_and_sponsorship_answers_never_cross_match(self):
+        from apps.auto_apply.services.answer_resolution import resolve_field_answers
+        from apps.auto_apply.llm.base import Question
+        for saved, question in ((ExplicitAnswer.Category.WORK_AUTHORIZATION, "Require sponsorship?"), (ExplicitAnswer.Category.SPONSORSHIP, "Authorized to work?")):
+            with self.subTest(saved=saved):
+                ExplicitAnswer.objects.all().delete()
+                ExplicitAnswer.objects.create(user=self.user, category=saved, answer_text="Yes")
+                client = FakeLLMClient()
+                answer = resolve_field_answers(self.user, [Question("q", question)], "", self.profile, client)[0]
+                self.assertIsNone(answer.answer)
+                self.assertTrue(answer.needs_review)
+                self.assertEqual(client.calls, [])
+
+    def test_unconfirmed_submission_blocks_redrafting(self):
+        AutoApplyDraft.objects.create(user=self.user, job=self.job, status=AutoApplyDraft.Status.FAILED, reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
+        client = FakeFormClient(STANDARD_ONLY_SCHEMA)
+        self.assertIsNone(draft_for(self.user, self.job, form_client=client, llm_client=FakeLLMClient()))
+        self.assertEqual(client.inspect_calls, [])

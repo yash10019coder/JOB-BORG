@@ -49,6 +49,11 @@ def extract_text_from_docx(file_obj):
     try:
         document = Document(file_obj)
         paragraphs = [p.text for p in document.paragraphs if p.text]
+        for table in document.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if cells:
+                    paragraphs.append("\t".join(cells))
         return "\n".join(paragraphs).strip()
     except Exception as exc:  # noqa: BLE001 -- corrupted/malformed DOCX must not raise
         logger.warning("Failed to parse DOCX resume: %s", exc)

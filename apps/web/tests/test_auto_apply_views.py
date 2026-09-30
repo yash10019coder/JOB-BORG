@@ -724,3 +724,41 @@ class NewVerificationReasonCodeMessageTests(AutoApplyQueueViewTests):
             if expects_settings_link:
                 self.assertIn(reverse("email_inbox_credential"), content)
 
+
+class ReviewFindingViewTests(AutoApplyViewsTestCase):
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_rejects_unresolved_answers(self, task):
+        draft = self._draft(self.alice, self._job(), answers={"Q": {"value": "guess", "needs_review": True}})
+        response = self._client_for(self.alice).post(reverse("send_auto_apply_draft", args=[draft.pk]), follow=True)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        task.delay.assert_not_called()
+        self.assertContains(response, "Please review and save")
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_resets_timeout_start(self, task):
+        from datetime import timedelta
+        from django.utils import timezone
+        draft = self._draft(self.alice, self._job())
+        AutoApplyDraft.objects.filter(pk=draft.pk).update(updated_at=timezone.now() - timedelta(days=1))
+        before = timezone.now()
+        self._client_for(self.alice).post(reverse("send_auto_apply_draft", args=[draft.pk]))
+        draft.refresh_from_db()
+        self.assertGreaterEqual(draft.updated_at, before)
+        task.delay.assert_called_once_with(draft.pk)
+
+    def test_queue_file_entry_hides_storage_key_and_omits_value_input(self):
+        self._draft(self.alice, self._job(), answers={"Resume": {"value": "resumes/private/key.pdf", "field_type": "file"}, "Email": {"value": "alice@example.com", "field_type": "text"}})
+        response = self._client_for(self.alice).get(reverse("auto_apply_queue"))
+        self.assertNotContains(response, "resumes/private/key.pdf")
+        entries = list(response.context["page_obj"].object_list[0].answers)
+        self.assertNotContains(response, f'name="value__{entries.index("Resume")}"')
+        self.assertContains(response, f'name="value__{entries.index("Email")}"')
+        self.assertContains(response, "Resume attached")
+
+    @mock.patch("apps.web.views.draft_auto_apply")
+    def test_unconfirmed_submission_cannot_be_retriggered(self, task):
+        job = self._job()
+        self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED, reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
+        self._client_for(self.alice).post(reverse("trigger_auto_apply", args=[job.pk]))
+        task.delay.assert_not_called()
