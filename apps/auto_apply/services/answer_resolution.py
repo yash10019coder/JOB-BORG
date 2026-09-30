@@ -16,6 +16,8 @@ its one-call-per-batch behavior for the remainder.
 """
 from __future__ import annotations
 
+import re
+
 from apps.auto_apply.llm.base import (
     AnswerInferenceClient,
     Question,
@@ -41,7 +43,6 @@ EXPLICIT_ANSWER_REASON = "explicit_answer"
 _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
     QuestionCategory.WORK_AUTHORIZATION: (
         ExplicitAnswer.Category.WORK_AUTHORIZATION,
-        ExplicitAnswer.Category.SPONSORSHIP,
     ),
     QuestionCategory.SALARY_EXPECTATION: (ExplicitAnswer.Category.SALARY_EXPECTATION,),
 }
@@ -78,7 +79,14 @@ def resolve_field_answers(
     for question in questions:
         category = classify(question.text)
         explicit = None
-        for candidate_category in _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ()):
+        candidate_categories = _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
+        if category == QuestionCategory.WORK_AUTHORIZATION:
+            candidate_categories = (
+                ExplicitAnswer.Category.SPONSORSHIP
+                if re.search(r"\bsponsor(?:ship|ed|ing)?\b", question.text, re.I)
+                else ExplicitAnswer.Category.WORK_AUTHORIZATION,
+            )
+        for candidate_category in candidate_categories:
             if candidate_category in explicit_by_category:
                 explicit = explicit_by_category[candidate_category]
                 break

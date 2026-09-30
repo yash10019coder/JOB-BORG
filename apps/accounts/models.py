@@ -4,10 +4,12 @@ The built-in Django User is the auth/users table (see Key Decisions); Profile
 is a OneToOne extension holding everything the matching fan-out reads.
 """
 import os
+import uuid
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
+from django.db.models.fields.files import FieldFile
 from django.utils import timezone
 
 from .crypto import encrypt_secret
@@ -16,7 +18,8 @@ from .crypto import encrypt_secret
 def resume_upload_path(instance, filename):
     """Per-user resume path -- keeps uploads from colliding across users
     regardless of which storage backend (local/S3) is active."""
-    return f"resumes/{instance.user_id}/{filename}"
+    extension = os.path.splitext(filename)[1].lower()
+    return f"resumes/{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
 def validate_resume_file(file):
@@ -25,6 +28,9 @@ def validate_resume_file(file):
     defense against malicious uploads, independent of the parsing task's own
     bounded time limit (see apps/accounts/tasks.py).
     """
+    if isinstance(file, FieldFile) and file._committed:
+        return
+
     max_size = getattr(settings, "RESUME_MAX_UPLOAD_SIZE_BYTES", 10 * 1024 * 1024)
     if file.size > max_size:
         raise ValidationError(
@@ -60,7 +66,7 @@ def validate_resume_file(file):
             "text/plain",
         ],
     )
-    if content_type is not None and content_type not in allowed_content_types:
+    if content_type not in (None, "application/octet-stream") and content_type not in allowed_content_types:
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
@@ -145,15 +151,61 @@ class Profile(models.Model):
         path for clearing. Deliberately not a `post_save` signal, per U1's
         approach, so the trigger stays visible here instead of implicit.
         """
+        previous = self.resume
         self.resume = file or None
         self.resume_text = ""
         self.full_clean(validate_unique=False)
         self.save(update_fields=["resume", "resume_text", "updated_at"])
 
+        if previous and previous.name != getattr(self.resume, "name", None):
+            self._retire_previous_resume(previous)
+
         if file:
             from .tasks import parse_resume
 
-            parse_resume.delay(self.pk)
+            transaction.on_commit(lambda: parse_resume.delay(self.pk))
+
+    def _retire_previous_resume(self, previous):
+        """Delete `previous`'s storage object, unless an in-flight
+        `AutoApplyDraft` still references it.
+
+        `draft_for` snapshots `profile.resume.name` into `draft.answers` at
+        draft time (see apps/auto_apply/services/drafting.py), so a draft
+        created before this replacement can still hold the old storage key.
+        A `SENDING` draft materializes that key into a local file at send
+        time (apps/auto_apply/tasks.py) -- deleting it out from under that
+        in-flight send would fail the submission, so deletion is skipped
+        entirely this call rather than raced; a `DRAFTED` draft referencing
+        the old key is marked `STALE` instead of silently sending a resume
+        the user never reviewed against this job.
+        """
+        from apps.auto_apply.greenhouse_form.field_mapping import FILE
+        from apps.auto_apply.models import AutoApplyDraft
+
+        active_drafts = AutoApplyDraft.objects.filter(
+            user_id=self.user_id, status__in=AutoApplyDraft.ACTIVE_STATUSES
+        )
+        referencing = [
+            draft
+            for draft in active_drafts
+            if any(
+                entry.get("field_type") == FILE and entry.get("value") == previous.name
+                for entry in (draft.answers or {}).values()
+            )
+        ]
+        if any(d.status == AutoApplyDraft.Status.SENDING for d in referencing):
+            return
+
+        stale_ids = [
+            d.pk for d in referencing if d.status == AutoApplyDraft.Status.DRAFTED
+        ]
+        if stale_ids:
+            AutoApplyDraft.objects.filter(pk__in=stale_ids).update(
+                status=AutoApplyDraft.Status.STALE,
+                reason_code=AutoApplyDraft.ReasonCode.RESUME_REPLACED,
+            )
+
+        transaction.on_commit(lambda: previous.storage.delete(previous.name))
 
     def __str__(self):
         return f"Profile<{self.user.username}>"

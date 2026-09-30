@@ -5,10 +5,13 @@ from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.postgres.search import SearchQuery, SearchVector
+from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
@@ -144,16 +147,7 @@ def job_action(request, job_id):
     # Preserve the toggle/search state the action was taken from (carried as
     # hidden fields on the action form) so Save/Apply/Dismiss doesn't silently
     # reset the user back to the unfiltered recommended-only view.
-    redirect_url = reverse("recommendations")
-    params = {}
-    if request.POST.get("all") == "1":
-        params["all"] = "1"
-    query = _clean_query(request.POST.get("q", ""))
-    if query:
-        params["q"] = query
-    if params:
-        redirect_url = f"{redirect_url}?{urlencode(params)}"
-    return redirect(redirect_url)
+    return _recommendations_redirect(request)
 
 
 # --- Auto-apply (U8) -------------------------------------------------------
@@ -179,6 +173,9 @@ _REASON_CODE_MESSAGES = {
     ),
     AutoApplyDraft.ReasonCode.SUBMISSION_FAILED: (
         "The application couldn't be submitted; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED: (
+        "Your application may have been submitted. Check with the employer before trying again."
     ),
     AutoApplyDraft.ReasonCode.SENDING_TIMEOUT: (
         "Submission timed out and wasn't completed; you can try again."
@@ -208,6 +205,9 @@ _REASON_CODE_MESSAGES = {
 
 _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
 _STALE_MESSAGE = "This job posting closed before we could apply."
+_STALE_RESUME_REPLACED_MESSAGE = (
+    "Your resume changed since this application was drafted; please review it again."
+)
 
 
 def _friendly_draft_message(draft):
@@ -216,6 +216,8 @@ def _friendly_draft_message(draft):
     `error_message` free text (plan review flagged both raw internal text
     and prose pattern-matching as unsuitable/fragile for direct display)."""
     if draft.status == AutoApplyDraft.Status.STALE:
+        if draft.reason_code == AutoApplyDraft.ReasonCode.RESUME_REPLACED:
+            return _STALE_RESUME_REPLACED_MESSAGE
         return _STALE_MESSAGE
     if draft.status in (AutoApplyDraft.Status.EXCLUDED, AutoApplyDraft.Status.FAILED):
         return _REASON_CODE_MESSAGES.get(draft.reason_code, _GENERIC_UNAVAILABLE_MESSAGE)
@@ -266,6 +268,13 @@ def trigger_auto_apply(request, job_id):
     )
     if already_applied:
         messages.info(request, "You've already applied to this job.")
+        return _recommendations_redirect(request)
+
+    if AutoApplyDraft.objects.filter(
+        user=request.user, job=job,
+        reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED,
+    ).exists():
+        messages.error(request, _REASON_CODE_MESSAGES[AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED])
         return _recommendations_redirect(request)
 
     draft_auto_apply.delay(request.user.id, job.id)
@@ -361,9 +370,17 @@ def send_auto_apply_draft(request, pk):
     row count (rather than get-then-save) is also what makes the guard
     atomic against a concurrent double-submit.
     """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    if any(entry.get("needs_review") for entry in (draft.answers or {}).values()):
+        messages.error(request, "Please review and save all flagged answers before sending.")
+        return redirect("auto_apply_queue")
+
     updated = AutoApplyDraft.objects.filter(
-        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
-    ).update(status=AutoApplyDraft.Status.SENDING)
+        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+        answers=draft.answers,
+    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
     if not updated:
         raise Http404("Draft not found or not sendable.")
 
@@ -385,12 +402,20 @@ def email_inbox_credential(request):
         if form.is_valid():
             inst = form.save(commit=False)
             inst.user = request.user
-            inst.save()
-            app_password = form.cleaned_data.get("app_password")
-            if app_password:
-                inst.set_app_password(app_password)
-            messages.success(request, "Inbox credentials updated and verified successfully.")
-            return redirect("email_inbox_credential")
+            try:
+                with transaction.atomic():
+                    inst.save()
+                    app_password = form.cleaned_data.get("app_password")
+                    if app_password:
+                        inst.set_app_password(app_password)
+            except ImproperlyConfigured:
+                form.add_error(
+                    None,
+                    "Inbox credentials could not be saved because credential encryption is not configured correctly. Contact the administrator.",
+                )
+            else:
+                messages.success(request, "Inbox credentials updated and verified successfully.")
+                return redirect("email_inbox_credential")
     else:
         form = EmailInboxCredentialForm(instance=credential)
 

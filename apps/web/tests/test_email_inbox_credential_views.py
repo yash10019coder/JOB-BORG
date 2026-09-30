@@ -123,3 +123,46 @@ class EmailInboxCredentialViewTests(TestCase):
 
         self.assertNotIn("secretpassword12", content)
         self.assertNotIn(cred.app_password_encrypted, content)
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_unreadable_saved_password_requires_replacement(self, mock_imap_cls):
+        cred = EmailInboxCredential.objects.create(
+            user=self.user_a, email_address="usera@gmail.com", imap_host="imap.gmail.com",
+            app_password_encrypted="unreadable", is_active=False,
+        )
+        self.client.force_login(self.user_a)
+        response = self.client.post(self.url, {
+            "email_address": "changed@gmail.com", "imap_host": "imap.gmail.com", "imap_port": 993,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("app_password", response.context["form"].errors)
+        mock_imap_cls.assert_not_called()
+        cred.refresh_from_db()
+        self.assertEqual(cred.email_address, "usera@gmail.com")
+        self.assertFalse(cred.is_active)
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_encryption_configuration_error_rolls_back_create_and_update(self, mock_imap_cls):
+        self.client.force_login(self.user_a)
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    cred = EmailInboxCredential.objects.create(
+                        user=self.user_a, email_address="old@gmail.com", imap_host="imap.gmail.com",
+                        app_password_encrypted="old-ciphertext", is_active=False,
+                    )
+                with override_settings(CREDENTIAL_ENCRYPTION_KEYS=[]):
+                    response = self.client.post(self.url, {
+                        "email_address": "new@gmail.com", "imap_host": "imap.gmail.com",
+                        "imap_port": 993, "app_password": "abcdefghijklmnop",
+                    })
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "credential encryption is not configured correctly")
+                self.assertNotContains(response, "updated and verified successfully")
+                if existing:
+                    cred.refresh_from_db()
+                    self.assertEqual(cred.email_address, "old@gmail.com")
+                    self.assertEqual(cred.app_password_encrypted, "old-ciphertext")
+                    self.assertFalse(cred.is_active)
+                else:
+                    self.assertFalse(EmailInboxCredential.objects.filter(user=self.user_a).exists())

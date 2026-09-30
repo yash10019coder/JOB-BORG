@@ -113,6 +113,19 @@ class ExtractTextFromDocxTests(TestCase):
         text = extract_text_from_docx(io.BytesIO(docx_bytes))
         self.assertIn("Platform Engineer with Kubernetes experience", text)
 
+    def test_docx_extracts_paragraphs_and_table_cells(self):
+        from docx import Document
+        document = Document()
+        document.add_paragraph("Experience")
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Acme Corp"
+        table.cell(0, 1).text = "Engineer"
+        table.cell(1, 1).text = "Python"
+        stream = io.BytesIO()
+        document.save(stream)
+        stream.seek(0)
+        self.assertEqual(extract_text_from_docx(stream), "Experience\nAcme Corp\tEngineer\nPython")
+
     def test_corrupted_docx_returns_empty_string_not_exception(self):
         text = extract_text_from_docx(io.BytesIO(b"not a real docx at all"))
         self.assertEqual(text, "")
