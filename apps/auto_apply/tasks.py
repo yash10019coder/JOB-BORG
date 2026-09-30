@@ -254,8 +254,11 @@ def submit_auto_apply_draft(self, draft_id):
         if acquired_lock:
             try:
                 _release_verification_lock(lock_key, lock_token)
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "submit_auto_apply_draft(draft_id=%s): failed to release verification lock.",
+                    draft_id,
+                )
 
     with transaction.atomic():
         job_application, _ = JobApplication.objects.update_or_create(
