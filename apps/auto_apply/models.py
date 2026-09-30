@@ -78,6 +78,7 @@ class AutoApplyDraft(models.Model):
         SUBMISSION_UNCONFIRMED = "submission_unconfirmed", "Submission not confirmed"
         SENDING_TIMEOUT = "sending_timeout", "Submission timed out"
         UNEXPECTED_ERROR = "unexpected_error", "Unexpected error"
+        RESUME_REPLACED = "resume_replaced", "Resume was replaced"
 
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.

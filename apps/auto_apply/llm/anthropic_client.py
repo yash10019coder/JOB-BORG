@@ -70,7 +70,8 @@ class _QuestionAnswerBatchSchema(BaseModel):
 
 
 class AnthropicAnswerInferenceClient:
-    """Default/only ``AnswerInferenceClient`` implementation, backed by Claude."""
+    """Default ``AnswerInferenceClient`` implementation, backed by Claude (see
+    ``base.py``'s ``CLIENT_REGISTRY`` for the other registered provider)."""
 
     def __init__(self, api_key: str | None = None, model: str | None = None, client=None):
         self._model = model or DEFAULT_MODEL

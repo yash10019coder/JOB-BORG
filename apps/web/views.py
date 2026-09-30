@@ -182,6 +182,9 @@ _REASON_CODE_MESSAGES = {
 }
 _GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
 _STALE_MESSAGE = "This job posting closed before we could apply."
+_STALE_RESUME_REPLACED_MESSAGE = (
+    "Your resume changed since this application was drafted; please review it again."
+)
 
 
 def _friendly_draft_message(draft):
@@ -190,6 +193,8 @@ def _friendly_draft_message(draft):
     `error_message` free text (plan review flagged both raw internal text
     and prose pattern-matching as unsuitable/fragile for direct display)."""
     if draft.status == AutoApplyDraft.Status.STALE:
+        if draft.reason_code == AutoApplyDraft.ReasonCode.RESUME_REPLACED:
+            return _STALE_RESUME_REPLACED_MESSAGE
         return _STALE_MESSAGE
     if draft.status in (AutoApplyDraft.Status.EXCLUDED, AutoApplyDraft.Status.FAILED):
         return _REASON_CODE_MESSAGES.get(draft.reason_code, _GENERIC_UNAVAILABLE_MESSAGE)
