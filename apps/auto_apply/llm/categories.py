@@ -16,6 +16,7 @@ class QuestionCategory:
     LEGAL_ATTESTATION = "legal_attestation"
     BACKGROUND_CHECK = "background_check"
     SALARY_EXPECTATION = "salary_expectation"
+    DEMOGRAPHIC = "demographic"
     GENERIC = "generic"
 
 
@@ -33,12 +34,21 @@ HARD_EXCLUDED_CATEGORIES = frozenset(
         QuestionCategory.LEGAL_ATTESTATION,
         QuestionCategory.BACKGROUND_CHECK,
         QuestionCategory.SALARY_EXPECTATION,
+        QuestionCategory.DEMOGRAPHIC,
     }
 )
 
 # Ordered (category, patterns) pairs -- first match wins. Patterns are
 # case-insensitive regexes matched against the rendered question text.
 _CATEGORY_PATTERNS = [
+    (
+        QuestionCategory.DEMOGRAPHIC,
+        [
+            r"\b(gender|sex|race|racial|ethnicity|ethnic|demographic)\b",
+            r"\b(veteran|disability|disabled|sexual orientation|pronouns)\b",
+            r"\b(hispanic|latino|latina|latinx)\b",
+        ],
+    ),
     (
         QuestionCategory.WORK_AUTHORIZATION,
         [
@@ -84,7 +94,8 @@ _CATEGORY_PATTERNS = [
         [
             r"\bsalary expectat",
             r"\bcompensation expectat",
-            r"\bdesired salary\b",
+            r"\bdesired (salary|compensation|pay)\b",
+            r"\b(salary|compensation|pay) requirements?\b",
             r"\bexpected (pay|salary|compensation)\b",
             r"\bcurrent[\w\s]{0,20}salary\b",
             r"\bcurrent[\w\s]{0,20}compensation\b",

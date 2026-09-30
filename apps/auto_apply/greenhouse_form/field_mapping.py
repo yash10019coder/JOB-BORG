@@ -82,6 +82,8 @@ class FormField:
     # a control with no `id` (label wraps it implicitly); callers fall back
     # to label-based lookup in that case.
     control_id: str = ""
+    # Only a full API list proves a combobox snapshot is exhaustive.
+    options_complete: bool = False
 
     @property
     def is_supported(self) -> bool:
@@ -120,6 +122,7 @@ def schema_to_dict(schema: FormSchema) -> dict:
                 "required": f.required,
                 "options": list(f.options),
                 "control_id": f.control_id,
+                "options_complete": f.options_complete,
             }
             for f in schema.fields
         ]
@@ -140,6 +143,7 @@ def schema_from_dict(data: dict | None) -> FormSchema | None:
                 required=f["required"],
                 options=tuple(f.get("options", ())),
                 control_id=f.get("control_id", ""),
+                options_complete=f.get("options_complete", False),
             )
             for f in data.get("fields", [])
         )

@@ -508,3 +508,62 @@ class VerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertEqual(cache.get(key), "owner")
         draft.refresh_from_db()
         self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS)
+
+
+class SubmitVerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    @patch("apps.auto_apply.tasks.build_email_code_provider", return_value=object())
+    @patch("apps.auto_apply.tasks.cache.add", return_value=False)
+    def test_lock_contention_retries_without_changing_draft(self, add, provider, client):
+        from celery.exceptions import Retry
+
+        draft = self._make_draft()
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()) as retry:
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
+        retry.assert_called_once_with(countdown=10)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        self.assertIsNone(draft.reason_code)
+        self.assertIsNone(draft.error_message)
+        client.assert_not_called()
+
+
+class ReviewFindingSubmissionTests(SubmitAutoApplyDraftTaskTestCase):
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_unconfirmed_submission_has_dedicated_reason(self, client):
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+        client.return_value.submit.side_effect = GreenhouseFormSubmissionUnconfirmed("No signal")
+        draft = self._make_draft()
+        submit_auto_apply_draft(draft.pk)
+        draft.refresh_from_db()
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertFalse(JobApplication.objects.exists())
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_remote_resume_copied_and_temporary_file_removed_on_success_and_error(self, client):
+        import io
+        from pathlib import Path
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormError
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                AutoApplyDraft.objects.all().delete()
+                draft = self._make_draft()
+                draft.answers = {"Resume": {"field_type": "file", "value": "resumes/remote.pdf"}}
+                draft.save()
+                paths = []
+                def submit(url, answers, **kwargs):
+                    path = Path(answers["Resume"])
+                    paths.append(path)
+                    self.assertEqual(path.read_bytes(), b"resume bytes")
+                    self.assertEqual(path.suffix, ".pdf")
+                    if fail:
+                        raise GreenhouseFormError("pre-submit failure")
+                    return SubmissionResult(success=True)
+                client.return_value.submit.side_effect = submit
+                with patch("apps.auto_apply.tasks.default_storage.open", return_value=io.BytesIO(b"resume bytes")) as storage_open:
+                    submit_auto_apply_draft(draft.pk)
+                storage_open.assert_called_once_with("resumes/remote.pdf", "rb")
+                self.assertEqual(len(paths), 1)
+                self.assertFalse(paths[0].exists())

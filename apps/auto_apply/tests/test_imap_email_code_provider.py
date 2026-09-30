@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import imaplib
 import socket
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
@@ -58,7 +58,7 @@ class ImapEmailCodeProviderTests(TestCase):
         mock_imap.login.return_value = ("OK", [b"Logged in"])
         mock_imap.select.return_value = ("OK", [b"1"])
         mock_imap.noop.return_value = ("OK", [b"OK"])
-        mock_imap.search.return_value = ("OK", [b"1"])
+
 
         msg_bytes = (
             b"From: no-reply@greenhouse.io\r\n"
@@ -67,7 +67,10 @@ class ImapEmailCodeProviderTests(TestCase):
             b"\r\n"
             b"Your verification code is 654321."
         )
-        mock_imap.fetch.return_value = ("OK", [(b"1 (BODY[PEEK[]] {123}", msg_bytes)])
+        mock_imap.uid.side_effect = [
+            ("OK", [b"1"]),
+            ("OK", [(b'1 (INTERNALDATE "05-Aug-2026 12:00:00 +0000" BODY[] {123}', msg_bytes)]),
+        ]
 
         provider = ImapEmailCodeProvider(self.credential)
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
@@ -114,7 +117,7 @@ class ImapEmailCodeProviderTests(TestCase):
         mock_imap.login.return_value = ("OK", [b"Logged in"])
         mock_imap.select.return_value = ("OK", [b"2"])
         mock_imap.noop.return_value = ("OK", [b"OK"])
-        mock_imap.search.return_value = ("OK", [b"1 2"])
+
 
         msg1 = (
             b"From: no-reply@greenhouse.io\r\n"
@@ -129,13 +132,15 @@ class ImapEmailCodeProviderTests(TestCase):
             b"\r\nYour verification code is 222222."
         )
 
-        def mock_fetch(msg_id, spec):
+        def mock_fetch(command, msg_id, spec):
+            if command == "SEARCH":
+                return ("OK", [b"1 2"])
             id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
             if "1" in id_str:
-                return ("OK", [(b"1", msg1)])
-            return ("OK", [(b"2", msg2)])
+                return ("OK", [(b'1 (INTERNALDATE "05-Aug-2026 12:00:00 +0000")', msg1)])
+            return ("OK", [(b'2 (INTERNALDATE "05-Aug-2026 12:01:00 +0000")', msg2)])
 
-        mock_imap.fetch.side_effect = mock_fetch
+        mock_imap.uid.side_effect = mock_fetch
 
         provider = ImapEmailCodeProvider(self.credential)
         result = provider.get_code(
@@ -434,6 +439,76 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         connection.shutdown.assert_called_once()
 
 
+    @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
+    def test_login_abort_keeps_credential_active(self, mock_imap_cls):
+        mock_imap_cls.return_value.login.side_effect = imaplib.IMAP4.abort("Connection closed")
+        result = ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime.now(timezone.utc), deadline_monotonic=1e9
+        )
+        self.assertEqual(result.outcome, VerificationOutcome.INBOX_UNAVAILABLE)
+        self.credential.refresh_from_db()
+        self.assertTrue(self.credential.is_active)
+        self.assertEqual(self.credential.last_error_code, "")
+        mock_imap_cls.return_value.logout.assert_called_once()
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=[])
+    @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
+    def test_configuration_error_propagates(self, mock_imap_cls):
+        from django.core.exceptions import ImproperlyConfigured
+
+        with self.assertRaises(ImproperlyConfigured):
+            ImapEmailCodeProvider(self.credential).get_code(
+                since=datetime.now(timezone.utc), deadline_monotonic=1e9
+            )
+        mock_imap_cls.assert_not_called()
+
+    @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
+    def test_bad_ciphertext_returns_auth_failure(self, mock_imap_cls):
+        self.credential.app_password_encrypted = "invalid-token"
+        result = ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime.now(timezone.utc), deadline_monotonic=1e9
+        )
+        self.assertEqual(result.outcome, VerificationOutcome.INBOX_AUTH_FAILED)
+        mock_imap_cls.assert_not_called()
+
+    @override_settings(AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST=["greenhouse.io", "jobs@example.com"])
+    @patch("apps.auto_apply.email_verification.imap_provider.time.sleep")
+    @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
+    def test_uid_search_filters_senders_and_fetches_each_uid_once(self, mock_imap_cls, sleep):
+        imap = mock_imap_cls.return_value
+        imap.select.return_value = ("OK", [b"2"])
+        # This message has a convincing Date header but no usable INTERNALDATE.
+        msg = b"From: no-reply@greenhouse.io\r\nDate: Wed, 05 Aug 2026 12:00:00 +0000\r\n\r\nYour verification code is 654321."
+        query = '(SINCE "04-Aug-2026" OR FROM "greenhouse.io" (FROM "jobs@example.com"))'
+        fetched_uids: set[bytes] = set()
+
+        def uid_command(command, *args):
+            if command == "SEARCH":
+                return ("OK", [b"10 11"])
+            msg_id = args[0]
+            fetched_uids.add(msg_id)
+            tag = b"1 (UID 10 INTERNALDATE \"invalid\")" if msg_id == b"10" else b"2 (UID 11)"
+            return ("OK", [(tag, msg)])
+
+        imap.uid.side_effect = uid_command
+        # A short real deadline (time.sleep is mocked away, so the poll loop
+        # spins fast): both UIDs get fetched exactly once each (evaluated_uids
+        # dedup) well before this expires, then the loop naturally times out
+        # since neither message yields a usable code (see msg body below).
+        deadline = time.monotonic() + 0.3
+
+        result = ImapEmailCodeProvider(self.credential).get_code(
+            since=datetime(2026, 8, 5, 0, 1, tzinfo=timezone.utc), deadline_monotonic=deadline
+        )
+
+        self.assertEqual(result.outcome, VerificationOutcome.CODE_TIMEOUT)
+        self.assertEqual(fetched_uids, {b"10", b"11"})
+        self.assertIn(call("SEARCH", None, query), imap.uid.call_args_list)
+        self.assertIn(call("FETCH", b"10", "(INTERNALDATE BODY.PEEK[])"), imap.uid.call_args_list)
+        self.assertIn(call("FETCH", b"11", "(INTERNALDATE BODY.PEEK[])"), imap.uid.call_args_list)
+        imap.search.assert_not_called()
+        imap.fetch.assert_not_called()
+
 class DeadlineSocketReaderTests(SimpleTestCase):
     def test_partial_reads_recalculate_budget_for_lines_and_literals(self):
         import io
@@ -485,3 +560,4 @@ class DeadlineSocketReaderTests(SimpleTestCase):
         connect.assert_called_once_with(("imap.example.com", 993), 3.0)
         self.assertEqual([c.args[0] for c in sock.settimeout.call_args_list], [2.0, 2.0, 1.0])
         sock.close.assert_called_once()
+

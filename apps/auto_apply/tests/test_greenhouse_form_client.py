@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from django.core.cache import cache
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
@@ -153,6 +153,44 @@ class GreenhouseFormClientTests(SimpleTestCase):
         path = self._tmpdir / "resume.pdf"
         path.write_bytes(b"%PDF-1.4 fake resume content")
         return path
+
+    def test_preexisting_confirmation_and_arbitrary_status_do_not_confirm(self):
+        for message in ("Thank you for applying", "Uploading resume", "Please fix the errors"):
+            with self.subTest(message=message):
+                html = f'<body><p role="status">{message}</p><form onsubmit="event.preventDefault()"><button>Submit</button></form></body>'
+                client = self._client(html, confirmation_timeout_ms=10)
+                from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+                with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+                    client.submit(JOB_URL, {})
+
+    def test_changed_generic_status_does_not_confirm(self):
+        html = """<body><p role="status">Ready</p><form onsubmit="event.preventDefault();document.querySelector('p').textContent='Uploading resume'"><button>Submit</button></form></body>"""
+        client = self._client(html, confirmation_timeout_ms=10)
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+        with self.assertRaises(GreenhouseFormSubmissionUnconfirmed):
+            client.submit(JOB_URL, {})
+
+    def test_redirect_to_disallowed_origin_rejected_before_inspecting_or_filling(self):
+        def factory():
+            context = self._browser.new_context()
+            redirect_html = f'<script>setTimeout(() => location.replace("{DISALLOWED_URL}"), 50)</script>'
+            context.route(JOB_URL, lambda route: route.fulfill(content_type="text/html", body=redirect_html))
+            context.route(DISALLOWED_URL, lambda route: route.fulfill(body='<form><button>Submit</button></form>'))
+            return _TestContextHandle(context)
+        client = GreenhouseFormClient(context_factory=factory)
+        for operation in (lambda: client.inspect(JOB_URL), lambda: client.submit(JOB_URL, {})):
+            with patch.object(client, "_discover_schema") as discover, patch.object(client, "_fill_answers") as fill:
+                with self.assertRaises(GreenhouseFormError):
+                    operation()
+                discover.assert_not_called()
+                fill.assert_not_called()
+
+    def test_origin_revalidated_immediately_before_submit(self):
+        client = self._client('<body><form><button>Submit</button></form></body>')
+        with patch.object(client, "_fill_answers", side_effect=lambda page, *_: page.goto("about:blank")), patch.object(client, "_click_submit") as click:
+            with self.assertRaises(GreenhouseFormError):
+                client.submit(JOB_URL, {})
+            click.assert_not_called()
 
     # -- inspect(): standard-fields-only fixture -------------------------
 
@@ -410,6 +448,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
             set(school_field.options), {"API School A", "API School B", "API School C"}
         )
         self.assertNotIn("DOM Sample School A", school_field.options)
+        self.assertTrue(school_field.options_complete)
         # JOB_URL's board token is "acme" -- confirms the real request URL
         # shape, not just that *a* request happened.
         self.assertEqual(
@@ -432,6 +471,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         school_field = schema.by_label()["School"]
         self.assertEqual(set(school_field.options), {"DOM Sample School A", "DOM Sample School B"})
+        self.assertFalse(school_field.options_complete)
 
     def test_inspect_does_not_call_education_api_for_non_education_combobox(self):
         # A combobox whose control_id doesn't match Greenhouse's Education
@@ -552,6 +592,23 @@ class GreenhouseFormClientTests(SimpleTestCase):
             expected_schema=schema,
         )
 
+        self.assertTrue(result.success)
+
+    def test_submit_skips_blank_optional_file_and_preserves_required_upload(self):
+        html = _fixture_html("greenhouse_combobox_and_file_upload_form.html")
+        client = self._client(html)
+        schema = client.inspect(JOB_URL)
+        self.assertFalse(schema.by_label()["Cover Letter"].required)
+        result = self._client(html).submit(
+            JOB_URL,
+            {
+                "First Name": "Ada", "Email": "ada@example.com",
+                "Are you authorized to work?": "Yes",
+                "Resume/CV": str(self._resume_file()), "Cover Letter": "",
+                "Which languages do you know?": ["Python"],
+            },
+            expected_schema=schema,
+        )
         self.assertTrue(result.success)
 
     # -- required unsupported field type ----------------------------------
@@ -959,6 +1016,30 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
     # -- submit(): bounded post-fill re-discovery for revealed fields -------
 
+    def test_post_fill_discovery_is_passive_and_checks_control_identity(self):
+        html = '''<form>
+            <label for="school--0">School</label><input id="school--0" role="combobox" required>
+            <span id="degree-label">Degree</span><input id="degree--0" role="combobox" aria-labelledby="degree-label" required>
+            </form>'''
+        client = self._client(html)
+        known = FormSchema((
+            FormField("School", COMBOBOX_SELECT, True, control_id="school--0"),
+            FormField("Degree", COMBOBOX_SELECT, True, control_id="degree--0"),
+        ))
+
+        def check(page):
+            page.goto(JOB_URL)
+            with patch.object(GreenhouseFormClient, "_extract_options") as extract, patch.object(client, "_maybe_full_education_options") as education:
+                client._raise_on_newly_revealed_required_fields(page, JOB_URL, known)
+                extract.assert_not_called()
+                education.assert_not_called()
+            page.locator("form").evaluate("el => el.insertAdjacentHTML('beforeend', '<label for=school--1>School</label><input id=school--1 required>')")
+            with self.assertRaisesRegex(GreenhouseFormSchemaMismatch, "School"):
+                client._raise_on_newly_revealed_required_fields(page, JOB_URL, known)
+
+        client._with_fresh_page(check)
+
+
     def test_submit_no_revealed_fields_behaves_identically(self):
         # R7 happy path: choosing "Referral" never reveals the "specify"
         # field -- the extra re-discovery pass finds nothing new and
@@ -1094,6 +1175,7 @@ class GreenhouseFormClientTests(SimpleTestCase):
                     "Email": "ada@example.com",
                     "Resume/CV": str(self._resume_file()),
                 },
+                deadline_monotonic=time.monotonic() + 300,
             )
         elapsed = time.monotonic() - start
         # Generous upper bound: comfortably under 2x the configured
@@ -1101,6 +1183,23 @@ class GreenhouseFormClientTests(SimpleTestCase):
         # wait being added for the verification check), with slack for
         # real browser/navigation overhead.
         self.assertLess(elapsed, 3.0)
+
+    def test_existing_zip_code_and_confirm_email_label_do_not_trigger_verification(self):
+        client = self._client(
+            _fixture_html("greenhouse_zip_code_confirm_email_form.html"),
+            confirmation_timeout_ms=100,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionFailed):
+            client.submit(JOB_URL, {"Zip Code": "12345", "Confirm your email": "ada@example.com"})
+
+    def test_hidden_verification_control_is_ignored(self):
+        context = self._browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_content('<p>Confirm your email</p><input name="code" style="display:none">')
+            self.assertFalse(GreenhouseFormClient._verification_interstitial_detected(page))
+        finally:
+            context.close()
 
     # -- hostname allowlist -------------------------------------------------
 
@@ -1112,6 +1211,28 @@ class GreenhouseFormClientTests(SimpleTestCase):
         with self.assertRaises(GreenhouseFormError):
             client.inspect(DISALLOWED_URL)
         self.assertEqual(calls, [])  # context_factory (and thus navigation) never invoked
+
+
+class RediscoveryIdentityTests(SimpleTestCase):
+    def test_ids_take_precedence_with_label_fallback_when_either_id_is_missing(self):
+        client = GreenhouseFormClient()
+        for old_id, new_id, old_label, new_label, is_new in (
+            ("first", "second", "School", "School", True),
+            ("first", "first", "School", "Renamed", False),
+            ("", "first", "School", "School", False),
+            ("first", "", "School", "School", False),
+            ("", "", "School", "Degree", True),
+        ):
+            with self.subTest(old_id=old_id, new_id=new_id, new_label=new_label):
+                known = FormSchema((FormField(old_label, TEXT, True, control_id=old_id),))
+                fresh = FormSchema((FormField(new_label, TEXT, True, control_id=new_id),))
+                with patch.object(client, "_discover_schema", return_value=fresh):
+                    if is_new:
+                        with self.assertRaises(GreenhouseFormSchemaMismatch):
+                            client._raise_on_newly_revealed_required_fields(None, JOB_URL, known)
+                    else:
+                        client._raise_on_newly_revealed_required_fields(None, JOB_URL, known)
+
 
 
 class SchemaMatchesTests(SimpleTestCase):
@@ -1163,6 +1284,7 @@ class SchemaSerializationTests(SimpleTestCase):
                 FormField("Email", TEXT, True),
                 FormField("Auth", SINGLE_SELECT, True, ("Yes", "No")),
                 FormField("Stack", MULTI_SELECT, False, ("Python", "Go")),
+                FormField("School", COMBOBOX_SELECT, True, ("School A",), "school--0", True),
             )
         )
 
@@ -1175,6 +1297,31 @@ class SchemaSerializationTests(SimpleTestCase):
 
         self.assertIsNone(schema_from_dict(None))
         self.assertIsNone(schema_from_dict({}))
+
+
+class EmptyFileAnswerTests(SimpleTestCase):
+    def test_optional_empty_file_skips_validation_and_upload(self):
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Upload", FILE, False),))
+        control = MagicMock()
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", side_effect=GreenhouseFormSubmissionFailed("empty")
+        ) as validate:
+            client._fill_answers(MagicMock(), schema, {"Upload": ""})
+            validate.assert_not_called()
+            control.set_input_files.assert_not_called()
+
+    def test_required_empty_file_still_validates_and_raises(self):
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Upload", FILE, True),))
+        control = MagicMock()
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", side_effect=GreenhouseFormSubmissionFailed("empty")
+        ) as validate:
+            with self.assertRaises(GreenhouseFormSubmissionFailed):
+                client._fill_answers(MagicMock(), schema, {"Upload": ""})
+            validate.assert_called_once_with("", "Upload")
+            control.set_input_files.assert_not_called()
 
 
 class ValidatedFilePathTests(SimpleTestCase):
@@ -1202,12 +1349,16 @@ class ValidatedFilePathTests(SimpleTestCase):
                 GreenhouseFormClient._validated_file_path(tmpdir, "Resume/CV")
 
 
+_EMPTY_BEFORE_SNAPSHOT = {"body": "", "statuses": ()}
+
+
 class EmailVerificationProviderIntegrationTests(SimpleTestCase):
     def test_no_provider_raises_no_inbox_credentials(self):
         from apps.auto_apply.email_verification.base import VerificationOutcome
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle)
         mock_page = MagicMock()
+        mock_page.url = JOB_URL
         mock_page.locator.side_effect = lambda sel: (
             MagicMock(count=lambda: 1)
             if "code" in sel
@@ -1218,7 +1369,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         mock_page.get_by_role.return_value = status_reg
 
         with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
-            client._confirm_success(mock_page, provider=None)
+            client._confirm_success(mock_page, _EMPTY_BEFORE_SNAPSHOT, provider=None)
 
         self.assertEqual(cm.exception.outcome, VerificationOutcome.NO_INBOX_CREDENTIALS)
 
@@ -1227,6 +1378,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle)
         mock_page = MagicMock()
+        mock_page.url = JOB_URL
 
         code_input = MagicMock()
         submit_btn = MagicMock()
@@ -1261,7 +1413,10 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         )
 
         result = client._confirm_success(
-            mock_page, provider=mock_provider, deadline_monotonic=time.monotonic() + 300
+            mock_page,
+            _EMPTY_BEFORE_SNAPSHOT,
+            provider=mock_provider,
+            deadline_monotonic=time.monotonic() + 300,
         )
         self.assertTrue(result.success)
         code_input.fill.assert_called_with("654321", timeout=client.navigation_timeout_ms)
@@ -1274,6 +1429,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
             )
             mock_page = MagicMock()
+            mock_page.url = JOB_URL
 
             code_input = MagicMock()
             submit_btn = MagicMock()
@@ -1300,9 +1456,11 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
 
             with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
                 client._confirm_success(
-                    mock_page, provider=mock_provider, deadline_monotonic=time.monotonic() + 300
+                    mock_page,
+                    _EMPTY_BEFORE_SNAPSHOT,
+                    provider=mock_provider,
+                    deadline_monotonic=time.monotonic() + 300,
                 )
-
 
             self.assertEqual(cm.exception.outcome, VerificationOutcome.CODE_REJECTED)
             self.assertIsNone(cm.exception.debug_artifacts)
@@ -1322,6 +1480,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 context_factory=_TestContextHandle, debug_artifact_dir=tmpdir
             )
             mock_page = MagicMock()
+            mock_page.url = JOB_URL
 
             code_input = MagicMock()
             submit_btn = MagicMock()
@@ -1347,6 +1506,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
                     client._confirm_success(
                         mock_page,
+                        _EMPTY_BEFORE_SNAPSHOT,
                         provider=mock_provider,
                         deadline_monotonic=time.monotonic() + 300,
                     )
@@ -1378,7 +1538,7 @@ class VerificationDeadlineTests(SimpleTestCase):
         with patch.object(client, "_check_success_signal", return_value=None), patch.object(
             client, "_verification_interstitial_detected", return_value=True
         ), self.assertRaises(GreenhouseFormVerificationFailed) as caught:
-            client._confirm_success(page, provider=provider, deadline_monotonic=130.0)
+            client._confirm_success(page, _EMPTY_BEFORE_SNAPSHOT, provider=provider, deadline_monotonic=130.0)
         self.assertEqual(caught.exception.outcome, VerificationOutcome.CODE_TIMEOUT)
         self.assertIsNone(caught.exception.debug_artifacts)
         button.click.assert_not_called()
@@ -1406,3 +1566,117 @@ class VerificationDeadlineTests(SimpleTestCase):
         fields[0].fill.assert_called_once_with("1", timeout=500.0)
         fields[1].fill.assert_called_once_with("2", timeout=250.0)
         fields[2].fill.assert_not_called()
+
+
+class EmailVerificationProviderDeadlineTests(SimpleTestCase):
+    @override_settings(AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS=45)
+    def test_provider_deadline_respects_configured_timeout_and_shared_budget(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        for shared_deadline, expected in ((500, 145), (130, 130)):
+            with self.subTest(shared_deadline=shared_deadline):
+                client = GreenhouseFormClient(context_factory=_TestContextHandle)
+                provider = MagicMock()
+                provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
+                with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", return_value=100), patch.object(
+                    client, "_check_success_signal", return_value=None
+                ), patch.object(client, "_verification_interstitial_detected", return_value=True):
+                    with self.assertRaises(GreenhouseFormVerificationFailed):
+                        client._confirm_success(
+                            MagicMock(), _EMPTY_BEFORE_SNAPSHOT, provider=provider, deadline_monotonic=shared_deadline
+                        )
+                self.assertEqual(provider.get_code.call_args.kwargs["deadline_monotonic"], expected)
+
+    def test_post_code_polls_for_delayed_success(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        from apps.auto_apply.greenhouse_form.field_mapping import SubmissionResult
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
+        page = MagicMock()
+        provider = MagicMock()
+        provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+        success = SubmissionResult(success=True)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", return_value=100), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"), patch.object(
+            client, "_check_success_signal", side_effect=[None, None, None, success]
+        ):
+            self.assertIs(
+                client._confirm_success(page, _EMPTY_BEFORE_SNAPSHOT, provider=provider, deadline_monotonic=200),
+                success,
+            )
+        self.assertEqual(page.wait_for_timeout.call_count, 2)
+
+    def test_post_code_polling_stops_at_shared_deadline_without_artifacts(self):
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
+        provider = MagicMock()
+        provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+        page = MagicMock()
+        clock = [100.0]
+        provider.get_code.side_effect = lambda **kwargs: (clock.__setitem__(0, 129.9) or provider.get_code.return_value)
+        page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", side_effect=lambda: clock[0]), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_capture_debug_artifacts") as capture:
+            with self.assertRaises(GreenhouseFormVerificationFailed) as raised:
+                client._confirm_success(page, _EMPTY_BEFORE_SNAPSHOT, provider=provider, deadline_monotonic=130)
+        self.assertEqual(raised.exception.outcome, VerificationOutcome.CODE_REJECTED)
+        self.assertAlmostEqual(clock[0], 130)
+        capture.assert_not_called()
+
+    def test_large_task_deadline_does_not_extend_classification_timeout(self):
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=500)
+        page = MagicMock()
+        clock = [100.0]
+        page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
+        with patch("apps.auto_apply.greenhouse_form.client.time.monotonic", side_effect=lambda: clock[0]), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_verification_interstitial_detected", return_value=False):
+            self.assertIsNone(client._confirm_success(page, _EMPTY_BEFORE_SNAPSHOT, deadline_monotonic=1000))
+        self.assertEqual(clock[0], 100.5)
+
+    def test_provider_configuration_error_propagates_out_of_submit(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        client = GreenhouseFormClient(context_factory=MagicMock())
+        client._context_factory.return_value.new_page.return_value.url = JOB_URL
+        provider = MagicMock()
+        provider.get_code.side_effect = ImproperlyConfigured("Missing keys")
+        with patch.object(client, "_goto_and_settle"), patch.object(
+            client, "_challenge_detected", return_value=False
+        ), patch.object(client, "_discover_schema"), patch.object(
+            client, "_fill_answers"
+        ), patch.object(client, "_click_submit"), patch.object(
+            client, "_check_success_signal", return_value=None
+        ), patch.object(client, "_verification_interstitial_detected", return_value=True):
+            with self.assertRaises(ImproperlyConfigured):
+                client.submit(JOB_URL, {}, email_code_provider=provider, deadline_monotonic=time.monotonic() + 300)
+
+
+class ContextInitializationCleanupTests(SimpleTestCase):
+    def test_initialization_failures_release_resources_and_preserve_error(self):
+        from unittest.mock import Mock
+        from apps.auto_apply.greenhouse_form.client import _default_context_factory
+        for failure_stage in ("launch", "context"):
+            with self.subTest(stage=failure_stage):
+                driver = Mock()
+                browser = driver.chromium.launch.return_value
+                original = RuntimeError("initialization failed")
+                if failure_stage == "launch":
+                    driver.chromium.launch.side_effect = original
+                else:
+                    browser.new_context.side_effect = original
+                    browser.close.side_effect = RuntimeError("cleanup failed")
+                driver.stop.side_effect = RuntimeError("stop failed")
+                with patch("playwright.sync_api.sync_playwright") as start:
+                    start.return_value.start.return_value = driver
+                    with self.assertRaises(RuntimeError) as raised:
+                        _default_context_factory()
+                self.assertIs(raised.exception, original)
+                driver.stop.assert_called_once()
+                if failure_stage == "context":
+                    browser.close.assert_called_once()

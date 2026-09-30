@@ -21,7 +21,7 @@ limits computed from settings at import time) broke `@override_settings` in
 tests because the frozen value was read once and never revisited -- this
 module deliberately avoids repeating that mistake.
 """
-from django.core.checks import Warning, register
+from django.core.checks import Error, Warning, register
 from django.core.exceptions import ImproperlyConfigured
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
@@ -51,7 +51,12 @@ def _build_multi_fernet() -> MultiFernet:
             "key before encrypting or decrypting stored secrets. Generate "
             "one with apps.accounts.crypto.generate_key()."
         )
-    return MultiFernet([Fernet(key.encode()) for key in keys])
+    try:
+        return MultiFernet([Fernet(key.encode()) for key in keys])
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ImproperlyConfigured(
+            "CREDENTIAL_ENCRYPTION_KEYS contains an invalid Fernet key."
+        ) from exc
 
 
 def encrypt_secret(plaintext: str) -> str:
@@ -97,15 +102,12 @@ def generate_key() -> str:
 
 @register()
 def check_credential_encryption_keys(app_configs, **kwargs):
-    """Warn at `manage.py check` time if no encryption keys are configured in prod.
-
-    Deliberately a warning, not an error: local/dev environments routinely
-    run with DEBUG=True and no keys configured, and this check must not
-    block `manage.py check` in that case.
-    """
+    """Warn about missing keys and reject invalid keys in production only."""
     from django.conf import settings
 
-    if not settings.CREDENTIAL_ENCRYPTION_KEYS and not settings.DEBUG:
+    if settings.DEBUG:
+        return []
+    if not settings.CREDENTIAL_ENCRYPTION_KEYS:
         return [
             Warning(
                 "CREDENTIAL_ENCRYPTION_KEYS is empty with DEBUG=False. Any "
@@ -115,4 +117,13 @@ def check_credential_encryption_keys(app_configs, **kwargs):
                 id="accounts.W001",
             )
         ]
-    return []
+    errors = []
+    for index, key in enumerate(settings.CREDENTIAL_ENCRYPTION_KEYS):
+        try:
+            Fernet(key.encode())
+        except (ValueError, TypeError, AttributeError):
+            errors.append(Error(
+                f"CREDENTIAL_ENCRYPTION_KEYS entry {index + 1} is not a valid Fernet key.",
+                id="accounts.E001",
+            ))
+    return errors
