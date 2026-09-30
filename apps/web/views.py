@@ -254,11 +254,15 @@ def _answer_edit_field(entry, snapshot):
     field_type = snapshot.get("field_type", entry.get("field_type"))
     if FILE in (field_type, entry.get("field_type")):
         return None
-    options = snapshot.get("options", [])
+    # Fall back to the stored answer's own "options" (set for an
+    # invalid_option/low_confidence placeholder -- see drafting.py) when the
+    # live-schema snapshot doesn't have this field at all, e.g. a draft with
+    # no form_schema_snapshot yet or a field the snapshot dropped.
+    options = snapshot.get("options") or entry.get("options") or []
     choices = [(option, option) for option in options]
     if field_type in (MULTI_SELECT, CHECKBOX_GROUP):
         return forms.MultipleChoiceField(choices=choices, required=False)
-    if field_type == SINGLE_SELECT or (field_type == COMBOBOX_SELECT and options):
+    if field_type == SINGLE_SELECT or (field_type in (COMBOBOX_SELECT, None) and options):
         return forms.ChoiceField(choices=[("", "Choose an answer")] + choices, required=False)
     # Dynamic comboboxes may have no options until the user types a query.
     widget = forms.Textarea if field_type == TEXTAREA else forms.TextInput

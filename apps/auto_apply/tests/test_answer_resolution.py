@@ -33,7 +33,10 @@ class OptionConstraintEnforcementTests(TestCase):
             username="bob", password="pw", email="bob@example.com"
         )
         self.profile = self.user.profile
-        self.profile.resume_text = "Bob Jones. Graduated from State University."
+        self.profile.resume_text = (
+            "Bob Jones. Graduated from State University with a Bachelor's degree. "
+            "Five years of backend engineering experience."
+        )
         self.profile.save()
 
     def _resolve(self, question, answer):
@@ -52,7 +55,7 @@ class OptionConstraintEnforcementTests(TestCase):
         answer = QuestionAnswer(
             question_id=question.id,
             answer="Bachelor's",
-            evidence=["State University"],
+            evidence=["Bachelor's degree"],
             self_reported_confidence=0.9,
         )
 
@@ -109,7 +112,7 @@ class OptionConstraintEnforcementTests(TestCase):
         answer = QuestionAnswer(
             question_id="q1",
             answer="Five years of backend engineering.",
-            evidence=["Graduated from State University"],
+            evidence=["Five years of backend engineering experience"],
             self_reported_confidence=0.9,
         )
 

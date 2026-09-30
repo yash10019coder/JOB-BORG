@@ -393,9 +393,12 @@ class EditAutoApplyDraftTests(AutoApplyViewsTestCase):
                 draft.refresh_from_db()
                 self.assertEqual(draft.answers["Q"]["value"], value if accepted else "No")
                 self.assertEqual(draft.answers["Q"]["needs_review"], needs_review)
-                self.assertEqual(draft.answers["Text"]["value"], "changed" if accepted else "original")
+                # A rejected "Q" doesn't discard the valid sibling "Text"
+                # edit from the same POST (see edit_auto_apply_draft's
+                # docstring) -- Text always saves regardless of Q's outcome.
+                self.assertEqual(draft.answers["Text"]["value"], "changed")
                 if not accepted:
-                    self.assertContains(response, "Choose an allowed option for Q.")
+                    self.assertContains(response, "Choose a valid answer for Q.")
 
     def test_edit_updates_answers_and_clears_needs_review(self):
         job = self._job()
@@ -675,6 +678,7 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
         for field_type in (SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
             with self.subTest(field_type=field_type):
                 draft = self._custom_draft(field_type, options=("Yes", "No"))
+                draft.refresh_from_db()  # tuples (in-memory) -> lists (JSONField) before comparing
                 original = draft.answers
                 response = client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
                     "label__0": "Custom question", "value__0": "Not an option",
