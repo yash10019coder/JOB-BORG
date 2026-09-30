@@ -15,7 +15,7 @@ from apps.auto_apply.llm.categories import (
 
 
 class HardExcludedCategoriesContractTests(SimpleTestCase):
-    def test_hard_excluded_categories_are_exactly_the_sensitive_five(self):
+    def test_hard_excluded_categories_are_exactly_the_sensitive_categories(self):
         self.assertEqual(
             HARD_EXCLUDED_CATEGORIES,
             frozenset(
@@ -182,3 +182,17 @@ class DemographicClassificationTests(SimpleTestCase):
         for text in ("Why do you want to work here?", "Are you 100% available for this role?"):
             with self.subTest(text=text):
                 self.assertEqual(classify(text), QuestionCategory.GENERIC)
+
+
+class AdditionalSensitiveQuestionTests(SimpleTestCase):
+    def test_demographics_are_excluded(self):
+        for question in ("Gender", "Race/ethnicity", "Veteran status", "Disability status", "Sexual orientation", "Are you Hispanic or Latino?"):
+            with self.subTest(question=question):
+                self.assertEqual(classify(question), QuestionCategory.DEMOGRAPHIC)
+                self.assertIn(classify(question), HARD_EXCLUDED_CATEGORIES)
+
+    def test_compensation_variants_are_excluded(self):
+        for question in ("Salary requirements?", "Compensation requirement", "Desired compensation", "Desired pay"):
+            with self.subTest(question=question):
+                self.assertEqual(classify(question), QuestionCategory.SALARY_EXPECTATION)
+                self.assertIn(classify(question), HARD_EXCLUDED_CATEGORIES)

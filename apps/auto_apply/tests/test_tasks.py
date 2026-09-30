@@ -350,7 +350,11 @@ class SubmitAutoApplyDraftFailureTests(SubmitAutoApplyDraftTaskTestCase):
 
     @patch("apps.auto_apply.tasks.build_email_code_provider")
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
-    def test_verification_lock_contention_uses_its_own_reason_code(self, mock_client_cls, mock_build):
+    def test_verification_lock_contention_retries_without_touching_the_draft(self, mock_client_cls, mock_build):
+        # Superseded VERIFICATION_BUSY (immediate-fail) behavior with a
+        # Celery retry -- see SubmitVerificationLockTests.
+        # test_lock_contention_retries_without_changing_draft.
+        from celery.exceptions import Retry
         from django.core.cache import cache
 
         mock_build.return_value = object()
@@ -359,11 +363,13 @@ class SubmitAutoApplyDraftFailureTests(SubmitAutoApplyDraftTaskTestCase):
         self.addCleanup(cache.delete, lock_key)
         draft = self._make_draft()
 
-        submit_auto_apply_draft(draft.pk)
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()):
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
 
         draft.refresh_from_db()
-        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
-        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.VERIFICATION_BUSY)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        self.assertIsNone(draft.reason_code)
         mock_client_cls.return_value.submit.assert_not_called()
         self.assertEqual(cache.get(lock_key), "someone-else")   # not released by a non-owner
 
@@ -502,3 +508,129 @@ class SweepStaleAutoApplyDraftsTests(SubmitAutoApplyDraftTaskTestCase):
         self.assertIn("timed out", stuck_draft.error_message.lower())
         self.assertEqual(fresh_sending_draft.status, AutoApplyDraft.Status.SENDING)
         self.assertEqual(stats["recovered_sending"], 1)
+
+
+class VerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
+    def tearDown(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    @override_settings(AUTO_APPLY_SENDING_TIMEOUT_SECONDS=600)
+    def test_lock_covers_budget_and_releases_owned_token(self, client, provider):
+        from django.core.cache import cache
+        import time
+        draft = self._make_draft()
+        key = f"auto_apply:verification_lock:{self.user.pk}"
+        def submit(*args, **kwargs):
+            token = cache.get(key)
+            self.assertIsInstance(token, str)
+            self.assertNotEqual(token, "1")
+            # After the old 120-second TTL, the full 540-second budget is protected.
+            with patch("django.core.cache.backends.locmem.time.time", return_value=time.time() + 121):
+                self.assertEqual(cache.get(key), token)
+                self.assertFalse(cache.add(key, "competitor", timeout=540))
+        client.return_value.submit.side_effect = submit
+        submit_auto_apply_draft(draft.pk)
+        self.assertIsNone(cache.get(key))
+
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_cleanup_preserves_successor_lock(self, client, provider):
+        from django.core.cache import cache
+        draft = self._make_draft()
+        key = f"auto_apply:verification_lock:{self.user.pk}"
+        def submit(*args, **kwargs):
+            cache.set(key, "successor", timeout=540)
+            raise RuntimeError("submission interrupted")
+        client.return_value.submit.side_effect = submit
+        submit_auto_apply_draft(draft.pk)
+        self.assertEqual(cache.get(key), "successor")
+
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient", side_effect=RuntimeError("construction failed"))
+    def test_client_construction_failure_releases_lock(self, client, provider):
+        from django.core.cache import cache
+        draft = self._make_draft()
+        submit_auto_apply_draft(draft.pk)
+        self.assertIsNone(cache.get(f"auto_apply:verification_lock:{self.user.pk}"))
+
+    @patch("apps.auto_apply.tasks.build_email_code_provider")
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_contender_does_not_submit_or_release_owner_lock(self, client, provider):
+        # Superseded by SubmitVerificationLockTests.
+        # test_lock_contention_retries_without_changing_draft: lock
+        # contention now retries via Celery rather than immediately failing
+        # the draft with VERIFICATION_CODE_AMBIGUOUS.
+        from django.core.cache import cache
+        from celery.exceptions import Retry
+        draft = self._make_draft()
+        key = f"auto_apply:verification_lock:{self.user.pk}"
+        cache.add(key, "owner", timeout=540)
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()):
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
+        client.assert_not_called()
+        self.assertEqual(cache.get(key), "owner")
+        draft.refresh_from_db()
+        self.assertIsNone(draft.reason_code)
+
+
+class SubmitVerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    @patch("apps.auto_apply.tasks.build_email_code_provider", return_value=object())
+    @patch("apps.auto_apply.tasks.cache.add", return_value=False)
+    def test_lock_contention_retries_without_changing_draft(self, add, provider, client):
+        from celery.exceptions import Retry
+
+        draft = self._make_draft()
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()) as retry:
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
+        retry.assert_called_once_with(countdown=10)
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        self.assertIsNone(draft.reason_code)
+        self.assertIsNone(draft.error_message)
+        client.assert_not_called()
+
+
+class ReviewFindingSubmissionTests(SubmitAutoApplyDraftTaskTestCase):
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_unconfirmed_submission_has_dedicated_reason(self, client):
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+        client.return_value.submit.side_effect = GreenhouseFormSubmissionUnconfirmed("No signal")
+        draft = self._make_draft()
+        submit_auto_apply_draft(draft.pk)
+        draft.refresh_from_db()
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertFalse(JobApplication.objects.exists())
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_remote_resume_copied_and_temporary_file_removed_on_success_and_error(self, client):
+        import io
+        from pathlib import Path
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormError
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                AutoApplyDraft.objects.all().delete()
+                draft = self._make_draft()
+                draft.answers = {"Resume": {"field_type": "file", "value": "resumes/remote.pdf"}}
+                draft.save()
+                paths = []
+                def submit(url, answers, **kwargs):
+                    path = Path(answers["Resume"])
+                    paths.append(path)
+                    self.assertEqual(path.read_bytes(), b"resume bytes")
+                    self.assertEqual(path.suffix, ".pdf")
+                    if fail:
+                        raise GreenhouseFormError("pre-submit failure")
+                    return SubmissionResult(success=True)
+                client.return_value.submit.side_effect = submit
+                with patch("apps.auto_apply.tasks.default_storage.open", return_value=io.BytesIO(b"resume bytes")) as storage_open:
+                    submit_auto_apply_draft(draft.pk)
+                storage_open.assert_called_once_with("resumes/remote.pdf", "rb")
+                self.assertEqual(len(paths), 1)
+                self.assertFalse(paths[0].exists())

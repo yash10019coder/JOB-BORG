@@ -41,7 +41,14 @@ class GreenhouseFormSchemaMismatch(GreenhouseFormError):
 
 
 class GreenhouseFormSubmissionFailed(GreenhouseFormError):
-    """The form was filled and submitted but success could not be confirmed."""
+    """Filling the form failed before a submission was attempted."""
+
+
+class GreenhouseFormSubmissionUnconfirmed(GreenhouseFormSubmissionFailed):
+    """A submit click was attempted, but its outcome cannot be confirmed.
+
+    Retrying automatically could submit a duplicate application.
+    """
 
 
 class GreenhouseFormSubmissionUnconfirmed(GreenhouseFormSubmissionFailed):

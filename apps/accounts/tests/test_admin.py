@@ -58,7 +58,7 @@ class ProfileAdminSaveModelTests(TestCase):
         profile.resume = upload
 
         form = mock.Mock(changed_data=["resume", "full_name"], cleaned_data={"resume": upload}, initial={"resume": None})
-        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse:
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse, self.captureOnCommitCallbacks(execute=True):
             ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, True)
 
         profile.refresh_from_db()
@@ -75,7 +75,7 @@ class ProfileAdminSaveModelTests(TestCase):
             changed_data=["resume", "full_name"], cleaned_data={"resume": upload}, initial={}
         )
 
-        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse:
+        with mock.patch("apps.accounts.tasks.parse_resume.delay") as parse, self.captureOnCommitCallbacks(execute=True):
             ProfileAdmin(Profile, AdminSite()).save_model(RequestFactory().post("/"), profile, form, False)
 
         profile.refresh_from_db()

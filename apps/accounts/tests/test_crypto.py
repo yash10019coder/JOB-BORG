@@ -154,3 +154,22 @@ class SystemCheckKeyFormatTests(SimpleTestCase):
     @override_settings(CREDENTIAL_ENCRYPTION_KEYS=["garbage"], DEBUG=True)
     def test_not_enforced_in_debug(self):
         self.assertEqual(check_credential_encryption_keys(app_configs=None), [])
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=[KEY_A, "bad", "also-bad"], DEBUG=False)
+    def test_invalid_keys_are_errors_without_exposing_values(self):
+        from django.core.checks import Error
+
+        errors = check_credential_encryption_keys(app_configs=None)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(isinstance(error, Error) for error in errors))
+        self.assertTrue(all(error.id == "accounts.E001" for error in errors))
+        self.assertNotIn("also-bad", str(errors))
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=["bad"], DEBUG=True)
+    def test_invalid_keys_do_not_block_debug(self):
+        self.assertEqual(check_credential_encryption_keys(app_configs=None), [])
+
+    @override_settings(CREDENTIAL_ENCRYPTION_KEYS=["bad"])
+    def test_invalid_runtime_key_is_configuration_error(self):
+        with self.assertRaises(ImproperlyConfigured):
+            encrypt_secret("anything")

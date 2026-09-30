@@ -20,6 +20,16 @@ class AutoApplyDraftModelTests(TestCase):
             employer=self.employer, title="Backend Engineer",
         )
 
+    def test_application_direct_delete_restricted_but_parent_cascades_allowed(self):
+        from django.db.models import RestrictedError
+        application = JobApplication.objects.create(user=self.user, job=self.job)
+        AutoApplyDraft.objects.create(user=self.user, job=self.job, job_application=application)
+        with self.assertRaises(RestrictedError):
+            application.delete()
+        self.user.delete()
+        self.assertFalse(AutoApplyDraft.objects.exists())
+        self.assertFalse(JobApplication.objects.exists())
+
     def test_create_draft_with_valid_user_job_answers_succeeds(self):
         draft = AutoApplyDraft.objects.create(
             user=self.user,

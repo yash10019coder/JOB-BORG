@@ -51,7 +51,12 @@ def _build_multi_fernet() -> MultiFernet:
             "key before encrypting or decrypting stored secrets. Generate "
             "one with apps.accounts.crypto.generate_key()."
         )
-    return MultiFernet([Fernet(key.encode()) for key in keys])
+    try:
+        return MultiFernet([Fernet(key.encode()) for key in keys])
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ImproperlyConfigured(
+            "CREDENTIAL_ENCRYPTION_KEYS contains an invalid Fernet key."
+        ) from exc
 
 
 def encrypt_secret(plaintext: str) -> str:
@@ -97,15 +102,12 @@ def generate_key() -> str:
 
 @register()
 def check_credential_encryption_keys(app_configs, **kwargs):
-    """Warn at `manage.py check` time if no encryption keys are configured in prod.
-
-    Deliberately a warning, not an error: local/dev environments routinely
-    run with DEBUG=True and no keys configured, and this check must not
-    block `manage.py check` in that case.
-    """
+    """Warn about missing keys and reject invalid keys in production only."""
     from django.conf import settings
 
-    if not settings.CREDENTIAL_ENCRYPTION_KEYS and not settings.DEBUG:
+    if settings.DEBUG:
+        return []
+    if not settings.CREDENTIAL_ENCRYPTION_KEYS:
         return [
             Warning(
                 "CREDENTIAL_ENCRYPTION_KEYS is empty with DEBUG=False. Any "
@@ -116,20 +118,19 @@ def check_credential_encryption_keys(app_configs, **kwargs):
             )
         ]
     errors = []
-    if not settings.DEBUG:
-        # A malformed key (e.g. a JSON array pasted into a comma-separated
-        # env var) would otherwise only blow up with a bare ValueError on the
-        # first encrypt/decrypt call. Never echo the key itself.
-        for index, key in enumerate(settings.CREDENTIAL_ENCRYPTION_KEYS):
-            try:
-                Fernet(key.encode() if isinstance(key, str) else key)
-            except Exception:  # noqa: BLE001 -- any construction failure means "not a valid key"
-                errors.append(
-                    Error(
-                        f"CREDENTIAL_ENCRYPTION_KEYS[{index}] is not a valid Fernet key "
-                        "(expected 32 url-safe base64-encoded bytes; the variable is "
-                        "comma-separated, not a JSON array).",
-                        id="accounts.E001",
-                    )
+    # A malformed key (e.g. a JSON array pasted into a comma-separated
+    # env var) would otherwise only blow up with a bare ValueError on the
+    # first encrypt/decrypt call. Never echo the key itself.
+    for index, key in enumerate(settings.CREDENTIAL_ENCRYPTION_KEYS):
+        try:
+            Fernet(key.encode() if isinstance(key, str) else key)
+        except Exception:  # noqa: BLE001 -- any construction failure means "not a valid key"
+            errors.append(
+                Error(
+                    f"CREDENTIAL_ENCRYPTION_KEYS[{index}] is not a valid Fernet key "
+                    "(expected 32 url-safe base64-encoded bytes; the variable is "
+                    "comma-separated, not a JSON array).",
+                    id="accounts.E001",
                 )
+            )
     return errors

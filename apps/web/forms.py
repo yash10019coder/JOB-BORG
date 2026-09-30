@@ -141,7 +141,11 @@ class EmailInboxCredentialForm(forms.ModelForm):
                 try:
                     app_password = decrypt_secret(self.instance.app_password_encrypted)
                 except Exception:
-                    app_password = None
+                    self.add_error(
+                        "app_password",
+                        "The stored App Password could not be decrypted. Enter a new App Password.",
+                    )
+                    return cleaned_data
             else:
                 self.add_error("app_password", "An App Password is required.")
                 return cleaned_data

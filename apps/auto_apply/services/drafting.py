@@ -27,7 +27,9 @@ from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
-from apps.auto_apply.greenhouse_form.field_mapping import FILE, FormField, schema_to_dict
+from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT, FormField, schema_to_dict,
+)
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
 from apps.auto_apply.models import AutoApplyDraft
@@ -42,13 +44,13 @@ logger = logging.getLogger(__name__)
 # so it never shadows "First Name"/"Last Name", which are matched by their
 # own, earlier entries first.
 _STANDARD_FIELD_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    ("first_name", re.compile(r"first\s*name", re.I)),
-    ("last_name", re.compile(r"last\s*name", re.I)),
-    ("full_name", re.compile(r"^(full\s*)?name$", re.I)),
-    ("email", re.compile(r"e-?mail", re.I)),
-    ("phone", re.compile(r"phone", re.I)),
-    ("linkedin", re.compile(r"linkedin", re.I)),
-    ("resume", re.compile(r"r[ée]sum[ée]|\bcv\b", re.I)),
+    ("first_name", re.compile(r"first\s+name", re.I)),
+    ("last_name", re.compile(r"last\s+name", re.I)),
+    ("full_name", re.compile(r"^(full\s+)?name$", re.I)),
+    ("email", re.compile(r"e-?mail(?: address)?", re.I)),
+    ("phone", re.compile(r"phone(?: number)?", re.I)),
+    ("linkedin", re.compile(r"linkedin(?: (?:url|profile))?", re.I)),
+    ("resume", re.compile(r"r[ée]sum[ée](?:\s*/\s*cv)?|cv", re.I)),
 )
 
 
@@ -57,7 +59,7 @@ def _classify_standard_field(label: str) -> str | None:
     this is a custom (non-standard) question."""
     stripped = label.strip()
     for key, pattern in _STANDARD_FIELD_PATTERNS:
-        if pattern.search(stripped):
+        if pattern.fullmatch(stripped):
             return key
     return None
 
@@ -90,13 +92,7 @@ def _standard_field_value(key: str, profile, user) -> str:
         resume = getattr(profile, "resume", None)
         if not resume:
             return ""
-        try:
-            return resume.path
-        except (ValueError, NotImplementedError):
-            # No file associated with the FieldFile, or a storage backend
-            # with no filesystem path (e.g. remote object storage) -- fall
-            # back to the stored name rather than raising.
-            return resume.name or ""
+        return resume.name or ""
     return ""
 
 
@@ -121,6 +117,11 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             f"draft_for() only supports Greenhouse-sourced jobs (job {job.pk} "
             f"has source_ats={job.source_ats!r})."
         )
+
+    if AutoApplyDraft.objects.filter(
+        user=user, job=job, reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED
+    ).exists():
+        return None
 
     form_client = form_client or GreenhouseFormClient(
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
@@ -151,7 +152,8 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     standard_fields: list[FormField] = []
     custom_fields: list[FormField] = []
     for form_field in schema.fields:
-        target = standard_fields if _classify_standard_field(form_field.label) else custom_fields
+        is_standard = form_field.field_type in (TEXT, FILE) and _classify_standard_field(form_field.label)
+        target = standard_fields if is_standard else custom_fields
         target.append(form_field)
 
     answers_payload: dict[str, dict] = {}
@@ -177,13 +179,40 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "category": "standard",
                 "reason": "profile",
                 "field_type": form_field.field_type,
+                "options": form_field.options,
+                "options_complete": form_field.options_complete,
             }
         elif form_field.required:
             unanswerable_required.append(form_field.label)
 
     # -- Custom fields (R5): explicit answer, then LLM inference. -----------
+    # FILE-type custom questions (e.g. "Upload your portfolio") are never
+    # sent to the LLM -- it has no way to produce a real answer for a file
+    # upload. A required one excludes the draft, same as any other
+    # unanswerable required field; an optional one still needs a blank
+    # placeholder entry in answers_payload (not just silent omission) so
+    # the review queue renders it and `_blocking_required_fields` has a
+    # consistent shape to check, matching every other optional field type.
+    for f in custom_fields:
+        if f.field_type != FILE:
+            continue
+        if f.required:
+            unanswerable_required.append(f.label)
+        else:
+            answers_payload[f.label] = {
+                "value": "",
+                "needs_review": False,
+                "required": False,
+                "category": "custom",
+                "reason": "file_field",
+                "field_type": f.field_type,
+            }
+    custom_fields = [f for f in custom_fields if f.field_type != FILE]
     questions = [
-        Question(id=f.label, text=f.label, field_type=f.field_type, options=f.options)
+        Question(
+            id=f.label, text=f.label, field_type=f.field_type,
+            options=f.options if f.field_type != COMBOBOX_SELECT or f.options_complete else (),
+        )
         for f in custom_fields
     ]
     resolved = answer_resolution.resolve_field_answers(
@@ -225,16 +254,27 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "reason": resolved_answer.reason,
                 "field_type": form_field.field_type,
                 "options": form_field.options,
+                "options_complete": form_field.options_complete,
             }
             continue
+        value = resolved_answer.answer
+        invalid_option = False
+        if form_field.field_type in (SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
+            values = value if isinstance(value, (list, tuple)) else [value]
+            invalid_option = (
+                not values
+                or (form_field.field_type == SINGLE_SELECT and len(values) != 1)
+                or any(v not in form_field.options for v in values)
+            )
         answers_payload[form_field.label] = {
-            "value": resolved_answer.answer,
-            "needs_review": resolved_answer.needs_review,
+            "value": "" if invalid_option else value,
+            "needs_review": invalid_option or resolved_answer.needs_review,
             "required": form_field.required,
             "category": resolved_answer.category,
             "reason": resolved_answer.reason,
             "field_type": form_field.field_type,
             "options": form_field.options,
+                "options_complete": form_field.options_complete,
         }
 
     if unanswerable_required:
