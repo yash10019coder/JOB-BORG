@@ -259,10 +259,19 @@ def _answer_edit_field(entry, snapshot):
     # live-schema snapshot doesn't have this field at all, e.g. a draft with
     # no form_schema_snapshot yet or a field the snapshot dropped.
     options = snapshot.get("options") or entry.get("options") or []
+    # A COMBOBOX_SELECT's DOM-sampled options can be a partial list
+    # (`options_complete=False`, see field_mapping.FormField) -- enforcing
+    # that partial sample as a closed allowlist would block a valid value
+    # that simply isn't in the sample (live combobox search could still
+    # find it at submission). Only SINGLE_SELECT/MULTI_SELECT/CHECKBOX_GROUP
+    # and a *complete* combobox option set are enforced as a closed choice.
+    options_complete = snapshot.get("options_complete", entry.get("options_complete", True))
     choices = [(option, option) for option in options]
     if field_type in (MULTI_SELECT, CHECKBOX_GROUP):
         return forms.MultipleChoiceField(choices=choices, required=False)
-    if field_type == SINGLE_SELECT or (field_type in (COMBOBOX_SELECT, None) and options):
+    if field_type == SINGLE_SELECT or (
+        field_type in (COMBOBOX_SELECT, None) and options and options_complete
+    ):
         return forms.ChoiceField(choices=[("", "Choose an answer")] + choices, required=False)
     # Dynamic comboboxes may have no options until the user types a query.
     widget = forms.Textarea if field_type == TEXTAREA else forms.TextInput

@@ -35,7 +35,8 @@ class OptionConstraintEnforcementTests(TestCase):
         self.profile = self.user.profile
         self.profile.resume_text = (
             "Bob Jones. Graduated from State University with a Bachelor's degree. "
-            "Five years of backend engineering experience."
+            "Five years of backend engineering experience. "
+            "Proficient in Python and Go."
         )
         self.profile.save()
 
@@ -79,6 +80,46 @@ class OptionConstraintEnforcementTests(TestCase):
             answer="Community College of Somewhere Else",
             evidence=["Graduated from State University"],
             self_reported_confidence=0.95,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+    def test_multi_select_answer_with_all_valid_options_passes_through(self):
+        question = Question(
+            id="Which languages do you know?",
+            text="Which languages do you know?",
+            field_type="multi_select",
+            options=("Python", "Go", "Rust"),
+        )
+        answer = QuestionAnswer(
+            question_id=question.id,
+            answer=["Python", "Go"],
+            evidence=["Proficient in Python and Go"],
+            self_reported_confidence=0.9,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertEqual(resolved.answer, ["Python", "Go"])
+        self.assertFalse(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.OK)
+
+    def test_multi_select_answer_with_one_invalid_option_is_rejected(self):
+        question = Question(
+            id="Which languages do you know?",
+            text="Which languages do you know?",
+            field_type="multi_select",
+            options=("Python", "Go", "Rust"),
+        )
+        answer = QuestionAnswer(
+            question_id=question.id,
+            answer=["Python", "COBOL"],
+            evidence=["Proficient in Python and Go"],
+            self_reported_confidence=0.9,
         )
 
         resolved = self._resolve(question, answer)

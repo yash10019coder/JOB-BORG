@@ -651,9 +651,8 @@ class GreenhouseFormClient:
                 f"{', '.join(newly_required)}."
             )
 
-    @staticmethod
     def _discover_aria_labelledby_only_fields(
-        page, job_url: str, seen_control_ids: set[str], *, interactive: bool = True
+        self, page, job_url: str, seen_control_ids: set[str], *, interactive: bool = True
     ) -> list[FormField]:
         """Second discovery pass for controls with no `<label>` at all.
 
@@ -717,11 +716,16 @@ class GreenhouseFormClient:
                 seen_control_ids.add(control_id)
             field_type = GreenhouseFormClient._classify_field_type(control)
             required = GreenhouseFormClient._is_required(control)
-            options_complete = False
             options = (
                 GreenhouseFormClient._extract_options(page, control, field_type)
                 if interactive else ()
             )
+            options_complete = False
+            if interactive and field_type == COMBOBOX_SELECT:
+                full_options = self._maybe_full_education_options(job_url, control_id)
+                if full_options is not None:
+                    options = full_options
+                    options_complete = True
             form_field = FormField(
                 label=label_text,
                 field_type=field_type,

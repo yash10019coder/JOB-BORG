@@ -606,11 +606,14 @@ class SendAutoApplyDraftTests(AutoApplyViewsTestCase):
 
 
 class DraftReviewRegressionTests(AutoApplyViewsTestCase):
-    def _custom_draft(self, field_type=TEXT, *, required=True, options=()):
+    def _custom_draft(self, field_type=TEXT, *, required=True, options=(), options_complete=True):
         return draft_for(
             self.alice, self._job(),
             form_client=FakeFormClient(FormSchema(fields=(
-                FormField("Custom question", field_type, required, options=options),
+                FormField(
+                    "Custom question", field_type, required,
+                    options=options, options_complete=options_complete,
+                ),
             ))),
             llm_client=FakeLLMClient(),
         )
@@ -706,6 +709,22 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 if multiple:
                     self.assertContains(queue, '<option value="No" selected>No</option>', html=True)
                 draft.delete()
+
+    def test_incomplete_combobox_options_permit_a_value_outside_the_sample(self):
+        # A COMBOBOX_SELECT's DOM-sampled options can be a partial list
+        # (options_complete=False) -- the live combobox search could still
+        # find a value that isn't in that sample, so editing must not
+        # enforce it as a closed allowlist (see views._answer_edit_field).
+        draft = self._custom_draft(
+            COMBOBOX_SELECT, options=("Sample A", "Sample B"), options_complete=False,
+        )
+        client = self._client_for(self.alice)
+        response = client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+            "label__0": "Custom question", "value__0": "Not in the sample",
+        }, follow=True)
+        self.assertNotContains(response, "Choose a valid answer for Custom question")
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers["Custom question"]["value"], "Not in the sample")
 
     def test_option_labels_render_html_escaped(self):
         # Defense-in-depth regression test: Django's widget rendering already

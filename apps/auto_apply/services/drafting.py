@@ -180,6 +180,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "reason": "profile",
                 "field_type": form_field.field_type,
                 "options": form_field.options,
+                "options_complete": form_field.options_complete,
             }
         elif form_field.required:
             unanswerable_required.append(form_field.label)
@@ -253,6 +254,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "reason": resolved_answer.reason,
                 "field_type": form_field.field_type,
                 "options": form_field.options,
+                "options_complete": form_field.options_complete,
             }
             continue
         value = resolved_answer.answer
@@ -272,6 +274,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "reason": resolved_answer.reason,
             "field_type": form_field.field_type,
             "options": form_field.options,
+                "options_complete": form_field.options_complete,
         }
 
     if unanswerable_required:

@@ -49,7 +49,9 @@ class QuestionAnswer:
     """One LLM-inferred answer, as returned by ``AnswerInferenceClient.infer``."""
 
     question_id: str
-    answer: str
+    # A plain string for every field type except MULTI_SELECT/CHECKBOX_GROUP,
+    # where a list represents multiple simultaneous selections.
+    answer: str | list[str]
     evidence: list[str] = field(default_factory=list)
     self_reported_confidence: float = 0.0
     insufficient_evidence: bool = False
@@ -61,7 +63,7 @@ class ResolvedAnswer:
 
     question_id: str
     category: str
-    answer: str | None
+    answer: str | list[str] | None
     needs_review: bool
     reason: str
 
@@ -160,7 +162,9 @@ def _profile_text(profile) -> str:
     return "\n".join(parts)
 
 
-def evidence_appears_in(evidence: list[str], resume_text: str, profile, answer: str) -> bool:
+def evidence_appears_in(
+    evidence: list[str], resume_text: str, profile, answer: str | list[str]
+) -> bool:
     """Check that cited spans appear in the resume/profile and meaningfully
     overlap the answer. This lexical gate is not a semantic entailment proof.
 
@@ -189,7 +193,8 @@ def evidence_appears_in(evidence: list[str], resume_text: str, profile, answer: 
     def tokens(text):
         return set(re.findall(r"\w+", text.lower())) - stop_words
 
-    answer_tokens = tokens(answer or "")
+    answer_text = " ".join(answer) if isinstance(answer, (list, tuple)) else (answer or "")
+    answer_tokens = tokens(answer_text)
     evidence_tokens = tokens(" ".join(evidence))
     return bool(answer_tokens) and len(answer_tokens & evidence_tokens) / len(answer_tokens) >= 0.5
 

@@ -121,8 +121,8 @@ def resolve_field_answers(
 
 def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> ResolvedAnswer:
     """Deterministic backstop for option-bearing questions (`SINGLE_SELECT`,
-    `MULTI_SELECT`, `CHECKBOX_GROUP`): an LLM answer is trusted only when it
-    is an exact match against `question.options`.
+    `MULTI_SELECT`, `CHECKBOX_GROUP`): an LLM answer is trusted only when
+    every selected value is an exact match against `question.options`.
 
     LLM instruction-following (the system prompt in `langchain_client.py`)
     is the first line of defense, not the enforcement boundary -- a model
@@ -131,11 +131,16 @@ def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> Re
     unanswerable question (empty, `needs_review=True`) rather than letting
     an invalid value reach `answers_payload` and fail later at submit time
     (or silently misrepresent the applicant). Free-text questions
-    (`question.options` empty) are untouched.
+    (`question.options` empty) are untouched. A list-shaped answer (multiple
+    simultaneous selections for MULTI_SELECT/CHECKBOX_GROUP) is valid only
+    when every item in the list is a real option.
     """
     if not question.options or not answer.answer:
         return answer
-    if answer.answer in question.options:
+    if isinstance(answer.answer, (list, tuple)):
+        if all(value in question.options for value in answer.answer):
+            return answer
+    elif answer.answer in question.options:
         return answer
     return ResolvedAnswer(
         question_id=answer.question_id,
