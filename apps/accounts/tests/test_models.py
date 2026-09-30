@@ -121,7 +121,9 @@ class ProfileResumeFieldTests(TestCase):
             "resume.txt", b"Experienced engineer", content_type="text/plain"
         )
         with mock.patch("apps.accounts.tasks.parse_resume.delay") as mock_delay:
-            self.profile.set_resume(upload)
+            with self.captureOnCommitCallbacks(execute=True):
+                self.profile.set_resume(upload)
+                mock_delay.assert_not_called()
 
         self.profile.refresh_from_db()
         self.assertTrue(self.profile.resume)
@@ -139,3 +141,126 @@ class ProfileResumeFieldTests(TestCase):
 
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.resume_text, "")
+
+    def test_storage_name_is_random_and_extension_lowercase(self):
+        from apps.accounts.models import resume_upload_path
+        first = resume_upload_path(self.profile, "Jane Doe.PDF")
+        second = resume_upload_path(self.profile, "Jane Doe.PDF")
+        self.assertRegex(first, rf"^resumes/{self.user.pk}/[0-9a-f]{{32}}\.pdf$")
+        self.assertNotEqual(first, second)
+
+    def test_committed_resume_validation_does_not_access_storage(self):
+        self.profile.resume = "resumes/missing.pdf"
+        with mock.patch.object(self.profile.resume.storage, "size", side_effect=AssertionError), \
+             mock.patch.object(self.profile.resume.storage, "open", side_effect=AssertionError):
+            self.profile.full_clean(validate_unique=False)
+
+    def test_octet_stream_requires_supported_extension(self):
+        from apps.accounts.models import validate_resume_file
+        validate_resume_file(SimpleUploadedFile("resume.pdf", b"pdf", content_type="application/octet-stream"))
+        with self.assertRaises(ValidationError):
+            validate_resume_file(SimpleUploadedFile("resume.exe", b"exe", content_type="application/octet-stream"))
+
+    def test_replacing_clearing_and_retaining_resume_storage(self):
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("one.txt", b"one", content_type="text/plain"))
+        old = self.profile.resume.name
+        storage = self.profile.resume.storage
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(self.profile.resume)
+        self.assertTrue(storage.exists(old))
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("two.txt", b"two", content_type="text/plain"))
+            self.assertTrue(storage.exists(old))
+        self.assertFalse(storage.exists(old))
+        replacement = self.profile.resume.name
+        with self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(None)
+        self.assertFalse(storage.exists(replacement))
+
+    def test_admin_saves_other_fields_before_applying_resume_change(self):
+        from types import SimpleNamespace
+        from django.contrib.admin import AdminSite
+        from apps.accounts.admin import ProfileAdmin
+        self.profile.full_name = "Updated name"
+        self.profile.resume = SimpleUploadedFile("resume.txt", b"updated", content_type="text/plain")
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            ProfileAdmin(Profile, AdminSite()).save_model(None, self.profile, SimpleNamespace(changed_data=["resume", "full_name"]), True)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.full_name, "Updated name")
+        self.assertTrue(self.profile.resume)
+
+    def test_replacing_resume_marks_referencing_drafted_draft_stale(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import FILE
+        from apps.auto_apply.models import AutoApplyDraft
+        from apps.employers.models import Employer
+        from apps.jobs.models import Job
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("one.txt", b"one", content_type="text/plain"))
+        old_key = self.profile.resume.name
+
+        employer = Employer.objects.create(name="Acme", slug="acme")
+        job = Job.objects.create(
+            source_ats="greenhouse",
+            source_job_id="1",
+            source_url="https://job-boards.greenhouse.io/acme/jobs/1",
+            employer=employer,
+            title="Backend Engineer",
+        )
+        draft = AutoApplyDraft.objects.create(
+            user=self.user,
+            job=job,
+            status=AutoApplyDraft.Status.DRAFTED,
+            answers={"Resume": {"value": old_key, "field_type": FILE}},
+        )
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("two.txt", b"two", content_type="text/plain"))
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.STALE)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.RESUME_REPLACED)
+        self.assertFalse(self.profile.resume.storage.exists(old_key))
+
+    def test_replacing_resume_skips_deletion_while_a_sending_draft_references_it(self):
+        from apps.auto_apply.greenhouse_form.field_mapping import FILE
+        from apps.auto_apply.models import AutoApplyDraft
+        from apps.employers.models import Employer
+        from apps.jobs.models import Job
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("one.txt", b"one", content_type="text/plain"))
+        old_key = self.profile.resume.name
+
+        employer = Employer.objects.create(name="Acme", slug="acme")
+        job = Job.objects.create(
+            source_ats="greenhouse",
+            source_job_id="1",
+            source_url="https://job-boards.greenhouse.io/acme/jobs/1",
+            employer=employer,
+            title="Backend Engineer",
+        )
+        AutoApplyDraft.objects.create(
+            user=self.user,
+            job=job,
+            status=AutoApplyDraft.Status.SENDING,
+            answers={"Resume": {"value": old_key, "field_type": FILE}},
+        )
+
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            self.profile.set_resume(SimpleUploadedFile("two.txt", b"two", content_type="text/plain"))
+
+        self.assertTrue(self.profile.resume.storage.exists(old_key))
+
+    def test_admin_can_create_profile_with_resume(self):
+        from types import SimpleNamespace
+        from django.contrib.admin import AdminSite
+        from apps.accounts.admin import ProfileAdmin
+        self.profile.delete()
+        profile = Profile(user=self.user, full_name="New profile", resume=SimpleUploadedFile("resume.txt", b"new", content_type="text/plain"))
+        with mock.patch("apps.accounts.tasks.parse_resume.delay"), self.captureOnCommitCallbacks(execute=True):
+            ProfileAdmin(Profile, AdminSite()).save_model(None, profile, SimpleNamespace(changed_data=["resume"]), False)
+        profile.refresh_from_db()
+        self.assertTrue(profile.resume)
+        self.assertEqual(profile.full_name, "New profile")

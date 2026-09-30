@@ -245,7 +245,7 @@ DISCOVERY_MAX_NEW_BOARDS_PER_RUN = env.int("DISCOVERY_MAX_NEW_BOARDS_PER_RUN", d
 
 # ---------------------------------------------------------------------------
 # Auto-apply: LLM answer inference (apps.auto_apply.llm) -- provider-agnostic;
-# Anthropic Claude is the only registered implementation in this slice (see
+# Anthropic Claude and NVIDIA are registered implementations (see
 # apps/auto_apply/llm/base.py's CLIENT_REGISTRY).
 # ---------------------------------------------------------------------------
 AUTO_APPLY_LLM_PROVIDER = env("AUTO_APPLY_LLM_PROVIDER", default="anthropic")
@@ -296,7 +296,7 @@ AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
 # accumulate on disk; set to enable diagnosing real-world submission
 # failures after the fact instead of only from live-attached debugging.
 AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
-    "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=str(BASE_DIR / "media" / "auto_apply_debug")
+    "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=""
 )
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,17 @@ for the draft create, and inline in `submit_auto_apply_draft` below for the
 """
 from datetime import timedelta, datetime, timezone
 import logging
+import os
+import shutil
 import time
+from contextlib import ExitStack
+from tempfile import NamedTemporaryFile
 
 from celery import shared_task
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
@@ -30,9 +35,10 @@ from .greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
+    GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
-from .greenhouse_form.field_mapping import schema_from_dict
+from .greenhouse_form.field_mapping import FILE, schema_from_dict
 from .models import AutoApplyDraft
 from .services.drafting import draft_for
 
@@ -63,7 +69,15 @@ def _submit_budget_seconds() -> float:
 
 
 def _reason_code_for(exc: GreenhouseFormError) -> str:
-    """Map a submission-time exception to `AutoApplyDraft.ReasonCode`."""
+    """Map a submission-time exception to `AutoApplyDraft.ReasonCode`.
+
+    Used instead of substring-matching `str(exc)` later in the UI layer
+    (`apps/web/views.py`) -- the exception type is already the structured
+    signal; discarding it into free text and re-deriving it from prose
+    elsewhere would let the two drift out of sync silently.
+    """
+    if isinstance(exc, GreenhouseFormSubmissionUnconfirmed):
+        return AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED
     if isinstance(exc, GreenhouseFormChallenged):
         return AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED
     if isinstance(exc, GreenhouseFormSchemaMismatch):
@@ -168,21 +182,31 @@ def submit_auto_apply_draft(self, draft_id):
         debug_artifact_dir=settings.AUTO_APPLY_DEBUG_ARTIFACT_DIR or None
     )
     try:
-        try:
-            form_client.submit(
-                job.source_url,
-                answers,
-                expected_schema=expected_schema,
-                captcha_solver=get_solver(),
-                email_code_provider=provider,
-                deadline_monotonic=deadline,
-            )
-        finally:
-            if acquired_lock:
-                try:
-                    cache.delete(lock_key)
-                except Exception:
-                    pass
+        with ExitStack() as files:
+            for label, entry in (draft.answers or {}).items():
+                if entry.get("field_type") != FILE:
+                    continue
+                storage_key = entry["value"]
+                local = files.enter_context(NamedTemporaryFile(suffix=os.path.splitext(storage_key)[1]))
+                with default_storage.open(storage_key, "rb") as stored:
+                    shutil.copyfileobj(stored, local)
+                local.flush()
+                answers[label] = local.name
+            try:
+                form_client.submit(
+                    job.source_url,
+                    answers,
+                    expected_schema=expected_schema,
+                    captcha_solver=get_solver(),
+                    email_code_provider=provider,
+                    deadline_monotonic=deadline,
+                )
+            finally:
+                if acquired_lock:
+                    try:
+                        cache.delete(lock_key)
+                    except Exception:
+                        pass
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)
