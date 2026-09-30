@@ -25,6 +25,7 @@ Playwright browser context (no shared cookies/storage across calls),
 constructed via an injectable ``context_factory`` and torn down after use.
 """
 from datetime import datetime, timezone
+import logging
 import time
 import uuid
 from contextlib import suppress
@@ -36,6 +37,8 @@ from django.core.exceptions import ImproperlyConfigured
 
 from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
 from apps.auto_apply.email_verification.base import EmailCodeProvider, VerificationOutcome
+
+logger = logging.getLogger(__name__)
 
 
 from .exceptions import (
@@ -806,6 +809,7 @@ class GreenhouseFormClient:
                 continue
 
             if form_field.field_type == FILE and not form_field.required and not value:
+                logger.debug("Skipping optional file field %r with no value.", label)
                 continue
 
             control = self._locate_control(page, form_field, label)

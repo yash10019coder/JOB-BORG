@@ -184,9 +184,27 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             unanswerable_required.append(form_field.label)
 
     # -- Custom fields (R5): explicit answer, then LLM inference. -----------
-    unanswerable_required.extend(
-        f.label for f in custom_fields if f.field_type == FILE and f.required
-    )
+    # FILE-type custom questions (e.g. "Upload your portfolio") are never
+    # sent to the LLM -- it has no way to produce a real answer for a file
+    # upload. A required one excludes the draft, same as any other
+    # unanswerable required field; an optional one still needs a blank
+    # placeholder entry in answers_payload (not just silent omission) so
+    # the review queue renders it and `_blocking_required_fields` has a
+    # consistent shape to check, matching every other optional field type.
+    for f in custom_fields:
+        if f.field_type != FILE:
+            continue
+        if f.required:
+            unanswerable_required.append(f.label)
+        else:
+            answers_payload[f.label] = {
+                "value": "",
+                "needs_review": False,
+                "required": False,
+                "category": "custom",
+                "reason": "file_field",
+                "field_type": f.field_type,
+            }
     custom_fields = [f for f in custom_fields if f.field_type != FILE]
     questions = [Question(id=f.label, text=f.label) for f in custom_fields]
     resolved = answer_resolution.resolve_field_answers(

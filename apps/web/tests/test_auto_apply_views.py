@@ -568,7 +568,7 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
         self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
         task.delay.assert_called_once_with(draft.pk)
 
-    def test_option_controls_validate_and_round_trip_selected_values(self):
+    def test_option_controls_render_as_select_with_multiple_where_expected(self):
         client = self._client_for(self.alice)
         for field_type in (SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
             with self.subTest(field_type=field_type):
@@ -576,6 +576,15 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 queue = client.get(reverse("auto_apply_queue"))
                 self.assertContains(queue, '<select name="value__0"')
                 self.assertContains(queue, '<option value="Yes">Yes</option>', html=True)
+                if field_type in (MULTI_SELECT, CHECKBOX_GROUP):
+                    self.assertContains(queue, "multiple")
+                draft.delete()
+
+    def test_option_controls_reject_a_value_outside_the_option_set(self):
+        client = self._client_for(self.alice)
+        for field_type in (SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
+            with self.subTest(field_type=field_type):
+                draft = self._custom_draft(field_type, options=("Yes", "No"))
                 original = draft.answers
                 response = client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
                     "label__0": "Custom question", "value__0": "Not an option",
@@ -583,6 +592,13 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 self.assertContains(response, "Choose a valid answer for Custom question")
                 draft.refresh_from_db()
                 self.assertEqual(draft.answers, original)
+                draft.delete()
+
+    def test_option_controls_round_trip_a_valid_selected_value(self):
+        client = self._client_for(self.alice)
+        for field_type in (SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP):
+            with self.subTest(field_type=field_type):
+                draft = self._custom_draft(field_type, options=("Yes", "No"))
                 multiple = field_type in (MULTI_SELECT, CHECKBOX_GROUP)
                 value = ["Yes", "No"] if multiple else "Yes"
                 client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
@@ -596,6 +612,17 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 if multiple:
                     self.assertContains(queue, '<option value="No" selected>No</option>', html=True)
                 draft.delete()
+
+    def test_option_labels_render_html_escaped(self):
+        # Defense-in-depth regression test: Django's widget rendering already
+        # escapes option labels, but an option label originating from
+        # employer-supplied form data reaching the page unescaped would be
+        # stored XSS, so lock in that it stays escaped.
+        draft = self._custom_draft(SINGLE_SELECT, options=("<script>alert(1)</script>", "No"))
+        client = self._client_for(self.alice)
+        queue = client.get(reverse("auto_apply_queue"))
+        self.assertNotContains(queue, "<script>alert(1)</script>")
+        self.assertContains(queue, "&lt;script&gt;alert(1)&lt;/script&gt;")
 
     def test_empty_multiple_choice_remains_blocking(self):
         draft = self._custom_draft(MULTI_SELECT, options=("Yes", "No"))
@@ -620,6 +647,8 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
         self.assertFalse(draft.answers["Custom question"]["needs_review"])
 
     def test_file_answers_stay_read_only_even_with_legacy_metadata(self):
+        import copy
+
         draft = self._custom_draft(FILE, required=False)
         client = self._client_for(self.alice)
         for legacy in (False, True):
@@ -627,7 +656,7 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 if legacy:
                     del draft.answers["Custom question"]["field_type"]
                     draft.save(update_fields=["answers"])
-                original = draft.answers
+                original = copy.deepcopy(draft.answers)
                 queue = client.get(reverse("auto_apply_queue"))
                 self.assertNotContains(queue, 'name="value__0"')
                 client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
@@ -635,6 +664,8 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
                 })
                 draft.refresh_from_db()
                 self.assertEqual(draft.answers, original)
+                if legacy:
+                    self.assertNotIn("field_type", draft.answers["Custom question"])
 
     def test_discard_blocked_draft_allows_fresh_draft_for_same_job(self):
         draft = self._custom_draft()

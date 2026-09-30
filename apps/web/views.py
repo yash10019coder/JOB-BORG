@@ -220,8 +220,22 @@ def _snapshot_fields(draft):
     }
 
 
-def _blocking_required_fields(answers, form_schema_snapshot=None):
-    """Use snapshot requirements only when the answer has no explicit flag."""
+def _is_blank_answer_value(value) -> bool:
+    """A list/tuple value (multi-select, checkbox group) is blank when every
+    item is blank -- `str(["  "])` is a non-empty string and would otherwise
+    read as "answered"."""
+    if isinstance(value, (list, tuple)):
+        return not any(str(item or "").strip() for item in value)
+    return not str(value or "").strip()
+
+
+def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
+    """Use snapshot requirements only when the answer has no explicit flag.
+
+    `answers` is a JSONField and can hold legacy/malformed shapes; a non-dict
+    entry is skipped rather than raising, since this runs once per draft on
+    the queue page and a single bad row must not break the whole listing.
+    """
     fields = {
         field["label"]: field
         for field in (form_schema_snapshot or {}).get("fields", [])
@@ -229,8 +243,9 @@ def _blocking_required_fields(answers, form_schema_snapshot=None):
     return sorted(
         label
         for label, entry in (answers or {}).items()
-        if entry.get("required", fields.get(label, {}).get("required", False))
-        and not str(entry.get("value") or "").strip()
+        if isinstance(entry, dict)
+        and entry.get("required", fields.get(label, {}).get("required", False))
+        and _is_blank_answer_value(entry.get("value"))
     )
 
 
@@ -347,16 +362,25 @@ def auto_apply_queue(request):
         draft.friendly_message = _friendly_draft_message(draft)
         draft.blocking_fields = _blocking_required_fields(draft.answers, draft.form_schema_snapshot)
         fields = _snapshot_fields(draft)
+        # Render-only dicts, separate from `draft.answers` -- mutating the
+        # stored JSONField entries in place would persist rendered HTML
+        # (`control`) into the model the moment anything calls `draft.save()`.
+        display_answers = {}
         for index, (label, entry) in enumerate((draft.answers or {}).items()):
+            if not isinstance(entry, dict):
+                continue
+            display_entry = dict(entry)
+            display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
             field = _answer_edit_field(entry, fields.get(label, {}))
-            entry["control_id"] = f"draft_{draft.pk}_value__{index}"
             if field is not None:
                 value = entry.get("value", "")
                 if isinstance(field, forms.MultipleChoiceField) and isinstance(value, str):
                     value = [value] if value else []
-                entry["control"] = field.widget.render(
-                    f"value__{index}", value, attrs={"id": entry["control_id"]}
+                display_entry["control"] = field.widget.render(
+                    f"value__{index}", value, attrs={"id": display_entry["control_id"]}
                 )
+            display_answers[label] = display_entry
+        draft.display_answers = display_answers
 
     return render(request, "web/auto_apply_queue.html", {"page_obj": page_obj})
 
@@ -380,6 +404,7 @@ def edit_auto_apply_draft(request, pk):
 
     answers = {label: dict(entry) for label, entry in (draft.answers or {}).items()}
     fields = _snapshot_fields(draft)
+    invalid_labels = []
     index = 0
     while f"label__{index}" in request.POST:
         label = request.POST[f"label__{index}"]
@@ -397,16 +422,22 @@ def edit_auto_apply_draft(request, pk):
         else:
             continue
         try:
-            answers[label]["value"] = field.clean(value)
+            cleaned = field.clean(value)
         except forms.ValidationError:
-            messages.error(request, f"Choose a valid answer for {label}.")
-            return redirect("auto_apply_queue")
-        answers[label]["needs_review"] = label in _blocking_required_fields(
-            {label: answers[label]}, draft.form_schema_snapshot
-        )
+            # Don't let one bad field discard sibling edits from the same
+            # POST -- collect it and keep validating/saving the rest.
+            invalid_labels.append(label)
+            continue
+        answers[label]["value"] = cleaned
+        # A blank answer keeps its "needs review" hint regardless of
+        # required-ness, so an optional placeholder doesn't quietly lose its
+        # flag the moment the queue is re-rendered/saved.
+        answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])
+    for label in invalid_labels:
+        messages.error(request, f"Choose a valid answer for {label}.")
     return redirect("auto_apply_queue")
 
 
@@ -461,7 +492,16 @@ def send_auto_apply_draft(request, pk):
         )
         return redirect("auto_apply_queue")
 
-    if any(entry.get("needs_review") for entry in (draft.answers or {}).values()):
+    # A blank, optional needs_review placeholder (R5's "float unanswerable
+    # questions to review instead of excluding the draft") isn't actually
+    # sent to the form and has nothing to confirm, so it doesn't block --
+    # only a needs_review entry with a real (LLM-guessed) value the user
+    # hasn't confirmed yet, or one on a required field, blocks sending.
+    if any(
+        entry.get("needs_review")
+        and (str(entry.get("value") or "").strip() or entry.get("required"))
+        for entry in (draft.answers or {}).values()
+    ):
         messages.error(request, "Please review and save all flagged answers before sending.")
         return redirect("auto_apply_queue")
 

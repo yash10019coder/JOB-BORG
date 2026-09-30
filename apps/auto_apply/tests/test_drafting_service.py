@@ -284,8 +284,6 @@ class RequiredFileQuestionUnanswerableTests(DraftingServiceTestCase):
         self.assertNotIn("Upload your portfolio", draft.answers)
 
     def test_optional_unanswerable_file_question_remains_sendable(self):
-        from apps.web.views import _blocking_required_fields
-
         schema = FormSchema(fields=STANDARD_ONLY_SCHEMA.fields + (
             FormField("Upload your portfolio", FILE, False),
         ))
@@ -297,7 +295,6 @@ class RequiredFileQuestionUnanswerableTests(DraftingServiceTestCase):
         entry = draft.answers["Upload your portfolio"]
         self.assertEqual(entry["value"], "")
         self.assertFalse(entry["required"])
-        self.assertEqual(_blocking_required_fields(draft.answers, draft.form_schema_snapshot), [])
 
 
 class RequiredQuestionLLMFailureTests(DraftingServiceTestCase):
@@ -494,7 +491,16 @@ class DraftingBoundaryTests(DraftingServiceTestCase):
                 client = FakeLLMClient()
                 draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema(fields=(FormField("Cover letter", FILE, required),))), llm_client=client)
                 self.assertEqual(client.calls, [])
-                self.assertNotIn("Cover letter", draft.answers)
+                if required:
+                    # Excludes the draft -- a blank, permanently-unfillable
+                    # FILE placeholder would block every future send (see
+                    # draft_for's docstring on this exception).
+                    self.assertNotIn("Cover letter", draft.answers)
+                else:
+                    # Floats to the review queue as a blank placeholder,
+                    # same as any other optional unanswerable field (R5) --
+                    # never silently omitted.
+                    self.assertEqual(draft.answers["Cover letter"]["value"], "")
                 self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED if required else AutoApplyDraft.Status.DRAFTED)
 
     def test_near_miss_labels_are_not_standard(self):

@@ -32,10 +32,10 @@
         {% endif %}
 
 
-        {% if draft.answers %}
+        {% if draft.display_answers %}
         <form method="post" action="{% url 'edit_auto_apply_draft' draft.id %}">
             {% csrf_token %}
-            {% for label, entry in draft.answers.items %}
+            {% for label, entry in draft.display_answers.items %}
             <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
                 <label for="{{ entry.control_id }}">
                     {{ label }}

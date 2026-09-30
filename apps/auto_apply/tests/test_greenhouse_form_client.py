@@ -898,23 +898,28 @@ class SchemaSerializationTests(SimpleTestCase):
 
 
 class EmptyFileAnswerTests(SimpleTestCase):
-    def test_only_optional_empty_file_skips_validation_and_upload(self):
+    def test_optional_empty_file_skips_validation_and_upload(self):
         client = GreenhouseFormClient()
-        for required in (False, True):
-            with self.subTest(required=required):
-                schema = FormSchema(fields=(FormField("Upload", FILE, required),))
-                control = MagicMock()
-                with patch.object(client, "_locate_control", return_value=control), patch.object(
-                    client, "_validated_file_path", side_effect=GreenhouseFormSubmissionFailed("empty")
-                ) as validate:
-                    if required:
-                        with self.assertRaises(GreenhouseFormSubmissionFailed):
-                            client._fill_answers(MagicMock(), schema, {"Upload": ""})
-                        validate.assert_called_once_with("", "Upload")
-                    else:
-                        client._fill_answers(MagicMock(), schema, {"Upload": ""})
-                        validate.assert_not_called()
-                    control.set_input_files.assert_not_called()
+        schema = FormSchema(fields=(FormField("Upload", FILE, False),))
+        control = MagicMock()
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", side_effect=GreenhouseFormSubmissionFailed("empty")
+        ) as validate:
+            client._fill_answers(MagicMock(), schema, {"Upload": ""})
+            validate.assert_not_called()
+            control.set_input_files.assert_not_called()
+
+    def test_required_empty_file_still_validates_and_raises(self):
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Upload", FILE, True),))
+        control = MagicMock()
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", side_effect=GreenhouseFormSubmissionFailed("empty")
+        ) as validate:
+            with self.assertRaises(GreenhouseFormSubmissionFailed):
+                client._fill_answers(MagicMock(), schema, {"Upload": ""})
+            validate.assert_called_once_with("", "Upload")
+            control.set_input_files.assert_not_called()
 
 
 class ValidatedFilePathTests(SimpleTestCase):
