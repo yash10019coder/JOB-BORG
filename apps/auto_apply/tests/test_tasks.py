@@ -11,6 +11,8 @@ run synchronously, so tasks are simply called directly here.
 """
 import io
 import os
+import shutil
+import tempfile
 from datetime import timedelta
 from unittest.mock import ANY, Mock, patch
 
@@ -171,6 +173,12 @@ ANSWERS_PAYLOAD = {
 
 class SubmitAutoApplyDraftTaskTestCase(TestCase):
     def setUp(self):
+        # Isolates any test that writes through default_storage (e.g. the
+        # remote-resume materialization tests below) from the real repo
+        # media/ directory, which may not be writable in every environment.
+        media_root = tempfile.mkdtemp(prefix="jobborg-test-media-")
+        self.addCleanup(shutil.rmtree, media_root, ignore_errors=True)
+        self.enterContext(override_settings(MEDIA_ROOT=media_root))
         self.user = User.objects.create_user(
             username="alice", password="pw", email="alice@example.com"
         )
@@ -684,6 +692,7 @@ class ReviewFindingSubmissionTests(SubmitAutoApplyDraftTaskTestCase):
     def test_remote_resume_copied_and_temporary_file_removed_on_success_and_error(self, client):
         import io
         from pathlib import Path
+        from unittest.mock import Mock
         from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormError
         for fail in (False, True):
             with self.subTest(fail=fail):
@@ -701,8 +710,11 @@ class ReviewFindingSubmissionTests(SubmitAutoApplyDraftTaskTestCase):
                         raise GreenhouseFormError("pre-submit failure")
                     return SubmissionResult(success=True)
                 client.return_value.submit.side_effect = submit
-                with patch("apps.auto_apply.tasks.default_storage.open", return_value=io.BytesIO(b"resume bytes")) as storage_open:
+                storage = Mock()
+                storage.exists.return_value = True
+                storage.open.return_value = io.BytesIO(b"resume bytes")
+                with patch("apps.auto_apply.tasks.storages", {"default": storage}):
                     submit_auto_apply_draft(draft.pk)
-                storage_open.assert_called_once_with("resumes/remote.pdf", "rb")
+                storage.open.assert_called_once_with("resumes/remote.pdf", "rb")
                 self.assertEqual(len(paths), 1)
                 self.assertFalse(paths[0].exists())
