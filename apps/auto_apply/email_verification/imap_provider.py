@@ -150,6 +150,13 @@ class ImapEmailCodeProvider:
             search_query = f'(SINCE "{imap_since_str}" {sender_query})'
             evaluated_uids: set[bytes] = set()
 
+            # NOTE: the deadline is only checked between polls, not inside
+            # one. A single slow poll (NOOP + SEARCH + up to 15 FETCHes,
+            # each with its own socket timeout) can still run past
+            # deadline_monotonic before this loop condition is re-checked --
+            # bounding that requires a deadline-aware IMAP transport
+            # wrapping every socket read, which is a larger change than the
+            # per-UID retry-safety fix below. Left as a known gap.
             while time.monotonic() < deadline_monotonic:
                 try:
                     # CRITICAL (D2): Must execute NOOP before SEARCH to force server sync!
@@ -164,12 +171,15 @@ class ImapEmailCodeProvider:
 
                         found_codes: list[str] = []
                         for msg_id in reversed(recent_ids):
-                            evaluated_uids.add(msg_id)
                             fetch_status, msg_data = imap_client.uid(
                                 "FETCH", msg_id, "(INTERNALDATE BODY.PEEK[])"
                             )
                             if fetch_status != "OK" or not msg_data:
+                                # Leave un-fetched on a transient failure so
+                                # the next poll retries this UID instead of
+                                # silently dropping it forever.
                                 continue
+                            evaluated_uids.add(msg_id)
 
                             for response_part in msg_data:
                                 if isinstance(response_part, tuple) and len(response_part) > 1:
