@@ -298,7 +298,7 @@ AUTO_APPLY_SENDING_TIMEOUT_SECONDS = env.int(
 # accumulate on disk; set to enable diagnosing real-world submission
 # failures after the fact instead of only from live-attached debugging.
 AUTO_APPLY_DEBUG_ARTIFACT_DIR = env(
-    "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=str(BASE_DIR / "media" / "auto_apply_debug")
+    "AUTO_APPLY_DEBUG_ARTIFACT_DIR", default=""
 )
 
 # ---------------------------------------------------------------------------

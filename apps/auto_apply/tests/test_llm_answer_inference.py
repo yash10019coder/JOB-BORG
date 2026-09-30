@@ -262,17 +262,27 @@ class ResolveAnswersErrorPathTests(SimpleTestCase):
 
 
 class EvidenceAppearsInTests(SimpleTestCase):
+    def test_unrelated_answer_cannot_cite_matching_profile_span(self):
+        self.assertFalse(evidence_appears_in(["JANE DOE"], RESUME_TEXT, PROFILE, "Expert in nuclear physics"))
+        client = FakeAnswerInferenceClient({"q": QuestionAnswer("q", "Expert in nuclear physics", ["JANE DOE"], 1.0, False)})
+        result = resolve_answers([Question("q", "Describe your experience")], RESUME_TEXT, PROFILE, client)[0]
+        self.assertTrue(result.needs_review)
+        self.assertEqual(result.reason, ResolutionReason.UNGROUNDED_EVIDENCE)
+
+    def test_short_company_evidence_is_valid(self):
+        self.assertTrue(evidence_appears_in(["Acme Corp"], RESUME_TEXT, PROFILE, "Acme Corp"))
+
     def test_empty_evidence_is_never_grounded(self):
-        self.assertFalse(evidence_appears_in([], RESUME_TEXT, PROFILE))
+        self.assertFalse(evidence_appears_in([], RESUME_TEXT, PROFILE, "Jane Doe"))
 
     def test_evidence_matched_case_insensitively(self):
         self.assertTrue(
-            evidence_appears_in(["JANE DOE"], RESUME_TEXT, PROFILE)
+            evidence_appears_in(["JANE DOE"], RESUME_TEXT, PROFILE, "Jane Doe")
         )
 
     def test_evidence_not_in_resume_or_profile_is_not_grounded(self):
         self.assertFalse(
-            evidence_appears_in(["I have a PhD in astrophysics"], RESUME_TEXT, PROFILE)
+            evidence_appears_in(["I have a PhD in astrophysics"], RESUME_TEXT, PROFILE, "PhD")
         )
 
     def test_partial_match_of_multiple_spans_fails_closed(self):
@@ -281,6 +291,7 @@ class EvidenceAppearsInTests(SimpleTestCase):
                 ["6 years of Python experience", "PhD in astrophysics"],
                 RESUME_TEXT,
                 PROFILE,
+                "Python",
             )
         )
 

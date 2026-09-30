@@ -110,7 +110,7 @@ class EvaluateEmailCandidateTests(SimpleTestCase):
             b"Your verification code is 123456."
         )
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
-        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"])
+        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"], since)
         self.assertIsNone(code)
 
     def test_pre_since_message_ignored(self):
@@ -122,7 +122,7 @@ class EvaluateEmailCandidateTests(SimpleTestCase):
             b"Your verification code is 123456."
         )
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
-        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"])
+        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"], since.replace(hour=10))
         self.assertIsNone(code)
 
     def test_valid_candidate_extracted(self):
@@ -134,5 +134,19 @@ class EvaluateEmailCandidateTests(SimpleTestCase):
             b"Your verification code is 789012."
         )
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
-        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"])
+        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"], since)
         self.assertEqual(code, "789012")
+
+    def test_server_date_controls_recency_with_two_minute_skew(self):
+        from datetime import timedelta
+
+        since = datetime(2026, 8, 5, 11, tzinfo=timezone.utc)
+        for header in (b"", b"Date: invalid\r\n", b"Date: Wed, 05 Aug 2037 12:00:00 +0000\r\n"):
+            msg = b"From: no-reply@greenhouse.io\r\n" + header + b"\r\nYour verification code is 789012."
+            for seconds, expected in ((-121, None), (-120, "789012"), (0, "789012")):
+                with self.subTest(header=header, seconds=seconds):
+                    self.assertEqual(evaluate_email_candidate(
+                        msg, since, ["greenhouse.io"], since + timedelta(seconds=seconds)
+                    ), expected)
+            self.assertIsNone(evaluate_email_candidate(msg, since, ["greenhouse.io"]))
+            self.assertIsNone(evaluate_email_candidate(msg, since, ["greenhouse.io"], since.replace(tzinfo=None)))

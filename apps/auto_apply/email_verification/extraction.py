@@ -1,5 +1,5 @@
 """Pure, I/O-free verification email parsing, sender validation, and code extraction."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import email
 from email.utils import parseaddr, parsedate_to_datetime
 import re
@@ -90,7 +90,7 @@ def has_contextual_phrasing(text: str) -> bool:
 
 
 def extract_code_from_text(subject: str, body: str) -> str | None:
-    """Extract a 6-digit verification code from subject and body.
+    """Extract a 6–10-character alphanumeric code containing a digit.
 
     Requires contextual verification phrasing to exist in subject+body.
     Prefers contextual code regex (code near verification phrasing).
@@ -173,20 +173,21 @@ def parse_email_message(msg_bytes: bytes) -> tuple[str, str, str, datetime | Non
 
 
 def evaluate_email_candidate(
-    msg_bytes: bytes, since: datetime, sender_allowlist: list[str]
+    msg_bytes: bytes, since: datetime, sender_allowlist: list[str],
+    server_date: datetime | None = None,
 ) -> str | None:
     """Evaluate a raw email message against filters and return extracted code or None."""
-    subject, from_header, body_text, msg_date = parse_email_message(msg_bytes)
+    subject, from_header, body_text, _ = parse_email_message(msg_bytes)
 
     if not is_sender_allowed(from_header, sender_allowlist):
         return None
 
-    if since:
-        if since.tzinfo is None:
-            since = since.replace(tzinfo=timezone.utc)
-
-        if msg_date:
-            if msg_date < since:
-                return None
+    # The sender-controlled Date header cannot establish receipt time.
+    if server_date is None or server_date.utcoffset() is None:
+        return None
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if server_date < since - timedelta(minutes=2):
+        return None
 
     return extract_code_from_text(subject, body_text)

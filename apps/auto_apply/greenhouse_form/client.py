@@ -25,13 +25,20 @@ Playwright browser context (no shared cookies/storage across calls),
 constructed via an injectable ``context_factory`` and torn down after use.
 """
 from datetime import datetime, timezone
+import logging
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
+
 from apps.auto_apply.captcha.base import CaptchaSolver, ChallengeContext
 from apps.auto_apply.email_verification.base import EmailCodeProvider, VerificationOutcome
+
+logger = logging.getLogger(__name__)
 
 
 from .exceptions import (
@@ -40,6 +47,7 @@ from .exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
     GreenhouseFormSubmissionFailed,
+    GreenhouseFormSubmissionUnconfirmed,
     GreenhouseFormVerificationFailed,
 )
 from .education_api import education_type_for_control_id, fetch_full_list
@@ -231,8 +239,17 @@ def _default_context_factory() -> "_PlaywrightContextHandle":
     from playwright.sync_api import sync_playwright  # local import: optional dep
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=True)
-    context = browser.new_context(accept_downloads=False)
+    browser = None
+    try:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(accept_downloads=False)
+    except Exception:
+        if browser is not None:
+            with suppress(Exception):
+                browser.close()
+        with suppress(Exception):
+            pw.stop()
+        raise
     return _PlaywrightContextHandle(pw, browser, context)
 
 
@@ -279,6 +296,7 @@ class GreenhouseFormClient:
         def _run(page):
             try:
                 self._goto_and_settle(page, job_url)
+                self._validate_url(page.url)
                 if self._challenge_detected(page):
                     raise GreenhouseFormChallenged(
                         f"Bot-detection challenge present on {job_url}; inspect() "
@@ -315,10 +333,17 @@ class GreenhouseFormClient:
 
         Raises:
             GreenhouseFormError: ``job_url`` isn't on the hostname allowlist.
-            GreenhouseFormChallenged: challenge present and unsolvable.
-            GreenhouseFormSchemaMismatch: schema mismatch.
-            GreenhouseFormSubmissionFailed: submission failed.
-            GreenhouseFormVerificationFailed: email verification failed.
+            GreenhouseFormChallenged: a challenge is present and no solver
+                is configured, or the configured solver fails/times out.
+            GreenhouseFormSchemaMismatch: the live schema doesn't match
+                ``expected_schema``, or a required field is unsupported.
+            GreenhouseFormSubmissionFailed: filling failed before submission.
+            GreenhouseFormSubmissionUnconfirmed: a submit click was attempted
+                but no success signal could be confirmed.
+            GreenhouseFormVerificationFailed: the form was submitted but
+                Greenhouse's post-submit email-verification interstitial was
+                detected and either no ``email_code_provider`` is configured
+                or the code lookup/entry did not resolve to success.
         """
         self._validate_url(job_url)
         solver = captcha_solver if captcha_solver is not None else self._default_captcha_solver
@@ -330,6 +355,7 @@ class GreenhouseFormClient:
 
         def _run(page):
             self._goto_and_settle(page, job_url)
+            self._validate_url(page.url)
 
             if self._challenge_detected(page):
                 self._attempt_captcha_solve(page, job_url, solver)
@@ -338,6 +364,7 @@ class GreenhouseFormClient:
                         f"Challenge on {job_url} was not cleared after a solve attempt."
                     )
 
+            self._validate_url(page.url)
             schema_now = self._discover_schema(page, job_url)
             if expected_schema is not None and not schema_matches(expected_schema, schema_now):
                 self._raise_with_debug_artifacts(
@@ -347,33 +374,41 @@ class GreenhouseFormClient:
                     page,
                 )
 
+            submit_attempted = False
             try:
+                self._validate_url(page.url)
                 self._fill_answers(page, schema_now, answers)
                 self._raise_on_newly_revealed_required_fields(page, job_url, schema_now)
+                before = self._success_snapshot(page)
+                self._validate_url(page.url)
+                submit_attempted = True
                 submitted_at = datetime.now(timezone.utc)
                 self._click_submit(page, schema_now)
                 result = self._confirm_success(
                     page,
+                    before,
                     provider=provider,
                     submitted_at=submitted_at,
+                    schema_now=schema_now,
                     deadline_monotonic=deadline_monotonic,
                 )
             except (
                 GreenhouseFormChallenged,
                 GreenhouseFormSchemaMismatch,
                 GreenhouseFormVerificationFailed,
+                ImproperlyConfigured,
             ):
                 raise
             except Exception as exc:  # noqa: BLE001 -- convert to typed error w/ artifacts
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed if submit_attempted else GreenhouseFormSubmissionFailed,
                     f"Submitting the form at {job_url} failed: {exc}",
                     page,
                 )
 
             if result is None:
                 self._raise_with_debug_artifacts(
-                    GreenhouseFormSubmissionFailed,
+                    GreenhouseFormSubmissionUnconfirmed,
                     f"No post-submit success signal found at {job_url}.",
                     page,
                 )
@@ -940,6 +975,10 @@ class GreenhouseFormClient:
                 # confirmed exists.
                 continue
 
+            if form_field.field_type == FILE and not form_field.required and not value:
+                logger.debug("Skipping optional file field %r with no value.", label)
+                continue
+
             control = self._locate_control(page, form_field, label)
 
             if form_field.field_type in (TEXT, TEXTAREA):
@@ -1101,7 +1140,7 @@ class GreenhouseFormClient:
         """Resolve a FILE-field answer to a path Playwright may upload.
 
         Answers for FILE fields are meant to originate only from
-        ``drafting.py`` (a Profile's own ``resume.path``), never from user
+        ``drafting.py`` (a temporary local copy of the stored resume), never from user
         input -- ``edit_auto_apply_draft`` already refuses to let a user
         overwrite one (see apps/web/views.py). This is the last line of
         defense: without it, any bug or future code path that let a
@@ -1192,16 +1231,18 @@ class GreenhouseFormClient:
     def _confirm_success(
         self,
         page,
+        before,
         *,
         provider: EmailCodeProvider | None = None,
         submitted_at: datetime | None = None,
+        schema_now: FormSchema | None = None,
         deadline_monotonic: float | None = None,
     ) -> SubmissionResult | None:
-
         """Poll for a post-submit outcome until ``confirmation_timeout_ms``
         elapses -- a three-way classifier (success / verification-required /
-        neither-yet) evaluated once per pass under this ONE shared deadline,
-        rather than a separate timeout per signal:
+        neither-yet) evaluated once per pass under one classification deadline.
+        Inbox polling has its own configured timeout capped by the task deadline;
+        confirmation after entering a code is also capped by the task deadline.
 
         1. Success (``_check_success_signal``) -- checked first, every
            pass. Success always wins a tie against the verification signal
@@ -1209,27 +1250,26 @@ class GreenhouseFormClient:
            phrasing (e.g. a success page saying "check your email for next
            steps") can never be misclassified as the interstitial.
         2. The verification interstitial (``_verification_interstitial_detected``)
-           -- checked only when success didn't match this pass. Raises
-           immediately on detection rather than waiting out the rest of the
-           budget: unlike a genuine failure (which might still resolve to
-           success on a later pass, e.g. a slow redirect), the interstitial
-           is a stable, terminal page state once rendered.
+           -- checked only when success didn't match this pass. Starts inbox
+           polling immediately when a provider is configured, or raises when
+           no provider is available.
         3. Neither yet -- keep polling until the deadline, same as before.
 
         Returns ``None`` (a plain "no signal found" -- ``submit()`` raises
         ``GreenhouseFormSubmissionFailed``) when the deadline elapses with
         neither classified.
         """
+        classification_deadline = time.monotonic() + self.confirmation_timeout_ms / 1000
         deadline = (
             deadline_monotonic
             if deadline_monotonic is not None
-            else (time.monotonic() + (self.confirmation_timeout_ms / 1000))
+            else classification_deadline
         )
         while True:
-            result = self._check_success_signal(page)
+            result = self._check_success_signal(page, before)
             if result is not None:
                 return result
-            if self._verification_interstitial_detected(page):
+            if self._verification_interstitial_detected(page, schema_now):
                 if provider is None:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
@@ -1239,7 +1279,10 @@ class GreenhouseFormClient:
                     )
 
                 now = time.monotonic()
-                if deadline - now < 20.0:
+                verification_deadline = min(
+                    deadline, now + settings.AUTO_APPLY_VERIFICATION_POLL_TIMEOUT_SECONDS
+                )
+                if verification_deadline - now < 20.0:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
                         "Remaining budget too low for email verification polling",
@@ -1249,7 +1292,9 @@ class GreenhouseFormClient:
 
                 since = submitted_at or datetime.now(timezone.utc)
                 try:
-                    lookup_res = provider.get_code(since=since, deadline_monotonic=deadline)
+                    lookup_res = provider.get_code(since=since, deadline_monotonic=verification_deadline)
+                except ImproperlyConfigured:
+                    raise
                 except Exception as exc:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
@@ -1277,8 +1322,17 @@ class GreenhouseFormClient:
                         "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
                     ).first
                     submit_button.click()
-                    page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
-                    post_code_check = self._check_success_signal(page)
+                    post_code_deadline = min(
+                        deadline, time.monotonic() + self.confirmation_timeout_ms / 1000
+                    )
+                    while True:
+                        post_code_check = self._check_success_signal(page, before)
+                        if post_code_check is not None:
+                            return post_code_check
+                        remaining = post_code_deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        page.wait_for_timeout(min(_CONFIRMATION_POLL_INTERVAL_MS, remaining * 1000))
                 except Exception as exc:
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
@@ -1286,38 +1340,37 @@ class GreenhouseFormClient:
                         outcome=VerificationOutcome.CODE_REJECTED,
                     ) from exc
 
-                if post_code_check is not None:
-                    return post_code_check
-
                 # Still on verification page: post-code path, raise WITHOUT debug artifacts
                 raise GreenhouseFormVerificationFailed(
                     "Verification code entered but application success not confirmed",
                     outcome=VerificationOutcome.CODE_REJECTED,
                 )
 
-            if time.monotonic() >= deadline:
+            remaining = classification_deadline - time.monotonic()
+            if remaining <= 0:
                 return None
-            page.wait_for_timeout(_CONFIRMATION_POLL_INTERVAL_MS)
+            page.wait_for_timeout(min(_CONFIRMATION_POLL_INTERVAL_MS, remaining * 1000))
 
-    def _check_success_signal(self, page) -> SubmissionResult | None:
-        # Signal 1: an explicit ARIA status live region, if the board
-        # renders one -- cheap and unambiguous when present.
-        status = page.get_by_role("status")
-        if status.count() > 0:
-            text = status.first.inner_text().strip()
-            if text:
-                return SubmissionResult(success=True, confirmation_text=text)
+    @staticmethod
+    def _success_snapshot(page):
+        return {
+            "body": page.locator("body").inner_text().lower(),
+            "statuses": tuple(text.strip() for text in page.get_by_role("status").all_inner_texts()),
+        }
 
-        # Signal 2: known confirmation phrasing anywhere in the rendered
-        # page text. Only specific, positive multi-word phrases are
-        # matched -- never element presence/absence alone -- so this can't
-        # be tricked by an error banner that happens to render after
-        # submit (see _CONFIRMATION_TEXT_PATTERNS).
-        body_text = page.locator("body").inner_text().lower()
+    def _check_success_signal(self, page, before) -> SubmissionResult | None:
+        self._validate_url(page.url)
+        after = self._success_snapshot(page)
         for phrase in _CONFIRMATION_TEXT_PATTERNS:
-            if phrase in body_text:
+            # Status regions must contain an explicit confirmation, and
+            # neither a pre-existing region nor pre-submit body copy counts.
+            if phrase in before["body"] or any(phrase in text.lower() for text in before["statuses"]):
+                continue
+            for text in after["statuses"]:
+                if phrase in text.lower():
+                    return SubmissionResult(success=True, confirmation_text=text)
+            if phrase in after["body"]:
                 return SubmissionResult(success=True, confirmation_text=phrase)
-
         return None
 
     @staticmethod
@@ -1367,19 +1420,26 @@ class GreenhouseFormClient:
         )
 
     @staticmethod
-    def _verification_interstitial_detected(page) -> bool:
+    def _verification_interstitial_detected(page, schema_now: FormSchema | None = None) -> bool:
         """Detect Greenhouse's post-submit email-verification interstitial.
 
-        Checks both recognized code-entry-control shapes: the original
-        (unverified) single-input guess, and the confirmed real shape --
-        N separate `input[maxlength="1"]` boxes (see
-        `_VERIFICATION_CODE_BOX_SELECTOR`'s comment, captured live) --
-        requiring at least 2 boxes so a single unrelated one-character
-        input elsewhere on the page can't alone satisfy this signal
-        (mirrors `_fill_verification_code()`'s own `box_count >= 2`
-        threshold for the same shape).
+        Checks both recognized code-entry-control shapes: a single input
+        (excluding one already known from the draft-time schema and
+        visible, so a pre-existing schema field of the same shape can't
+        false-positive), and the confirmed real shape -- N separate
+        `input[maxlength="1"]` boxes (see `_VERIFICATION_CODE_BOX_SELECTOR`'s
+        comment, captured live) -- requiring at least 2 boxes so a single
+        unrelated one-character input elsewhere on the page can't alone
+        satisfy this signal (mirrors `_fill_verification_code()`'s own
+        `box_count >= 2` threshold for the same shape).
         """
-        has_code_control = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).count() > 0
+        known_ids = {field.control_id for field in schema_now.fields if field.control_id} if schema_now else set()
+        code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR)
+        has_code_control = any(
+            code_input.nth(i).is_visible()
+            and code_input.nth(i).get_attribute("id") not in known_ids
+            for i in range(code_input.count())
+        )
         if not has_code_control:
             has_code_control = page.locator(_VERIFICATION_CODE_BOX_SELECTOR).count() >= 2
         if not has_code_control:

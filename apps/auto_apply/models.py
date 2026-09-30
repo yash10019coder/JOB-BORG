@@ -83,6 +83,7 @@ class AutoApplyDraft(models.Model):
         UNANSWERABLE_REQUIRED = "unanswerable_required", "Required question unanswered"
         CAPTCHA_CHALLENGED = "captcha_challenged", "Bot-detection challenge"
         SUBMISSION_FAILED = "submission_failed", "Submission rejected"
+        SUBMISSION_UNCONFIRMED = "submission_unconfirmed", "Submission not confirmed"
         SENDING_TIMEOUT = "sending_timeout", "Submission timed out"
         UNEXPECTED_ERROR = "unexpected_error", "Unexpected error"
         NO_INBOX_CREDENTIALS = "no_inbox_credentials", "No inbox credentials connected"
@@ -91,7 +92,7 @@ class AutoApplyDraft(models.Model):
         INBOX_UNAVAILABLE = "inbox_unavailable", "Inbox connection unavailable"
         VERIFICATION_CODE_AMBIGUOUS = "verification_code_ambiguous", "Multiple verification codes found"
         VERIFICATION_CODE_REJECTED = "verification_code_rejected", "Verification code rejected"
-
+        RESUME_REPLACED = "resume_replaced", "Resume was replaced"
 
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.
@@ -109,13 +110,13 @@ class AutoApplyDraft(models.Model):
     )
     job_application = models.ForeignKey(
         "applications.JobApplication",
-        on_delete=models.PROTECT,
+        on_delete=models.RESTRICT,
         related_name="auto_apply_drafts",
         null=True,
         blank=True,
         help_text=(
             "Set only once a send succeeds and links to the real "
-            "JobApplication record; PROTECT so a completed auto-apply's "
+            "JobApplication record; RESTRICT so a completed auto-apply's "
             "link to its submission never silently cascade-deletes."
         ),
     )

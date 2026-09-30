@@ -12,6 +12,7 @@ context, then runs the deterministic evidence-groundedness check before
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -159,9 +160,9 @@ def _profile_text(profile) -> str:
     return "\n".join(parts)
 
 
-def evidence_appears_in(evidence: list[str], resume_text: str, profile) -> bool:
-    """Deterministic check: does every cited evidence span actually appear
-    in the supplied resume/profile text?
+def evidence_appears_in(evidence: list[str], resume_text: str, profile, answer: str) -> bool:
+    """Check that cited spans appear in the resume/profile and meaningfully
+    overlap the answer. This lexical gate is not a semantic entailment proof.
 
     This is the primary defense against a manipulated or hallucinated
     answer surviving into a draft -- it runs before self-reported confidence
@@ -177,7 +178,20 @@ def evidence_appears_in(evidence: list[str], resume_text: str, profile) -> bool:
             return False
         if span.strip().lower() not in haystack:
             return False
-    return True
+    # Require substantive lexical support for the answer too. Matching a
+    # real profile span alone does not ground an unrelated answer.
+    stop_words = {
+        "a", "an", "and", "are", "as", "at", "be", "for", "from", "has",
+        "have", "i", "in", "is", "it", "my", "of", "on", "or", "the",
+        "this", "to", "was", "with", "you", "your",
+    }
+
+    def tokens(text):
+        return set(re.findall(r"\w+", text.lower())) - stop_words
+
+    answer_tokens = tokens(answer or "")
+    evidence_tokens = tokens(" ".join(evidence))
+    return bool(answer_tokens) and len(answer_tokens & evidence_tokens) / len(answer_tokens) >= 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +272,7 @@ def resolve_answers(
         if qa.insufficient_evidence:
             reason = ResolutionReason.INSUFFICIENT_EVIDENCE
             needs_review = True
-        elif not evidence_appears_in(qa.evidence, resume_text, profile):
+        elif not evidence_appears_in(qa.evidence, resume_text, profile, qa.answer):
             # Groundedness check runs first, and overrides self-reported
             # confidence unconditionally -- a confidently-stated but
             # ungrounded answer is still forced to needs_review.
