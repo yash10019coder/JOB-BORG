@@ -223,21 +223,14 @@ def submit_auto_apply_draft(self, draft_id):
                     shutil.copyfileobj(stored, local)
                 local.flush()
                 answers[label] = local.name
-            try:
-                form_client.submit(
-                    job.source_url,
-                    answers,
-                    expected_schema=expected_schema,
-                    captcha_solver=get_solver(),
-                    email_code_provider=provider,
-                    deadline_monotonic=deadline,
-                )
-            finally:
-                if acquired_lock:
-                    try:
-                        _release_verification_lock(lock_key, lock_token)
-                    except Exception:
-                        pass
+            form_client.submit(
+                job.source_url,
+                answers,
+                expected_schema=expected_schema,
+                captcha_solver=get_solver(),
+                email_code_provider=provider,
+                deadline_monotonic=deadline,
+            )
     except GreenhouseFormError as exc:
         draft.status = AutoApplyDraft.Status.FAILED
         draft.error_message = str(exc)
@@ -257,6 +250,12 @@ def submit_auto_apply_draft(self, draft_id):
         draft.reason_code = AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR
         draft.save(update_fields=["status", "error_message", "reason_code", "updated_at"])
         return draft.pk
+    finally:
+        if acquired_lock:
+            try:
+                _release_verification_lock(lock_key, lock_token)
+            except Exception:
+                pass
 
     with transaction.atomic():
         job_application, _ = JobApplication.objects.update_or_create(

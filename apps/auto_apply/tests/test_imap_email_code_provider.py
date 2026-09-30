@@ -271,7 +271,7 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         mock_imap.select.return_value = ("OK", [b"1"])
         mock_imap.noop.return_value = ("OK", [b"OK"])
         # First poll iteration: search times out
-        mock_imap.search.side_effect = socket.timeout("Search timed out")
+        mock_imap.uid.side_effect = socket.timeout("Search timed out")
 
         provider = ImapEmailCodeProvider(self.credential)
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
@@ -291,9 +291,8 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         mock_imap.login.return_value = ("OK", [b"Logged in"])
         mock_imap.select.return_value = ("OK", [b"1"])
         mock_imap.noop.return_value = ("OK", [b"OK"])
-        mock_imap.search.return_value = ("OK", [b"1"])
-        # First poll iteration: fetch times out
-        mock_imap.fetch.side_effect = socket.timeout("Fetch timed out")
+        # First poll iteration: search succeeds, then fetch times out.
+        mock_imap.uid.side_effect = [("OK", [b"1"]), socket.timeout("Fetch timed out")]
 
         provider = ImapEmailCodeProvider(self.credential)
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
@@ -345,7 +344,7 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         mock_imap.login.return_value = ("OK", [b"Logged in"])
         mock_imap.select.return_value = ("OK", [b"1"])
         mock_imap.noop.return_value = ("OK", [b"OK"])
-        mock_imap.search.return_value = ("OK", [b""])  # Empty result
+        mock_imap.uid.return_value = ("OK", [b""])  # Empty result
 
         provider = ImapEmailCodeProvider(self.credential)
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
@@ -402,15 +401,35 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
     def test_commands_and_cleanup_share_deadline(self, mock_imap_cls, clock):
         clock.return_value = 100.0
         connection = mock_imap_cls.return_value
-        operations = ["login", "select", "noop", "search", "fetch", "close", "logout"]
-        responses = [("OK", []), ("OK", []), ("OK", []), ("OK", [b"1"]),
-                     ("OK", [(b"1", b"message")]), ("OK", []), ("OK", [])]
-        for index, (name, response) in enumerate(zip(operations, responses)):
-            def run(*args, index=index, response=response, **kwargs):
-                self.assertEqual(connection.sock.settimeout.call_args.args[0], 8.0 - index)
+        operations = ["login", "select", "noop", "close", "logout"]
+        responses = {"login": ("OK", []), "select": ("OK", []), "noop": ("OK", []),
+                     "close": ("OK", []), "logout": ("OK", [])}
+        call_index = {"n": 0}
+
+        def make_run(response):
+            def run(*args, **kwargs):
+                self.assertEqual(
+                    connection.sock.settimeout.call_args.args[0], 8.0 - call_index["n"]
+                )
+                call_index["n"] += 1
                 clock.return_value += 1.0
                 return response
-            getattr(connection, name).side_effect = run
+            return run
+
+        for name in operations:
+            getattr(connection, name).side_effect = make_run(responses[name])
+
+        uid_responses = [("OK", [b"1"]), ("OK", [(b"1", b"message")])]
+
+        def uid_run(command, *args, **kwargs):
+            self.assertEqual(
+                connection.sock.settimeout.call_args.args[0], 8.0 - call_index["n"]
+            )
+            call_index["n"] += 1
+            clock.return_value += 1.0
+            return uid_responses.pop(0)
+
+        connection.uid.side_effect = uid_run
         with patch("apps.auto_apply.email_verification.imap_provider.evaluate_email_candidate", return_value="123456"):
             result = ImapEmailCodeProvider(self.credential).get_code(
                 since=datetime.now(timezone.utc), deadline_monotonic=108.0
@@ -418,6 +437,7 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         self.assertEqual(result.outcome, VerificationOutcome.FOUND)
         for name in operations:
             getattr(connection, name).assert_called_once()
+        self.assertEqual(connection.uid.call_count, 2)
         connection.shutdown.assert_called_once()
 
     @patch("apps.auto_apply.email_verification.imap_provider.time.monotonic")

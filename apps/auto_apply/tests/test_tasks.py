@@ -499,15 +499,22 @@ class VerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
     @patch("apps.auto_apply.tasks.build_email_code_provider")
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_contender_does_not_submit_or_release_owner_lock(self, client, provider):
+        # Superseded by SubmitVerificationLockTests.
+        # test_lock_contention_retries_without_changing_draft: lock
+        # contention now retries via Celery rather than immediately failing
+        # the draft with VERIFICATION_CODE_AMBIGUOUS.
         from django.core.cache import cache
+        from celery.exceptions import Retry
         draft = self._make_draft()
         key = f"auto_apply:verification_lock:{self.user.pk}"
         cache.add(key, "owner", timeout=540)
-        submit_auto_apply_draft(draft.pk)
+        with patch.object(submit_auto_apply_draft, "retry", side_effect=Retry()):
+            with self.assertRaises(Retry):
+                submit_auto_apply_draft(draft.pk)
         client.assert_not_called()
         self.assertEqual(cache.get(key), "owner")
         draft.refresh_from_db()
-        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS)
+        self.assertIsNone(draft.reason_code)
 
 
 class SubmitVerificationLockTests(SubmitAutoApplyDraftTaskTestCase):
