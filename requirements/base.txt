@@ -7,7 +7,7 @@ redis==5.2.0
 django-celery-beat==2.7.0
 pgvector==0.3.6
 requests==2.32.3
-PyYAML==6.0.2
+PyYAML==6.0.3
 django-prometheus==2.3.1
 python-json-logger==2.0.7
 # Required by the vendored Workday scraper (apps/jobs/ingestion/vendor/workday/) --
