@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+
+      <!--
+        Education-API-backed combobox (standard "discipline--0" naming,
+        see education_api.py) whose live widget paginates purely via
+        scroll and never filters by the typed value -- unlike a
+        react-select-style field (Country/Location), typing here has no
+        effect on which options are rendered. The target option
+        ("Information Systems") only appears after a scroll loads a later
+        page, reproducing a real production failure where
+        `_fill_combobox()`'s type-then-wait-for-match approach alone timed
+        out on a value that was genuinely a valid, discovered option.
+      -->
+      <div class="field">
+        <label id="discipline-label" for="discipline--0">Discipline</label>
+        <input
+          type="text"
+          id="discipline--0"
+          role="combobox"
+          aria-labelledby="discipline-label"
+          autocomplete="off"
+        >
+        <ul
+          id="discipline-listbox"
+          role="listbox"
+          hidden
+          style="max-height: 100px; overflow-y: auto;"
+        ></ul>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    function initScrollOnlyCombobox(inputId, listboxId, pages) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+      var loadedPages = 0;
+
+      function appendNextPage() {
+        if (loadedPages >= pages.length) return;
+        pages[loadedPages].forEach(function (o) {
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.textContent = o;
+          li.style.height = '30px';
+          listbox.appendChild(li);
+        });
+        loadedPages++;
+      }
+
+      input.addEventListener('click', function () {
+        listbox.innerHTML = '';
+        loadedPages = 0;
+        listbox.hidden = false;
+        appendNextPage();
+      });
+
+      // Deliberately NO 'input' listener -- typing into this widget never
+      // filters or re-renders the listbox, only a real scroll does.
+      listbox.addEventListener('scroll', function () {
+        if (listbox.scrollTop + listbox.clientHeight >= listbox.scrollHeight - 5) {
+          appendNextPage();
+        }
+      });
+    }
+
+    initScrollOnlyCombobox('discipline--0', 'discipline-listbox', [
+      ['Accounting', 'Agriculture', 'Anthropology', 'Architecture'],
+      ['Biology', 'Business', 'Chemistry', 'Computer Science'],
+      ['Economics', 'Education', 'Information Systems', 'Journalism'],
+    ]);
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

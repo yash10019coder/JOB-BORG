@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Profile
+from .models import EmailInboxCredential, Profile
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -25,3 +25,38 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
+    readonly_fields = ("resume_text",)
+
+    def save_model(self, request, obj, form, change):
+        """The admin is a write path to `Profile.resume` too (see U1), so it
+        must trigger the same explicit parse -- there's no post_save signal
+        to fall back on. Routes through `Profile.set_resume()` for *every*
+        resume change (add or clear) so this stays the one call site that
+        actually mutates `resume`/`resume_text`, rather than a second,
+        divergent clear-path that bypasses `full_clean()`/the explicit-
+        trigger convention `set_resume()` exists to centralize.
+        """
+        if "resume" in form.changed_data:
+            # Save every other field first (this also creates the row on the
+            # add view), then apply the resume change through set_resume() --
+            # which only saves resume fields -- so nothing else edited in the
+            # same submit is silently dropped. Mirrors ProfileForm.save().
+            new_resume = form.cleaned_data.get("resume")
+            obj.resume = form.initial.get("resume") or None
+            super().save_model(request, obj, form, change)
+            obj.set_resume(new_resume)
+            return
+
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(EmailInboxCredential)
+class EmailInboxCredentialAdmin(admin.ModelAdmin):
+    list_display = ("user", "email_address", "is_active", "last_error_code", "updated_at")
+    search_fields = ("user__username", "email_address")
+    # The ciphertext must never be renderable or editable in admin, not even
+    # as ciphertext -- a visible field invites a future "just show it
+    # decrypted" mistake. `exclude`, not `readonly_fields`, since even the
+    # ciphertext shouldn't render at all (contrast ProfileAdmin's
+    # `readonly_fields = ("resume_text",)`, which is fine to display).
+    exclude = ("app_password_encrypted",)

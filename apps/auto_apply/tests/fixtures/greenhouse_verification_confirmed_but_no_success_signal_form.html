@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // Regression fixture for a real production failure (AutoApplyDraft
+    // #266): the verification code is correct and the "Confirm" click is
+    // accepted (no "Invalid code" copy ever appears), but the page simply
+    // never renders a success signal either -- the genuinely ambiguous
+    // case where the employer may already have the real application.
+    // Unlike greenhouse_email_verification_multibox_form.html's "Invalid
+    // code, please try again" branch (a case we DO know failed and is
+    // safe to retry), this fixture has no failure branch at all.
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.getElementById('app-root').innerHTML =
+        '<h1>Verify your email</h1>' +
+        '<p>We sent a verification code to your email. Enter it below to ' +
+        'complete your application.</p>' +
+        '<form id="verification-form">' +
+        '  <div class="field">' +
+        '    <label for="verification_code">Verification code</label>' +
+        '    <input type="text" id="verification_code" name="verification_code" ' +
+        '           autocomplete="one-time-code" inputmode="numeric" required>' +
+        '  </div>' +
+        '  <button type="submit">Confirm</button>' +
+        '</form>';
+
+      document.getElementById('verification-form').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        // Deliberately no success message and no error message -- the
+        // page just sits here, as if a slow/stalled async confirmation.
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+
+      <!--
+        Same paginated-combobox shape as
+        greenhouse_paginated_combobox_options_form.html, but with more
+        pages than _COMBOBOX_SCROLL_ITERATIONS (5) can exhaust -- the
+        option count is still growing on the last scroll attempt, so
+        discovery must NOT treat this sample as complete (unlike the other
+        fixture's 3-page list, which converges well within budget).
+      -->
+      <div class="field">
+        <label id="school-label" for="school">School</label>
+        <input
+          type="text"
+          id="school"
+          role="combobox"
+          aria-labelledby="school-label"
+          autocomplete="off"
+        >
+        <ul
+          id="school-listbox"
+          role="listbox"
+          hidden
+          style="max-height: 100px; overflow-y: auto;"
+        ></ul>
+      </div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    function initPaginatedCombobox(inputId, listboxId, pages) {
+      var input = document.getElementById(inputId);
+      var listbox = document.getElementById(listboxId);
+      var loadedPages = 0;
+
+      function appendNextPage() {
+        if (loadedPages >= pages.length) return;
+        pages[loadedPages].forEach(function (o) {
+          var li = document.createElement('li');
+          li.setAttribute('role', 'option');
+          li.textContent = o;
+          li.style.height = '30px';
+          listbox.appendChild(li);
+        });
+        loadedPages++;
+      }
+
+      input.addEventListener('click', function () {
+        listbox.innerHTML = '';
+        loadedPages = 0;
+        listbox.hidden = false;
+        appendNextPage();
+      });
+
+      listbox.addEventListener('scroll', function () {
+        if (listbox.scrollTop + listbox.clientHeight >= listbox.scrollHeight - 5) {
+          appendNextPage();
+        }
+      });
+    }
+
+    initPaginatedCombobox('school', 'school-listbox', [
+      ['Page0 School A', 'Page0 School B', 'Page0 School C', 'Page0 School D'],
+      ['Page1 School A', 'Page1 School B', 'Page1 School C', 'Page1 School D'],
+      ['Page2 School A', 'Page2 School B', 'Page2 School C', 'Page2 School D'],
+      ['Page3 School A', 'Page3 School B', 'Page3 School C', 'Page3 School D'],
+      ['Page4 School A', 'Page4 School B', 'Page4 School C', 'Page4 School D'],
+      ['Page5 School A', 'Page5 School B', 'Page5 School C', 'Page5 School D'],
+      ['Page6 School A', 'Page6 School B', 'Page6 School C', 'Page6 School D'],
+      ['Page7 School A', 'Page7 School B', 'Page7 School C', 'Page7 School D'],
+    ]);
+
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

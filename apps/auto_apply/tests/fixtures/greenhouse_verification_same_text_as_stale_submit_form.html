@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main id="app-root">
+    <h1>Apply for Senior Backend Engineer</h1>
+    <!--
+      Regression fixture for a real production failure (Canonical):
+      the verification interstitial's own button is labeled "Submit
+      application" -- the EXACT same text as the stale original
+      application-form button, which an overlay-style interstitial can
+      leave in the DOM (see greenhouse_email_verification_overlay_form.html
+      for that shape). Neither button says "Verify", so a page-wide
+      "Submit"-text search can't disambiguate them by text alone; only
+      scoping to the code input's own enclosing <form> (see
+      `_find_verification_submit_button`) picks the right one.
+    -->
+    <button type="submit" form="application-form" id="stale-button">Submit application</button>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+    </form>
+  </main>
+  <script>
+    document.getElementById('stale-button').addEventListener('click', function (e) {
+      e.preventDefault();
+      document.getElementById('application-form').requestSubmit();
+    });
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var interstitial = document.createElement('div');
+      interstitial.innerHTML =
+        '<h1>Verify your email</h1>' +
+        '<p>A verification code was sent to your email. Enter the code to confirm you are human.</p>' +
+        '<form id="verification-form">' +
+        '  <div class="field">' +
+        '    <label for="verification_code">Security code</label>' +
+        '    <input type="text" id="verification_code" name="verification_code" ' +
+        '           autocomplete="one-time-code" inputmode="numeric" required>' +
+        '  </div>' +
+        // Deliberately the SAME text as the stale button above.
+        '  <button type="submit">Submit application</button>' +
+        '</form>';
+      document.getElementById('app-root').appendChild(interstitial);
+
+      document.getElementById('verification-form').addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var entered = document.getElementById('verification_code').value;
+        if (entered === '654321') {
+          document.getElementById('app-root').innerHTML =
+            '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+        } else {
+          document.getElementById('app-root').innerHTML =
+            '<p>Invalid code, please try again.</p>';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

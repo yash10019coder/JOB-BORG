@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <!--
+        Reproduces reCAPTCHA v3/Enterprise's always-present background-
+        scoring badge, verified live on a real Greenhouse board (Alpaca):
+        an iframe carrying both `title="reCAPTCHA"` *and* a `src` with
+        `size=invisible` -- there is no interactive challenge to solve
+        here, only a passive score computed in the background. A prior
+        version of `_challenge_detected()`'s title-based selector had no
+        exclusion for this and reported every such board as challenged.
+      -->
+      <iframe
+        title="reCAPTCHA"
+        src="https://www.recaptcha.net/recaptcha/enterprise/anchor?k=fake&size=invisible"
+        width="256"
+        height="60"
+      ></iframe>
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

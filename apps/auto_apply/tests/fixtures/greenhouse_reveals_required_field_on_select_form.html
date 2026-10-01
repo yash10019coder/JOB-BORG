@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply to Acme Corp</title></head>
+<body>
+  <main>
+    <h1>Apply for Senior Backend Engineer</h1>
+    <form id="application-form">
+      <div class="field">
+        <label for="first_name">First Name</label> <span aria-hidden="true">*</span>
+        <input type="text" id="first_name" name="first_name" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="email">Email</label> <span aria-hidden="true">*</span>
+        <input type="email" id="email" name="email" required aria-required="true">
+      </div>
+      <div class="field">
+        <label for="resume">Resume/CV</label> <span aria-hidden="true">*</span>
+        <input type="file" id="resume" name="resume" required aria-required="true">
+      </div>
+
+      <!--
+        Reproduces a "select Other -> reveal a required specify field"
+        pattern: this is a plain native <select>, not a combobox, so the
+        change purely happens via a JS listener -- the point under test is
+        that _discover_schema() does not see "How did you hear about us?
+        (please specify)" at all until AFTER "Other" is filled in.
+      -->
+      <div class="field">
+        <label for="source">How did you hear about us?</label> <span aria-hidden="true">*</span>
+        <select id="source" name="source" required aria-required="true">
+          <option value="" selected disabled>Select...</option>
+          <option value="referral">Referral</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+
+      <div id="specify-container"></div>
+
+      <button type="submit">Submit Application</button>
+    </form>
+  </main>
+  <script>
+    // The "please specify" field does not exist in the DOM at all until
+    // this fires -- not merely hidden via CSS/[hidden], since discovery
+    // does not filter by visibility and would otherwise see it from the
+    // very first (pre-fill) _discover_schema() pass, defeating the point
+    // of this fixture.
+    document.getElementById('source').addEventListener('change', function (e) {
+      var container = document.getElementById('specify-container');
+      if (e.target.value === 'other' && !document.getElementById('specify')) {
+        container.innerHTML =
+          '<div class="field">' +
+          '<label for="specify">Please specify</label> <span aria-hidden="true">*</span>' +
+          '<input type="text" id="specify" name="specify" required aria-required="true">' +
+          '</div>';
+      } else if (e.target.value !== 'other') {
+        container.innerHTML = '';
+      }
+    });
+    document.getElementById('application-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div role="status">Thanks for applying! Your application was submitted successfully.</div>';
+    });
+  </script>
+</body>
+</html>

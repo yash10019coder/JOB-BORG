@@ -1,20 +1,35 @@
-"""Web views: signup, profile setup (U11), recommendations + actions (U12)."""
+"""Web views: signup, profile setup (U11), recommendations + actions (U12),
+auto-apply trigger/queue/edit/send (U8)."""
+from django import forms
+from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.postgres.search import SearchQuery, SearchVector
+from django.core.exceptions import ImproperlyConfigured
 from django.core.paginator import Paginator
+from django.db import transaction
+from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.html import format_html, format_html_join
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
+from apps.accounts.models import EmailInboxCredential
 from apps.applications.models import JobApplication
-from apps.jobs.models import JOB_SEARCH_CONFIG, Job
+from apps.auto_apply.greenhouse_form.field_mapping import (
+    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
+)
+from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
+from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
 
-from .forms import ProfileForm
+from .forms import EmailInboxCredentialForm, ProfileForm
+
 
 RECOMMENDATIONS_PER_PAGE = 20
 
@@ -54,7 +69,7 @@ def signup(request):
 def profile(request):
     instance = request.user.profile  # always the requesting user's own profile
     if request.method == "POST":
-        form = ProfileForm(request.POST, instance=instance)
+        form = ProfileForm(request.POST, request.FILES, instance=instance)
         if form.is_valid():
             form.save()  # Profile post-save signal -> debounced rematch
             return redirect("recommendations")
@@ -136,6 +151,192 @@ def job_action(request, job_id):
     # Preserve the toggle/search state the action was taken from (carried as
     # hidden fields on the action form) so Save/Apply/Dismiss doesn't silently
     # reset the user back to the unfiltered recommended-only view.
+    return _recommendations_redirect(request)
+
+
+# --- Auto-apply (U8) -------------------------------------------------------
+
+# User-facing message per `AutoApplyDraft.ReasonCode` -- keyed on the
+# structured code the drafting/submission code already sets (see
+# apps/auto_apply/services/drafting.py and apps/auto_apply/tasks.py), not
+# derived by pattern-matching the free-text `exclusion_reason`/
+# `error_message` (which exist for logs/debugging and can be reworded
+# there without silently breaking this mapping).
+_REASON_CODE_MESSAGES = {
+    AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH: (
+        "This application has a question we couldn't fill in automatically."
+    ),
+    AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
+        "We couldn't load this employer's application form."
+    ),
+    AutoApplyDraft.ReasonCode.UNANSWERABLE_REQUIRED: (
+        "This application asks something we don't have an answer for yet."
+    ),
+    AutoApplyDraft.ReasonCode.CAPTCHA_CHALLENGED: (
+        "This employer's form couldn't be completed automatically right now."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_FAILED: (
+        "The application couldn't be submitted; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED: (
+        "We couldn't confirm this application went through. It may already have been "
+        "submitted \u2014 check your email before trying again."
+    ),
+    AutoApplyDraft.ReasonCode.SENDING_TIMEOUT: (
+        "Submission timed out and wasn't completed; you can try again."
+    ),
+    AutoApplyDraft.ReasonCode.UNEXPECTED_ERROR: (
+        "Something went wrong while submitting this application."
+    ),
+    AutoApplyDraft.ReasonCode.NO_INBOX_CREDENTIALS: (
+        "This employer requires email verification. Connect an inbox credential in your settings."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_TIMEOUT: (
+        "Verification email did not arrive in time. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_AUTH_FAILED: (
+        "Could not log into your connected inbox (App Password may be revoked). Please update your credentials in settings."
+    ),
+    AutoApplyDraft.ReasonCode.INBOX_UNAVAILABLE: (
+        "Could not reach your email provider. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_AMBIGUOUS: (
+        "Multiple verification emails arrived. Please try sending again."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_BUSY: (
+        "Another application on your account is waiting for email verification. "
+        "Please try sending again in a few minutes."
+    ),
+    AutoApplyDraft.ReasonCode.VERIFICATION_CODE_REJECTED: (
+        "Verification code was rejected by the employer. Please try sending again."
+    ),
+}
+
+_GENERIC_UNAVAILABLE_MESSAGE = "This application couldn't be completed automatically."
+_STALE_MESSAGE = "This job posting closed before we could apply."
+_STALE_RESUME_REPLACED_MESSAGE = (
+    "Your resume changed since this application was drafted; please review it again."
+)
+
+
+def _snapshot_fields(draft):
+    return {
+        field["label"]: field
+        for field in (draft.form_schema_snapshot or {}).get("fields", [])
+    }
+
+
+def _is_blank_answer_value(value) -> bool:
+    """A list/tuple value (multi-select, checkbox group) is blank when every
+    item is blank -- `str(["  "])` is a non-empty string and would otherwise
+    read as "answered"."""
+    if isinstance(value, (list, tuple)):
+        return not any(str(item or "").strip() for item in value)
+    return not str(value or "").strip()
+
+
+def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
+    """Use snapshot requirements only when the answer has no explicit flag.
+
+    `answers` is a JSONField and can hold legacy/malformed shapes; a non-dict
+    entry is skipped rather than raising, since this runs once per draft on
+    the queue page and a single bad row must not break the whole listing.
+    """
+    fields = {
+        field["label"]: field
+        for field in (form_schema_snapshot or {}).get("fields", [])
+    }
+    return sorted(
+        label
+        for label, entry in (answers or {}).items()
+        if isinstance(entry, dict)
+        and entry.get("required", fields.get(label, {}).get("required", False))
+        and _is_blank_answer_value(entry.get("value"))
+    )
+
+
+class _DatalistTextInput(forms.TextInput):
+    """A free-text input paired with a `<datalist>` of suggested options.
+
+    Used for an incomplete `COMBOBOX_SELECT` sample: unlike `ChoiceField`,
+    this never rejects a typed value outside the list (the live combobox
+    search could still find one the DOM sample missed -- see
+    `_answer_edit_field`'s docstring), but a Yes/No-style question with only
+    a couple of sampled options should still show them as clickable
+    suggestions instead of forcing the user to type them blind.
+    """
+
+    def __init__(self, options=(), attrs=None):
+        super().__init__(attrs)
+        self.options = options
+
+    def render(self, name, value, attrs=None, renderer=None):
+        attrs = dict(attrs or {})
+        list_id = f"{attrs.get('id', name)}__options"
+        attrs["list"] = list_id
+        input_html = super().render(name, value, attrs, renderer)
+        options_html = format_html_join(
+            "", "<option value=\"{}\"></option>", ((option,) for option in self.options)
+        )
+        return format_html("{}<datalist id=\"{}\">{}</datalist>", input_html, list_id, options_html)
+
+
+def _answer_edit_field(entry, snapshot):
+    """Build the same control and validator from the stored application schema."""
+    field_type = snapshot.get("field_type", entry.get("field_type"))
+    if FILE in (field_type, entry.get("field_type")):
+        return None
+    # Fall back to the stored answer's own "options" (set for an
+    # invalid_option/low_confidence placeholder -- see drafting.py) when the
+    # live-schema snapshot doesn't have this field at all, e.g. a draft with
+    # no form_schema_snapshot yet or a field the snapshot dropped.
+    options = snapshot.get("options") or entry.get("options") or []
+    # A COMBOBOX_SELECT's DOM-sampled options can be a partial list
+    # (`options_complete=False`, see field_mapping.FormField) -- enforcing
+    # that partial sample as a closed allowlist would block a valid value
+    # that simply isn't in the sample (live combobox search could still
+    # find it at submission). Only SINGLE_SELECT/MULTI_SELECT/CHECKBOX_GROUP
+    # and a *complete* combobox option set are enforced as a closed choice.
+    options_complete = snapshot.get("options_complete", entry.get("options_complete", True))
+    choices = [(option, option) for option in options]
+    if field_type in (MULTI_SELECT, CHECKBOX_GROUP):
+        return forms.MultipleChoiceField(choices=choices, required=False)
+    if field_type == SINGLE_SELECT or (
+        field_type in (COMBOBOX_SELECT, None) and options and options_complete
+    ):
+        return forms.ChoiceField(choices=[("", "Choose an answer")] + choices, required=False)
+    if field_type == COMBOBOX_SELECT and options:
+        # Incomplete sample, but not empty -- surface it as suggestions
+        # rather than leaving the user to type a Yes/No-style answer blind.
+        return forms.CharField(required=False, strip=False, widget=_DatalistTextInput(options=options))
+    # Dynamic comboboxes may have no options until the user types a query.
+    widget = forms.Textarea if field_type == TEXTAREA else forms.TextInput
+    return forms.CharField(required=False, strip=False, widget=widget)
+
+
+def _friendly_draft_message(draft):
+    """User-facing explanation for a non-actionable draft state, keyed on
+    `draft.reason_code` rather than the stored `exclusion_reason`/
+    `error_message` free text (plan review flagged both raw internal text
+    and prose pattern-matching as unsuitable/fragile for direct display)."""
+    if draft.status == AutoApplyDraft.Status.STALE:
+        if draft.reason_code == AutoApplyDraft.ReasonCode.RESUME_REPLACED:
+            return _STALE_RESUME_REPLACED_MESSAGE
+        return _STALE_MESSAGE
+    if draft.status in (AutoApplyDraft.Status.EXCLUDED, AutoApplyDraft.Status.FAILED):
+        return _REASON_CODE_MESSAGES.get(draft.reason_code, _GENERIC_UNAVAILABLE_MESSAGE)
+    return ""
+
+
+def _recommendations_redirect(request):
+    # A posted "next=queue" lets `trigger_auto_apply` be reused as the
+    # auto-apply queue's own "Retry" action (for a FAILED draft) without
+    # bouncing the user away to recommendations -- the only other caller
+    # (the recommendations page's own "Auto-apply" button) never sets it,
+    # so the default stays recommendations.
+    if request.POST.get("next") == "queue":
+        return redirect(reverse("auto_apply_queue"))
+
     redirect_url = reverse("recommendations")
     params = {}
     if request.POST.get("all") == "1":
@@ -146,3 +347,303 @@ def job_action(request, job_id):
     if params:
         redirect_url = f"{redirect_url}?{urlencode(params)}"
     return redirect(redirect_url)
+
+
+@login_required
+@require_POST
+def trigger_auto_apply(request, job_id):
+    """Enqueue `draft_auto_apply` for the requesting user + job (F1).
+
+    Mirrors `job_action`'s POST-then-redirect shape. Only reachable for
+    Greenhouse-sourced jobs (`draft_for`/`draft_auto_apply` raise `ValueError`
+    for anything else per U6) -- a non-Greenhouse job gets a 400 rather than
+    reaching the task. Drafting is async, so the flash message says
+    "drafting…" rather than promising a result; the authoritative outcome
+    (including any `EXCLUDED` reason) is surfaced durably in the queue view.
+    """
+    job = get_object_or_404(Job, pk=job_id)
+    if job.source_ats != JobSource.ATS.GREENHOUSE:
+        return HttpResponseBadRequest("Auto-apply is only available for Greenhouse-sourced jobs.")
+
+    # A real application to this employer already exists for this job --
+    # re-triggering here would only ever race to a fresh AutoApplyDraft that
+    # itself has no way of knowing it should refuse to submit again, and
+    # nothing downstream of drafting checks this, so the guard has to live
+    # here, before the task is even enqueued.
+    already_applied = (
+        JobApplication.objects.filter(
+            user=request.user, job=job, status=JobApplication.Status.APPLIED
+        ).exists()
+        or AutoApplyDraft.objects.filter(
+            user=request.user, job=job, status=AutoApplyDraft.Status.APPLIED
+        ).exists()
+    )
+    if already_applied:
+        messages.info(request, "You've already applied to this job.")
+        return _recommendations_redirect(request)
+
+    if AutoApplyDraft.objects.filter(
+        user=request.user, job=job,
+        reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED,
+    ).exists():
+        messages.error(request, _REASON_CODE_MESSAGES[AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED])
+        return _recommendations_redirect(request)
+
+    draft_auto_apply.delay(request.user.id, job.id)
+    messages.info(
+        request,
+        "Drafting your application… check the auto-apply queue shortly for the result.",
+    )
+    return _recommendations_redirect(request)
+
+
+@login_required
+def auto_apply_queue(request):
+    """List the requesting user's `AutoApplyDraft`s across all statuses
+    (F2) -- `EXCLUDED`/`STALE` are shown, not hidden by default, so a user
+    can always see why a job didn't become sendable.
+
+    `select_related("job", "job__employer")` batch-fetches the related Job
+    (and its Employer) in the same query as the drafts, following
+    `recommendations`' batch-fetch pattern rather than N+1 per-draft lookups.
+    """
+    drafts_qs = (
+        AutoApplyDraft.objects.filter(user=request.user)
+        .select_related("job", "job__employer")
+        .order_by("-updated_at")
+    )
+    paginator = Paginator(drafts_qs, RECOMMENDATIONS_PER_PAGE)
+    page_obj = paginator.get_page(request.GET.get("page"))
+
+    for draft in page_obj:
+        draft.friendly_message = _friendly_draft_message(draft)
+        draft.blocking_fields = _blocking_required_fields(draft.answers, draft.form_schema_snapshot)
+        fields = _snapshot_fields(draft)
+        # Render-only dicts, separate from `draft.answers` -- mutating the
+        # stored JSONField entries in place would persist rendered HTML
+        # (`control`) into the model the moment anything calls `draft.save()`.
+        display_answers = {}
+        for index, (label, entry) in enumerate((draft.answers or {}).items()):
+            if not isinstance(entry, dict):
+                continue
+            display_entry = dict(entry)
+            display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
+            field = _answer_edit_field(entry, fields.get(label, {}))
+            if field is not None:
+                value = entry.get("value", "")
+                if isinstance(field, forms.MultipleChoiceField) and isinstance(value, str):
+                    value = [value] if value else []
+                display_entry["control"] = field.widget.render(
+                    f"value__{index}", value, attrs={"id": display_entry["control_id"]}
+                )
+            display_answers[label] = display_entry
+        draft.display_answers = display_answers
+
+    return render(request, "web/auto_apply_queue.html", {"page_obj": page_obj})
+
+
+@login_required
+@require_POST
+def edit_auto_apply_draft(request, pk):
+    """Whole-draft answer edit for a `DRAFTED` draft.
+
+    Ownership+status scoped (`user=request.user, status=DRAFTED`) so a
+    request for another user's draft, or a draft that's no longer editable,
+    404s rather than mutating it. The template posts one `label__<i>` /
+    `value__<i>` pair per answer (indexed rather than keyed by the raw label,
+    since labels are arbitrary employer-supplied text); any answer present
+    in the POST is validated against the snapshot before being saved.
+    Required blanks retain `needs_review`; FILE paths cannot be edited.
+    """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+
+    answers = {label: dict(entry) for label, entry in (draft.answers or {}).items()}
+    fields = _snapshot_fields(draft)
+    invalid_labels = []
+    index = 0
+    while f"label__{index}" in request.POST:
+        # Browsers normalize a lone "\n" in a submitted field's value to
+        # "\r\n" per the HTML form-data-set algorithm -- an employer-supplied
+        # label containing a real line break (put into a hidden input's
+        # `value` attribute by the template) therefore comes back from the
+        # browser with "\r\n" where `answers` was keyed with a bare "\n",
+        # silently failing the lookup below and dropping the whole field's
+        # edit with no error shown.
+        label = request.POST[f"label__{index}"].replace("\r\n", "\n")
+        value_field = f"value__{index}"
+        index += 1
+        if label not in answers:
+            continue
+        field = _answer_edit_field(answers[label], fields.get(label, {}))
+        if field is None:
+            continue  # FILE paths remain derived from the profile, never from POST.
+        if isinstance(field, forms.MultipleChoiceField):
+            value = request.POST.getlist(value_field)
+        elif value_field in request.POST:
+            value = request.POST[value_field]
+        else:
+            continue
+        try:
+            cleaned = field.clean(value)
+        except forms.ValidationError:
+            # Don't let one bad field discard sibling edits from the same
+            # POST -- collect it and keep validating/saving the rest.
+            invalid_labels.append(label)
+            continue
+        answers[label]["value"] = cleaned
+        # A blank answer keeps its "needs review" hint regardless of
+        # required-ness, so an optional placeholder doesn't quietly lose its
+        # flag the moment the queue is re-rendered/saved.
+        answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
+        # Explicit provenance marker: `needs_review=False` alone doesn't
+        # prove a human looked at this answer -- a confident LLM guess also
+        # gets `needs_review=False` (see answer_resolution/llm/base.py) with
+        # no human ever involved. Only THIS save path represents a human
+        # actually reviewing/confirming the value, which is what
+        # drafting._carry_forward_confirmed_answers() requires before
+        # reusing an answer on a later retry (CodeRabbit finding on PR #99).
+        answers[label]["user_confirmed"] = not _is_blank_answer_value(cleaned)
+
+    draft.answers = answers
+    draft.save(update_fields=["answers", "updated_at"])
+    for label in invalid_labels:
+        messages.error(request, f"Choose a valid answer for {label}.")
+    return redirect("auto_apply_queue")
+
+
+@login_required
+@require_POST
+def discard_auto_apply_draft(request, pk):
+    """Release an owned, unsent draft so drafting can be triggered again."""
+    deleted, _ = AutoApplyDraft.objects.filter(
+        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    ).delete()
+    if not deleted:
+        raise Http404("Draft not found or not discardable.")
+    messages.info(request, "Draft discarded. You can draft this application again from recommendations.")
+    return redirect("auto_apply_queue")
+
+
+@login_required
+@require_POST
+def send_auto_apply_draft(request, pk):
+    """Atomically transition a `DRAFTED` draft to `SENDING` and enqueue
+    `submit_auto_apply_draft`.
+
+    The guard is scoped to `user=request.user` in addition to `pk` and
+    `status=DRAFTED` -- an unscoped guard would let any authenticated user
+    flip another user's draft to `SENDING` by guessing/enumerating a `pk`,
+    triggering submission of that user's resume/answers to an employer
+    without their action. Zero rows updated (not found, wrong status, *or*
+    wrong user) is a 404 in all three cases -- the response never leaks
+    which case it was.
+
+    Before that atomic transition, a required-field blocking check
+    (`_blocking_required_fields`) rejects the send outright if any required
+    question the LLM couldn't answer is still blank -- this is the
+    server-side backstop for the queue template's disabled Send button
+    (belt-and-braces: the template gate is presentation only). This check
+    reads the draft first rather than folding into the atomic
+    `.filter(...).update(...)` below, which briefly reopens a window where a
+    concurrent edit could clear a block between the check and the update --
+    acceptable here since the `.filter(...).update(...)` row-count check
+    remains the sole source of truth for the actual `SENDING` transition;
+    the pre-check is purely a friendlier rejection path, not the safety
+    boundary.
+    """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    blocking = _blocking_required_fields(draft.answers, draft.form_schema_snapshot)
+    if blocking:
+        messages.error(
+            request,
+            "Answer these required question(s) before sending: " + "; ".join(blocking),
+        )
+        return redirect("auto_apply_queue")
+
+    # A blank, optional needs_review placeholder (R5's "float unanswerable
+    # questions to review instead of excluding the draft") isn't actually
+    # sent to the form and has nothing to confirm, so it doesn't block --
+    # only a needs_review entry with a real (LLM-guessed) value the user
+    # hasn't confirmed yet, or one on a required field, blocks sending.
+    if any(
+        entry.get("needs_review")
+        and (str(entry.get("value") or "").strip() or entry.get("required"))
+        for entry in (draft.answers or {}).values()
+    ):
+        messages.error(request, "Please review and save all flagged answers before sending.")
+        return redirect("auto_apply_queue")
+
+    # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
+    # sweep keys off it, and a draft that sat in the queue before Send would
+    # otherwise look "stuck in SENDING" the moment it is sent.
+    updated = AutoApplyDraft.objects.filter(
+        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+        answers=draft.answers,
+    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
+    if not updated:
+        raise Http404("Draft not found or not sendable.")
+
+    submit_auto_apply_draft.delay(pk)
+    messages.info(request, "Sending your application…")
+    return redirect("auto_apply_queue")
+
+
+@login_required
+def email_inbox_credential(request):
+    """View and update stored IMAP inbox credentials."""
+    try:
+        credential = request.user.email_inbox_credential
+    except EmailInboxCredential.DoesNotExist:
+        credential = None
+
+    if request.method == "POST":
+        form = EmailInboxCredentialForm(request.POST, instance=credential)
+        if form.is_valid():
+            try:
+                # Atomic: a failed encryption must not leave an active
+                # credential row with an empty ciphertext behind.
+                with transaction.atomic():
+                    inst = form.save(commit=False)
+                    inst.user = request.user
+                    inst.save()
+                    app_password = form.cleaned_data.get("app_password")
+                    if app_password:
+                        inst.set_app_password(app_password)
+            except ImproperlyConfigured:
+                form.add_error(
+                    None,
+                    "Inbox credentials could not be saved because credential encryption "
+                    "is not configured correctly. Contact the administrator.",
+                )
+            else:
+                messages.success(request, "Inbox credentials updated and verified successfully.")
+                return redirect("email_inbox_credential")
+    else:
+        form = EmailInboxCredentialForm(instance=credential)
+
+    return render(
+        request,
+        "web/email_inbox_credential.html",
+        {
+            "form": form,
+            "credential": credential,
+        },
+    )
+
+
+@login_required
+@require_POST
+def delete_email_inbox_credential(request):
+    """Remove stored IMAP inbox credentials."""
+    try:
+        credential = request.user.email_inbox_credential
+        credential.delete()
+        messages.success(request, "Inbox credentials removed.")
+    except EmailInboxCredential.DoesNotExist:
+        pass
+    return redirect("email_inbox_credential")
+

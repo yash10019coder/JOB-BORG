@@ -25,6 +25,7 @@
         <span class="brand">JobBorg</span>
         {% if user.is_authenticated %}
             <a href="{% url 'recommendations' %}">Recommendations</a>
+            <a href="{% url 'auto_apply_queue' %}">Auto-apply queue{% if auto_apply_pending_count %} <span class="tag" title="Drafted applications waiting to be sent before their job postings close">{{ auto_apply_pending_count }}</span>{% endif %}</a>
             <a href="{% url 'profile' %}">Profile</a>
             <span class="spacer"></span>
             <span class="muted">{{ user.username }}</span>
