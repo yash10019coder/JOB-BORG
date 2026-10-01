@@ -97,14 +97,33 @@ class DraftingServiceTestCase(TestCase):
 
 
 class OptionCompletenessTests(DraftingServiceTestCase):
-    def test_only_complete_combobox_options_constrain_questions(self):
-        for complete in (False, True):
-            with self.subTest(complete=complete):
+    def test_only_complete_or_small_combobox_options_constrain_questions(self):
+        # The LLM is shown the sampled options either way (so it recognizes
+        # a constrained-choice question and doesn't answer in free-text
+        # prose) -- only *enforcement* against that sample differs. A large
+        # incomplete sample is a hint, not a closed set to reject an
+        # out-of-sample answer against (a real, dynamically-searched field
+        # like School may have thousands more entries than the DOM sample).
+        # A *small* sample -- complete or not -- is enforced regardless:
+        # verified against production failures where a small, genuinely
+        # complete dropdown (a 10-entry Degree list, a 3-entry salary-range
+        # list) was flagged incomplete by the scroll heuristic, and the
+        # unenforced answer crashed a live submission instead of going to
+        # needs_review.
+        large_sample = tuple(f"Sample School {i}" for i in range(20))
+        for complete, options, expected_enforced in (
+            (False, large_sample, False),
+            (True, large_sample, True),
+            (False, ("Sample School",), True),  # small -- enforced despite incomplete
+            (True, ("Sample School",), True),
+        ):
+            with self.subTest(complete=complete, size=len(options)):
                 llm = FakeLLMClient()
-                field = FormField("School", COMBOBOX_SELECT, True, ("Sample School",), options_complete=complete)
+                field = FormField("School", COMBOBOX_SELECT, True, options, options_complete=complete)
                 draft = draft_for(self.user, self.job, form_client=FakeFormClient(FormSchema((field,))), llm_client=llm)
                 question = llm.calls[0][0][0]
-                self.assertEqual(question.options, field.options if complete else ())
+                self.assertEqual(question.options, field.options)
+                self.assertEqual(question.options_enforced, expected_enforced)
                 self.assertEqual(tuple(draft.answers["School"]["options"]), field.options)
                 draft.delete()  # Each case must start without an existing draft.
 
@@ -146,6 +165,67 @@ class StandardFieldsOnlyTests(DraftingServiceTestCase):
             self.assertFalse(field_answer["needs_review"])
         self.assertTrue(draft.answers["First Name"]["required"])
         self.assertFalse(draft.answers["Phone"]["required"])
+
+
+class NewStandardFieldsTests(DraftingServiceTestCase):
+    """GitHub/portfolio URL and current employer, like linkedin_url and
+    phone, are filled straight from Profile data (R4) and never reach the
+    LLM -- see `_STANDARD_FIELD_PATTERNS`/`_standard_field_value`."""
+
+    def test_github_website_and_current_company_fill_from_profile(self):
+        self.profile.github_url = "https://github.com/alicesmith"
+        self.profile.portfolio_url = "https://alicesmith.dev"
+        self.profile.current_employer = "Acme Corp"
+        self.profile.save()
+
+        schema = FormSchema(fields=(
+            FormField(label="GitHub", field_type=TEXT, required=False),
+            FormField(label="Github/Gitlab Profile URL", field_type=TEXT, required=False),
+            FormField(label="Website", field_type=TEXT, required=False),
+            FormField(label="Current Company", field_type=TEXT, required=True),
+        ))
+        llm_client = FakeLLMClient()
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=llm_client,
+        )
+
+        self.assertEqual(llm_client.calls, [], "standard fields must never reach the LLM")
+        self.assertEqual(draft.answers["GitHub"]["value"], "https://github.com/alicesmith")
+        self.assertEqual(
+            draft.answers["Github/Gitlab Profile URL"]["value"], "https://github.com/alicesmith"
+        )
+        self.assertEqual(draft.answers["Website"]["value"], "https://alicesmith.dev")
+        self.assertEqual(draft.answers["Current Company"]["value"], "Acme Corp")
+        for field_answer in draft.answers.values():
+            self.assertFalse(field_answer["needs_review"])
+
+    def test_blank_new_standard_fields_fall_back_to_normal_optional_handling(self):
+        # None of github_url/portfolio_url/current_employer set (blanks are
+        # the model default) -- an optional field with no value is simply
+        # omitted, same as any other blank optional standard field.
+        schema = FormSchema(fields=(
+            FormField(label="GitHub", field_type=TEXT, required=False),
+        ))
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertNotIn("GitHub", draft.answers)
+
+    def test_required_current_company_blank_excludes_draft(self):
+        # A blank *required* standard field signals an incomplete Profile
+        # (R4/R6) -- same exclude-the-draft behavior as any other blank
+        # required standard field (e.g. First Name).
+        schema = FormSchema(fields=(
+            FormField(label="Current Company", field_type=TEXT, required=True),
+        ))
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertEqual(draft.status, AutoApplyDraft.Status.EXCLUDED)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.UNANSWERABLE_REQUIRED)
 
 
 class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
@@ -383,6 +463,107 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
         self.assertTrue(entry["required"])
         self.assertEqual(entry["reason"], "hard_excluded_category")
         self.assertEqual(llm_client.calls, [])
+
+
+class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
+    """A hard-excluded (e.g. DEMOGRAPHIC) question the user already
+    answered by hand on a prior FAILED/EXCLUDED draft for this exact job --
+    via `edit_auto_apply_draft`, so `needs_review` is False on that row --
+    must not come back blank on a fresh draft (e.g. a Retry) for the same
+    (user, job). See `_carry_forward_confirmed_answers`."""
+
+    def _gender_schema(self):
+        return FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="Gender",
+                    field_type=SINGLE_SELECT,
+                    required=False,
+                    options=("Male", "Female", "Decline To Self Identify"),
+                    options_complete=True,
+                ),
+            )
+        )
+
+    def test_confirmed_answer_from_prior_draft_is_reused(self):
+        schema = self._gender_schema()
+        first_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertEqual(first_draft.answers["Gender"]["value"], "")
+        self.assertTrue(first_draft.answers["Gender"]["needs_review"])
+
+        # Simulate the user confirming the answer via edit_auto_apply_draft,
+        # then the draft later failing at send time.
+        first_draft.answers["Gender"]["value"] = "Male"
+        first_draft.answers["Gender"]["needs_review"] = False
+        first_draft.status = AutoApplyDraft.Status.FAILED
+        first_draft.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
+        first_draft.save()
+
+        retry_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+
+        entry = retry_draft.answers["Gender"]
+        self.assertEqual(entry["value"], "Male")
+        self.assertFalse(entry["needs_review"])
+        self.assertEqual(entry["reason"], "carried_forward_from_previous_draft")
+
+    def test_confirmed_answer_not_reused_when_no_longer_a_valid_option(self):
+        schema = self._gender_schema()
+        first_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first_draft.answers["Gender"]["value"] = "Male"
+        first_draft.answers["Gender"]["needs_review"] = False
+        first_draft.status = AutoApplyDraft.Status.FAILED
+        first_draft.save()
+
+        drifted_schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="Gender",
+                    field_type=SINGLE_SELECT,
+                    required=False,
+                    options=("Man", "Woman", "Decline To Self Identify"),
+                    options_complete=True,
+                ),
+            )
+        )
+        retry_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=drifted_schema), llm_client=FakeLLMClient(),
+        )
+
+        entry = retry_draft.answers["Gender"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_unconfirmed_prior_answer_is_not_reused(self):
+        # A blank/needs_review entry on the prior draft was never actually
+        # confirmed by the user -- must not be treated as ground truth.
+        schema = self._gender_schema()
+        first_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first_draft.status = AutoApplyDraft.Status.FAILED
+        first_draft.save()
+
+        retry_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+
+        entry = retry_draft.answers["Gender"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
 
 
 class RequiredFileQuestionUnanswerableTests(DraftingServiceTestCase):

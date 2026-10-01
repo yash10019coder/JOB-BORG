@@ -13,6 +13,7 @@ from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html, format_html_join
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
@@ -254,6 +255,32 @@ def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
     )
 
 
+class _DatalistTextInput(forms.TextInput):
+    """A free-text input paired with a `<datalist>` of suggested options.
+
+    Used for an incomplete `COMBOBOX_SELECT` sample: unlike `ChoiceField`,
+    this never rejects a typed value outside the list (the live combobox
+    search could still find one the DOM sample missed -- see
+    `_answer_edit_field`'s docstring), but a Yes/No-style question with only
+    a couple of sampled options should still show them as clickable
+    suggestions instead of forcing the user to type them blind.
+    """
+
+    def __init__(self, options=(), attrs=None):
+        super().__init__(attrs)
+        self.options = options
+
+    def render(self, name, value, attrs=None, renderer=None):
+        attrs = dict(attrs or {})
+        list_id = f"{attrs.get('id', name)}__options"
+        attrs["list"] = list_id
+        input_html = super().render(name, value, attrs, renderer)
+        options_html = format_html_join(
+            "", "<option value=\"{}\"></option>", ((option,) for option in self.options)
+        )
+        return format_html("{}<datalist id=\"{}\">{}</datalist>", input_html, list_id, options_html)
+
+
 def _answer_edit_field(entry, snapshot):
     """Build the same control and validator from the stored application schema."""
     field_type = snapshot.get("field_type", entry.get("field_type"))
@@ -278,6 +305,10 @@ def _answer_edit_field(entry, snapshot):
         field_type in (COMBOBOX_SELECT, None) and options and options_complete
     ):
         return forms.ChoiceField(choices=[("", "Choose an answer")] + choices, required=False)
+    if field_type == COMBOBOX_SELECT and options:
+        # Incomplete sample, but not empty -- surface it as suggestions
+        # rather than leaving the user to type a Yes/No-style answer blind.
+        return forms.CharField(required=False, strip=False, widget=_DatalistTextInput(options=options))
     # Dynamic comboboxes may have no options until the user types a query.
     widget = forms.Textarea if field_type == TEXTAREA else forms.TextInput
     return forms.CharField(required=False, strip=False, widget=widget)
@@ -298,6 +329,14 @@ def _friendly_draft_message(draft):
 
 
 def _recommendations_redirect(request):
+    # A posted "next=queue" lets `trigger_auto_apply` be reused as the
+    # auto-apply queue's own "Retry" action (for a FAILED draft) without
+    # bouncing the user away to recommendations -- the only other caller
+    # (the recommendations page's own "Auto-apply" button) never sets it,
+    # so the default stays recommendations.
+    if request.POST.get("next") == "queue":
+        return redirect(reverse("auto_apply_queue"))
+
     redirect_url = reverse("recommendations")
     params = {}
     if request.POST.get("all") == "1":
@@ -425,7 +464,14 @@ def edit_auto_apply_draft(request, pk):
     invalid_labels = []
     index = 0
     while f"label__{index}" in request.POST:
-        label = request.POST[f"label__{index}"]
+        # Browsers normalize a lone "\n" in a submitted field's value to
+        # "\r\n" per the HTML form-data-set algorithm -- an employer-supplied
+        # label containing a real line break (put into a hidden input's
+        # `value` attribute by the template) therefore comes back from the
+        # browser with "\r\n" where `answers` was keyed with a bare "\n",
+        # silently failing the lookup below and dropping the whole field's
+        # edit with no error shown.
+        label = request.POST[f"label__{index}"].replace("\r\n", "\n")
         value_field = f"value__{index}"
         index += 1
         if label not in answers:

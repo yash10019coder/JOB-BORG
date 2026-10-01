@@ -41,7 +41,23 @@ class Question:
     id: str
     text: str
     field_type: str = ""
+    # The closed option set to *enforce* an answer against
+    # (`answer_resolution._enforce_option_constraint`) -- empty when the
+    # field has no options, or when its sampled options are known to be
+    # incomplete (see `options_enforced`/`drafting.py`) and rejecting a
+    # legitimate value outside the sample would be worse than not enforcing
+    # at all.
     options: tuple[str, ...] = ()
+    # False only for an incomplete COMBOBOX_SELECT sample: the LLM is still
+    # *shown* `options` as a hint (via `langchain_client._build_prompt`,
+    # which renders whatever `options` holds) so it knows this is a
+    # constrained-choice question and answers with a real option string
+    # instead of free-text prose -- but `_enforce_option_constraint` must
+    # not reject an answer just because it fell outside that incomplete
+    # sample, since the live combobox search could still find it at submit
+    # time. True (the default) for every other question, where `options`
+    # (when non-empty) is a real closed set safe to enforce as-is.
+    options_enforced: bool = True
 
 
 @dataclass(frozen=True)

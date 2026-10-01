@@ -111,7 +111,12 @@ class ImapEmailCodeProviderTests(TestCase):
         self.assertTrue(self.credential.is_active)
 
     @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
-    def test_ambiguous_codes_returns_code_ambiguous(self, mock_imap_cls):
+    def test_multiple_distinct_codes_prefers_the_most_recent(self, mock_imap_cls):
+        # Sender-independent matching can no longer disambiguate multiple
+        # candidate verification emails by sender, so when two distinct
+        # codes are found in the same poll (e.g. two applications submitted
+        # close together), the most recently received one wins rather than
+        # failing the whole lookup as ambiguous.
         mock_imap = MagicMock()
         mock_imap_cls.return_value = mock_imap
         mock_imap.login.return_value = ("OK", [b"Logged in"])
@@ -148,7 +153,8 @@ class ImapEmailCodeProviderTests(TestCase):
             deadline_monotonic=1e9,
         )
 
-        self.assertEqual(result.outcome, VerificationOutcome.CODE_AMBIGUOUS)
+        self.assertEqual(result.outcome, VerificationOutcome.FOUND)
+        self.assertEqual(result.code, "222222")  # msg2 (12:01:00) is more recent than msg1 (12:00:00)
 
 
 # -- Hang Scenario Tests (RH1-RH4) ----------------------------------------
@@ -491,15 +497,16 @@ class ImapEmailCodeProviderHangScenarioTests(TestCase):
         self.assertEqual(result.outcome, VerificationOutcome.INBOX_AUTH_FAILED)
         mock_imap_cls.assert_not_called()
 
-    @override_settings(AUTO_APPLY_VERIFICATION_SENDER_ALLOWLIST=["greenhouse.io", "jobs@example.com"])
     @patch("apps.auto_apply.email_verification.imap_provider.time.sleep")
     @patch("apps.auto_apply.email_verification.imap_provider._DeadlineIMAP4_SSL")
-    def test_uid_search_filters_senders_and_fetches_each_uid_once(self, mock_imap_cls, sleep):
+    def test_uid_search_is_sender_independent_and_fetches_each_uid_once(self, mock_imap_cls, sleep):
+        # The SEARCH query is SINCE-only now (no FROM clause) -- matching is
+        # sender-independent, done via content (contextual phrasing) below.
         imap = mock_imap_cls.return_value
         imap.select.return_value = ("OK", [b"2"])
         # This message has a convincing Date header but no usable INTERNALDATE.
         msg = b"From: no-reply@greenhouse.io\r\nDate: Wed, 05 Aug 2026 12:00:00 +0000\r\n\r\nYour verification code is 654321."
-        query = '(SINCE "04-Aug-2026" OR FROM "greenhouse.io" (FROM "jobs@example.com"))'
+        query = '(SINCE "04-Aug-2026")'
         fetched_uids: set[bytes] = set()
 
         def uid_command(command, *args):

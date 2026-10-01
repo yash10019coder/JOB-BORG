@@ -3,7 +3,10 @@ from django.test import SimpleTestCase, override_settings
 
 from apps.auto_apply.checks import check_auto_apply_sending_timeout_ordering
 from apps.auto_apply.email_verification.base import VerificationOutcome
-from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormVerificationFailed
+from apps.auto_apply.greenhouse_form.exceptions import (
+    GreenhouseFormSubmissionUnconfirmed,
+    GreenhouseFormVerificationFailed,
+)
 from apps.auto_apply.models import AutoApplyDraft
 from apps.auto_apply.tasks import _reason_code_for, _submit_budget_seconds
 
@@ -46,3 +49,20 @@ class ReasonCodeTotalityTests(SimpleTestCase):
             exc = GreenhouseFormVerificationFailed("error", outcome=outcome)
             reason_code = _reason_code_for(exc)
             self.assertEqual(reason_code, expected_reason_code)
+
+    def test_submission_unconfirmed_after_verification_code_maps_to_duplicate_guard_code(self):
+        # Regression test for a real production failure (AutoApplyDraft
+        # #266): a verification code was entered and submitted, but no
+        # success signal was ever observed afterward -- genuinely ambiguous
+        # (the employer may already have the real application), NOT a case
+        # we know is safe to retry. `_confirm_success()` must raise
+        # `GreenhouseFormSubmissionUnconfirmed` for this, not
+        # `GreenhouseFormVerificationFailed(outcome=CODE_REJECTED)` -- the
+        # latter mapped to `VERIFICATION_CODE_REJECTED`, which bypasses
+        # `trigger_auto_apply`'s SUBMISSION_UNCONFIRMED duplicate-
+        # application guard (apps/web/views.py) entirely, risking a second
+        # real submission to the same employer on Retry.
+        exc = GreenhouseFormSubmissionUnconfirmed(
+            "Verification code entered but application success not confirmed"
+        )
+        self.assertEqual(_reason_code_for(exc), AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)

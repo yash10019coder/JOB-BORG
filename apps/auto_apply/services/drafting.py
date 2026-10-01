@@ -39,6 +39,20 @@ from . import answer_resolution
 
 logger = logging.getLogger(__name__)
 
+# A COMBOBOX_SELECT sample this small or smaller is enforced as a closed set
+# even when options_complete is False (the scroll-convergence signal didn't
+# fire). Verified against two real production failures: a 10-entry "Degree"
+# dropdown and a 3-entry salary-range dropdown were both flagged incomplete,
+# and in both cases the LLM/an ExplicitAnswer's free-text answer (shown the
+# sample as a hint, per the Question construction below) still didn't match
+# any listed option verbatim and reached a live submission crash instead of
+# needs_review. A real closed-choice dropdown this size essentially never
+# has more hidden beyond one page; a genuinely large, dynamically-searched
+# field (School's thousands of entries, Country) stays unenforced above this
+# threshold, where an answer legitimately outside the DOM sample is a real
+# possibility worth not blocking.
+_SMALL_OPTION_SET_ENFORCE_THRESHOLD = 15
+
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
 # so it never shadows "First Name"/"Last Name", which are matched by their
@@ -50,6 +64,9 @@ _STANDARD_FIELD_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("email", re.compile(r"e-?mail(?: address)?", re.I)),
     ("phone", re.compile(r"phone(?: number)?", re.I)),
     ("linkedin", re.compile(r"linkedin(?: (?:url|profile))?", re.I)),
+    ("github", re.compile(r"git\s*(?:hub|lab)(?:\s*/\s*git\s*(?:hub|lab))?(?:\s*profile)?(?:\s*url)?", re.I)),
+    ("website", re.compile(r"(?:personal\s+)?(?:website|portfolio)(?:\s*url)?", re.I)),
+    ("current_company", re.compile(r"current\s+(?:company|employer)", re.I)),
     ("resume", re.compile(r"r[ée]sum[ée](?:\s*/\s*cv)?|cv", re.I)),
 )
 
@@ -88,6 +105,12 @@ def _standard_field_value(key: str, profile, user) -> str:
         return (getattr(profile, "phone", "") or "").strip()
     if key == "linkedin":
         return (getattr(profile, "linkedin_url", "") or "").strip()
+    if key == "github":
+        return (getattr(profile, "github_url", "") or "").strip()
+    if key == "website":
+        return (getattr(profile, "portfolio_url", "") or "").strip()
+    if key == "current_company":
+        return (getattr(profile, "current_employer", "") or "").strip()
     if key == "resume":
         resume = getattr(profile, "resume", None)
         if not resume:
@@ -215,7 +238,21 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     questions = [
         Question(
             id=f.label, text=f.label, field_type=f.field_type,
-            options=f.options if f.field_type != COMBOBOX_SELECT or f.options_complete else (),
+            # Always show the LLM whatever sample of options was discovered
+            # -- even an incomplete COMBOBOX_SELECT one -- so it recognizes
+            # a constrained-choice question and answers with a real option
+            # instead of free-text prose (verified against a production
+            # failure: a Yes/No-style combobox with options_complete=False
+            # got a full-sentence LLM answer that matched no live option).
+            # `options_enforced=False` keeps `_enforce_option_constraint`
+            # from rejecting a legitimate answer the incomplete sample
+            # simply didn't happen to include.
+            options=f.options,
+            options_enforced=(
+                f.field_type != COMBOBOX_SELECT
+                or f.options_complete
+                or len(f.options) <= _SMALL_OPTION_SET_ENFORCE_THRESHOLD
+            ),
         )
         for f in custom_fields
     ]
@@ -281,6 +318,8 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 "options_complete": form_field.options_complete,
         }
 
+    _carry_forward_confirmed_answers(user, job, answers_payload)
+
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here
         # now -- an incomplete Profile, not an LLM judgment call. Custom
@@ -306,6 +345,63 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         answers=answers_payload,
         form_schema_snapshot=schema_to_dict(schema),
     )
+
+
+def _is_blank(value) -> bool:
+    if isinstance(value, (list, tuple)):
+        return not any(str(item or "").strip() for item in value)
+    return not str(value or "").strip()
+
+
+def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
+    """Reuse a previously user-confirmed answer for a still-blank,
+    `needs_review` field from the most recent earlier draft for this
+    (user, job) pair -- mutates `answers_payload` in place.
+
+    Most relevant for DEMOGRAPHIC/EEO questions (gender, veteran status,
+    disability, race/ethnicity, etc.): `answer_resolution` always hard-
+    excludes these from LLM inference (see
+    `apps.auto_apply.llm.categories.HARD_EXCLUDED_CATEGORIES`), so every
+    *fresh* draft -- including a Retry after a FAILED send -- would
+    otherwise land these blank again even though the user already answered
+    them by hand via `edit_auto_apply_draft` on a prior attempt for this
+    exact job, forcing a re-answer of the same voluntary self-ID questions
+    on every retry.
+
+    Only reuses an answer the user actually confirmed on the prior draft
+    (`needs_review` False there -- never itself an uncarried LLM guess or
+    an earlier carry-forward of one) for the exact same question label and
+    field type, and -- for an option-bearing field -- only when that value
+    is still a valid option on the schema just re-inspected for *this*
+    draft, since Greenhouse's rendered options can drift between attempts.
+    """
+    previous = (
+        AutoApplyDraft.objects.filter(user=user, job=job)
+        .exclude(answers={})
+        .order_by("-updated_at")
+        .first()
+    )
+    if previous is None:
+        return
+
+    for label, entry in answers_payload.items():
+        if not entry.get("needs_review") or not _is_blank(entry.get("value")):
+            continue
+        prior_entry = (previous.answers or {}).get(label)
+        if not isinstance(prior_entry, dict) or prior_entry.get("needs_review"):
+            continue
+        if prior_entry.get("field_type") != entry.get("field_type"):
+            continue
+        prior_value = prior_entry.get("value")
+        if _is_blank(prior_value):
+            continue
+        if entry.get("field_type") in (SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP) and entry.get("options"):
+            values = prior_value if isinstance(prior_value, (list, tuple)) else [prior_value]
+            if any(v not in entry["options"] for v in values):
+                continue
+        entry["value"] = prior_value
+        entry["needs_review"] = False
+        entry["reason"] = "carried_forward_from_previous_draft"
 
 
 def _persist_draft(

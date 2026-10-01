@@ -78,6 +78,14 @@
             </form>
             {% endif %}
         {% endif %}
+
+        {% if draft.status == "failed" %}
+            <form method="post" action="{% url 'trigger_auto_apply' draft.job.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="queue">
+                <button type="submit">Retry</button>
+            </form>
+        {% endif %}
     </div>
     {% endfor %}
 

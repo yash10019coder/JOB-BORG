@@ -76,6 +76,21 @@ class TriggerAutoApplyTests(AutoApplyViewsTestCase):
         self.assertFalse(any("applied" in m.lower() for m in messages))
 
     @mock.patch("apps.web.views.draft_auto_apply")
+    def test_trigger_with_next_queue_redirects_to_queue_not_recommendations(self, mock_task):
+        """The auto-apply queue's "Retry" button posts next=queue so a
+        retriggered FAILED draft lands the user back in the queue instead
+        of bouncing them to recommendations."""
+        job = self._job()
+        client = self._client_for(self.alice)
+
+        response = client.post(
+            reverse("trigger_auto_apply", args=[job.id]), {"next": "queue"}, follow=True
+        )
+
+        mock_task.delay.assert_called_once_with(self.alice.id, job.id)
+        self.assertRedirects(response, reverse("auto_apply_queue"))
+
+    @mock.patch("apps.web.views.draft_auto_apply")
     def test_trigger_rejects_non_greenhouse_job(self, mock_task):
         job = self._job(ats="lever")
         client = self._client_for(self.alice)
@@ -153,6 +168,26 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
         self.assertEqual(response.status_code, 200)
         drafts_in_page = list(response.context["page_obj"])
         self.assertEqual(len(drafts_in_page), 3)
+
+    def test_queue_shows_retry_button_only_for_failed_drafts(self):
+        job1, job2 = self._job(), self._job()
+        self._draft(
+            self.alice, job1, status=AutoApplyDraft.Status.FAILED,
+            reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_FAILED,
+            error_message="boom",
+        )
+        self._draft(self.alice, job2, status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertContains(response, "Retry")
+        self.assertContains(
+            response, reverse("trigger_auto_apply", args=[job1.id])
+        )
+        self.assertNotContains(
+            response, reverse("trigger_auto_apply", args=[job2.id])
+        )
 
     def test_queue_distinguishes_needs_review_visually_and_textually(self):
         job = self._job()
@@ -749,6 +784,45 @@ class DraftReviewRegressionTests(AutoApplyViewsTestCase):
         self.assertNotContains(response, "Choose a valid answer for Custom question")
         draft.refresh_from_db()
         self.assertEqual(draft.answers["Custom question"]["value"], "Not in the sample")
+
+    def test_incomplete_combobox_options_render_as_suggestions(self):
+        # An incomplete COMBOBOX_SELECT sample must still surface its known
+        # options (e.g. a Yes/No employer question) as clickable suggestions
+        # rather than a blank text box the user has to guess into.
+        draft = self._custom_draft(
+            COMBOBOX_SELECT, options=("Yes", "No"), options_complete=False,
+        )
+        client = self._client_for(self.alice)
+        queue = client.get(reverse("auto_apply_queue"))
+        self.assertContains(queue, "<datalist")
+        self.assertContains(queue, '<option value="Yes">', html=False)
+        self.assertContains(queue, '<option value="No">', html=False)
+        draft.delete()
+
+    def test_edit_survives_a_label_with_an_embedded_newline(self):
+        # An employer-supplied question can legitimately span multiple
+        # lines. The queue template puts the label into a hidden <input>'s
+        # `value` attribute; per the HTML form-data-set algorithm, browsers
+        # normalize a lone "\n" there to "\r\n" on submit. `answers` is
+        # keyed with the original bare "\n", so the edit view must undo that
+        # normalization before looking the label up -- otherwise the field
+        # (and whatever the user typed) is silently dropped.
+        label = "Are you employed by our group,\nincluding its subsidiaries?"
+        draft = draft_for(
+            self.alice, self._job(),
+            form_client=FakeFormClient(FormSchema(fields=(
+                FormField(label, COMBOBOX_SELECT, True, options=("Yes", "No"), options_complete=False),
+            ))),
+            llm_client=FakeLLMClient(),
+        )
+        client = self._client_for(self.alice)
+        client.post(reverse("edit_auto_apply_draft", args=[draft.pk]), {
+            "label__0": label.replace("\n", "\r\n"),
+            "value__0": "No",
+        })
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers[label]["value"], "No")
+        self.assertFalse(draft.answers[label]["needs_review"])
 
     def test_option_labels_render_html_escaped(self):
         # Defense-in-depth regression test: Django's widget rendering already

@@ -157,19 +157,14 @@ class ImapEmailCodeProvider:
             # Convert since for IMAP SINCE query format (e.g. 04-Aug-2026)
             since_utc = since.astimezone(timezone.utc) if since.tzinfo else since.replace(tzinfo=timezone.utc)
             imap_since_str = (since_utc - timedelta(minutes=2)).strftime("%d-%b-%Y")
-            sender_filters = []
-            for sender in sender_allowlist:
-                sender = sender.strip()
-                if not sender or "\r" in sender or "\n" in sender:
-                    continue
-                quoted_sender = sender.replace("\\", "\\\\").replace('"', '\\"')
-                sender_filters.append(f'FROM "{quoted_sender}"')
-            if not sender_filters:
-                return CodeLookupResult(outcome=VerificationOutcome.CODE_TIMEOUT)
-            sender_query = sender_filters[-1]
-            for sender_filter in reversed(sender_filters[:-1]):
-                sender_query = f"OR {sender_filter} ({sender_query})"
-            search_query = f'(SINCE "{imap_since_str}" {sender_query})'
+            # Deliberately sender-independent (see extraction.py's
+            # evaluate_email_candidate docstring): a real verification email
+            # can arrive from any address an employer's own Greenhouse-hosted
+            # flow happens to use, not just a literal "greenhouse.io" sender.
+            # SINCE alone is the only server-side prefilter -- content-based
+            # matching (contextual phrasing + a code-shaped token) below is
+            # what actually identifies a genuine verification email.
+            search_query = f'(SINCE "{imap_since_str}")'
             evaluated_uids: set[bytes] = set()
 
             while time.monotonic() < deadline_monotonic:
@@ -177,14 +172,13 @@ class ImapEmailCodeProvider:
                     # CRITICAL (D2): Must execute NOOP before SEARCH to force server sync!
                     command(imap_client.noop)
 
-                    # FROM is a server-side prefilter; exact sender validation remains below.
                     search_status, data = command(imap_client.uid, "SEARCH", None, search_query)
                     if search_status == "OK" and data and data[0]:
                         msg_ids = [uid for uid in data[0].split() if uid not in evaluated_uids]
                         # Inspect at most 15 new matching messages per poll.
                         recent_ids = msg_ids[-15:]
 
-                        found_codes: list[str] = []
+                        found_codes: list[tuple[datetime, str]] = []
                         for msg_id in reversed(recent_ids):
                             fetch_status, msg_data = command(
                                 imap_client.uid, "FETCH", msg_id, "(INTERNALDATE BODY.PEEK[])"
@@ -205,27 +199,34 @@ class ImapEmailCodeProvider:
                                             msg_bytes, since, sender_allowlist, server_date
                                         )
                                         if code:
-                                            found_codes.append(code)
+                                            found_codes.append((server_date, code))
 
                         if found_codes:
-                            unique_codes = set(found_codes)
+                            unique_codes = {code for _date, code in found_codes}
                             if len(unique_codes) == 1:
-                                matched_code = found_codes[0]
-                                logger.info(
-                                    "Verification code found via IMAP for user_id=%s",
-                                    self.credential.user_id,
-                                )
-                                return CodeLookupResult(
-                                    outcome=VerificationOutcome.FOUND, code=matched_code
-                                )
+                                matched_code = found_codes[0][1]
                             else:
-                                logger.warning(
-                                    "Ambiguous verification codes found for user_id=%s",
+                                # Multiple distinct verification emails
+                                # landed in the same poll window (e.g. one
+                                # per application submitted around the same
+                                # time) -- sender-independent matching can no
+                                # longer disambiguate by sender, so the most
+                                # recently received one wins, per this
+                                # submission's own request that started
+                                # closest to it in time.
+                                matched_code = max(found_codes, key=lambda item: item[0])[1]
+                                logger.info(
+                                    "Multiple verification codes found for user_id=%s; "
+                                    "using the most recent.",
                                     self.credential.user_id,
                                 )
-                                return CodeLookupResult(
-                                    outcome=VerificationOutcome.CODE_AMBIGUOUS
-                                )
+                            logger.info(
+                                "Verification code found via IMAP for user_id=%s",
+                                self.credential.user_id,
+                            )
+                            return CodeLookupResult(
+                                outcome=VerificationOutcome.FOUND, code=matched_code
+                            )
 
                 except socket.timeout as exc:
                     logger.warning(

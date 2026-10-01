@@ -176,11 +176,19 @@ def evaluate_email_candidate(
     msg_bytes: bytes, since: datetime, sender_allowlist: list[str],
     server_date: datetime | None = None,
 ) -> str | None:
-    """Evaluate a raw email message against filters and return extracted code or None."""
-    subject, from_header, body_text, _ = parse_email_message(msg_bytes)
+    """Evaluate a raw email message against filters and return extracted code or None.
 
-    if not is_sender_allowed(from_header, sender_allowlist):
-        return None
+    Deliberately sender-independent: a real verification email can arrive
+    from any address the employer's own Greenhouse-hosted flow happens to
+    use, not just a literal "greenhouse.io" sender -- `sender_allowlist` is
+    accepted for signature compatibility but no longer gates matching.
+    `extract_code_from_text()` already requires contextual phrasing
+    (mentioning "greenhouse", "verification code", etc., per
+    `CONTEXTUAL_PHRASING_PATTERNS`) plus a code-shaped token near it, which
+    is what actually identifies a genuine verification email -- content, not
+    sender address.
+    """
+    subject, _from_header, body_text, _ = parse_email_message(msg_bytes)
 
     # The sender-controlled Date header cannot establish receipt time.
     if server_date is None or server_date.utcoffset() is None:

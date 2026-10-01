@@ -81,7 +81,16 @@ DEFAULT_ALLOWED_HOSTNAMES = frozenset(
 _TEXT_INPUT_TYPES = frozenset({"text", "email", "tel", "url", None, ""})
 
 _DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000
-_DEFAULT_CONFIRMATION_TIMEOUT_MS = 10_000
+# Verified against a real production failure (a debug screenshot captured at
+# the exact moment `_confirm_success()` gave up): a real Greenhouse board's
+# Submit button was still showing its own in-flight loading spinner -- the
+# real submission was genuinely still processing server-side, not stuck or
+# rejected -- when the old 10s budget ran out, misclassifying a slow-but-
+# real submission as `submission_unconfirmed`. 900s total task budget
+# (`_SUBMIT_HARD_KILL_SECONDS`) leaves ample room for a more realistic wait
+# here while still failing well short of the full task timeout for a
+# genuinely rejected/stuck form.
+_DEFAULT_CONFIRMATION_TIMEOUT_MS = 30_000
 _DEFAULT_CAPTCHA_TIMEOUT_S = 30.0
 _CONFIRMATION_POLL_INTERVAL_MS = 250
 _COMBOBOX_OPTION_TIMEOUT_MS = 5_000
@@ -100,6 +109,20 @@ _SETTLE_TIMEOUT_MS = 5_000
 # whatever this discovery-time scroll happened to load.
 _COMBOBOX_SCROLL_ITERATIONS = 5
 _COMBOBOX_SCROLL_WAIT_MS = 500
+
+# Field types with a fixed, discrete option set: an optional field of one of
+# these left blank has nothing valid to select (unlike TEXT/TEXTAREA, where
+# filling "" is a harmless no-op), so `_fill_answers()` skips it entirely
+# rather than attempting a fill that can only fail. See its call site.
+_SKIPPABLE_WHEN_OPTIONAL_AND_BLANK = (FILE, SINGLE_SELECT, COMBOBOX_SELECT, MULTI_SELECT, CHECKBOX_GROUP)
+
+
+def _is_blank_answer(value) -> bool:
+    """A list/tuple value (MULTI_SELECT/CHECKBOX_GROUP) is blank when every
+    item is blank -- mirrors `apps.web.views._is_blank_answer_value`."""
+    if isinstance(value, (list, tuple)):
+        return not any(str(item or "").strip() for item in value)
+    return not str(value or "").strip()
 
 # Phrasing Greenhouse (and similar ATS confirmation views) use to announce a
 # successful submission. Verified against a live Greenhouse board
@@ -400,6 +423,14 @@ class GreenhouseFormClient:
                 GreenhouseFormChallenged,
                 GreenhouseFormSchemaMismatch,
                 GreenhouseFormVerificationFailed,
+                # `_confirm_success()`'s own post-verification-code path
+                # raises this directly (no debug-artifact capture -- the
+                # OTP may still be visible in the verification page's
+                # fields). It must propagate untouched here too, not fall
+                # through to the generic `except Exception` below, which
+                # would route it through `_raise_with_debug_artifacts()`
+                # and screenshot/a11y-dump the still-live code.
+                GreenhouseFormSubmissionUnconfirmed,
                 ImproperlyConfigured,
             ):
                 raise
@@ -590,16 +621,22 @@ class GreenhouseFormClient:
                     continue
                 seen_control_ids.add(control_id)
             field_type = self._classify_field_type(control)
+            required = self._is_required(control)
             if field_type == FILE:
                 # Greenhouse's file-upload widget labels the real <input
                 # type=file> with generic, indistinguishable text (both
                 # Resume/CV and Cover Letter render a visually-hidden
                 # <label>Attach</label>) -- the human-meaningful name lives
-                # on the surrounding group instead. Prefer it when present.
-                label_text = self._group_label_for(control) or label_text
-            required = self._is_required(control)
-            options = self._extract_options(page, control, field_type) if interactive else ()
-            options_complete = False
+                # on the surrounding group instead. Prefer it when present,
+                # and prefer the group's own required signal too (see
+                # `_group_label_and_required_for`'s docstring).
+                group_label, group_required = self._group_label_and_required_for(control)
+                label_text = group_label or label_text
+                if group_required is not None:
+                    required = group_required
+            options, options_complete = (
+                self._extract_options(page, control, field_type) if interactive else ((), False)
+            )
             if interactive and field_type == COMBOBOX_SELECT:
                 full_options = self._maybe_full_education_options(job_url, control_id)
                 if full_options is not None:
@@ -723,11 +760,10 @@ class GreenhouseFormClient:
                 seen_control_ids.add(control_id)
             field_type = GreenhouseFormClient._classify_field_type(control)
             required = GreenhouseFormClient._is_required(control)
-            options = (
+            options, options_complete = (
                 GreenhouseFormClient._extract_options(page, control, field_type)
-                if interactive else ()
+                if interactive else ((), False)
             )
-            options_complete = False
             if interactive and field_type == COMBOBOX_SELECT:
                 full_options = self._maybe_full_education_options(job_url, control_id)
                 if full_options is not None:
@@ -783,17 +819,42 @@ class GreenhouseFormClient:
         (visually-hidden) `<label>`. Returns `None` if no such group/label
         is found, leaving the caller's original label text untouched.
         """
+        text, _ = GreenhouseFormClient._group_label_and_required_for(control)
+        return text
+
+    @staticmethod
+    def _group_label_and_required_for(control):
+        """Resolve both the group label text and its required-ness for a
+        FILE control wrapped in Greenhouse's `role="group"` upload widget
+        (see `_group_label_for`).
+
+        Required-ness is read from the group label's *raw* text (the
+        required-asterisk span, before `_clean_label` strips it for
+        display) rather than the underlying `<input type=file>`'s own
+        `required`/`aria-required` attribute: verified against production
+        failures, that attribute does not reliably distinguish Resume/CV
+        from Cover Letter -- both render as visually-hidden, otherwise
+        identical inputs, and in some Greenhouse renders it is present (or
+        absent) on both regardless of which one is actually mandatory. The
+        group's visible label -- what a human filling the form actually
+        sees -- is the more trustworthy signal for *this specific widget*.
+
+        Returns `(label_text, required)`, both `None` when no such
+        group/label is found -- the caller falls back to its own label text
+        and to `_is_required(control)` exactly as before this existed.
+        """
         group = control.locator("xpath=ancestor::*[@role='group'][@aria-labelledby][1]")
         if group.count() == 0:
-            return None
+            return None, None
         labelledby_id = group.first.get_attribute("aria-labelledby")
         if not labelledby_id:
-            return None
+            return None, None
         label_el = control.page.locator(f'[id="{labelledby_id}"]')
         if label_el.count() == 0:
-            return None
-        text = GreenhouseFormClient._clean_label(label_el.first.text_content() or "")
-        return text or None
+            return None, None
+        raw_text = label_el.first.text_content() or ""
+        text = GreenhouseFormClient._clean_label(raw_text)
+        return (text or None), raw_text.strip().endswith("*")
 
     @staticmethod
     def _checkbox_group_field(page, control, seen_control_ids: set[str]) -> "FormField | None":
@@ -881,10 +942,25 @@ class GreenhouseFormClient:
         return control.get_attribute("required") is not None
 
     @staticmethod
-    def _extract_options(page, control, field_type: str) -> tuple[str, ...]:
+    def _extract_options(page, control, field_type: str) -> tuple[tuple[str, ...], bool]:
+        """Returns `(options, complete)`. `complete` is `True` when the
+        returned tuple is known to be the field's *entire* option set --
+        always true for a native `<select>` (every `<option>` is already in
+        the DOM, nothing lazy-loaded) -- and, for a `COMBOBOX_SELECT`, only
+        when the scroll loop below converged (stopped growing) before
+        hitting `_COMBOBOX_SCROLL_ITERATIONS`, a strong signal nothing more
+        was left to load rather than just having run out of scroll budget.
+
+        Verified against a real production failure: a small, genuinely
+        complete 3-option salary-range dropdown was unconditionally flagged
+        incomplete (the caller's old hardcoded `options_complete = False`),
+        which let `_enforce_option_constraint` wave through a free-text
+        `ExplicitAnswer` for that question straight into a submission that
+        could only ever fail ("No matching option ... found").
+        """
         if field_type in (SINGLE_SELECT, MULTI_SELECT):
             raw_options = control.locator("option").all_text_contents()
-            return tuple(opt.strip() for opt in raw_options if opt.strip())
+            return tuple(opt.strip() for opt in raw_options if opt.strip()), True
         if field_type == COMBOBOX_SELECT:
             # Best-effort only: a click-driven listbox (react-select and
             # similar) may show a default option set on open (small fixed
@@ -927,20 +1003,39 @@ class GreenhouseFormClient:
                 # Bounded and best-effort: see _COMBOBOX_SCROLL_ITERATIONS.
                 options_locator = listbox.first.get_by_role("option")
                 previous_count = options_locator.count()
+                converged = False
+                stall_count = 0
                 for _ in range(_COMBOBOX_SCROLL_ITERATIONS):
                     options_locator.last.scroll_into_view_if_needed()
                     page.wait_for_timeout(_COMBOBOX_SCROLL_WAIT_MS)
                     current_count = options_locator.count()
                     if current_count <= previous_count:
-                        break
-                    previous_count = current_count
+                        # Two consecutive non-growing scrolls, not one --
+                        # a single stall can be a one-off timing hiccup (a
+                        # page whose fetch just hasn't resolved yet by the
+                        # time this iteration's wait elapsed) rather than
+                        # genuine exhaustion, and wrongly declaring
+                        # completeness here would let a later real answer
+                        # get rejected by _enforce_option_constraint instead
+                        # of just staying unenforced. A single stall still
+                        # ends the scroll loop (no more growth to justify
+                        # further iterations), it just isn't trusted alone
+                        # as proof there's nothing left.
+                        stall_count += 1
+                        if stall_count >= 2:
+                            converged = True
+                            break
+                    else:
+                        stall_count = 0
+                        previous_count = current_count
                 raw_options = listbox.first.get_by_role("option").all_text_contents()
             except Exception:  # noqa: BLE001 -- no listbox on bare open is normal, not fatal
                 raw_options = []
+                converged = False
             finally:
                 page.keyboard.press("Escape")
-            return tuple(opt.strip() for opt in raw_options if opt.strip())
-        return ()
+            return tuple(opt.strip() for opt in raw_options if opt.strip()), converged
+        return (), False
 
     def _maybe_full_education_options(
         self, job_url: str, control_id: str
@@ -986,15 +1081,67 @@ class GreenhouseFormClient:
                 # confirmed exists.
                 continue
 
-            if form_field.field_type == FILE and not form_field.required and not value:
-                logger.debug("Skipping optional file field %r with no value.", label)
+            if (
+                form_field.field_type in _SKIPPABLE_WHEN_OPTIONAL_AND_BLANK
+                and not form_field.required
+                and _is_blank_answer(value)
+            ):
+                # An optional choice-type field left blank (e.g. an LLM
+                # inference failure that resolved to "", or a needs_review
+                # placeholder the user never filled in) has nothing to
+                # select -- attempting to fill it always fails downstream
+                # (`_fill_combobox`/`select_option` raise "No matching
+                # option for '' found...", `_validated_file_path` raises
+                # "File '' ... does not exist"). Verified against production
+                # failures for both FILE (Cover Letter) and COMBOBOX_SELECT
+                # (a "Location (City)" question whose LLM call failed).
+                # Skipping leaves the field at its default/unanswered state,
+                # exactly like never rendering an answer for it at all.
+                logger.debug(
+                    "Skipping optional %s field %r with no value.",
+                    form_field.field_type, label,
+                )
+                continue
+
+            if not form_field.is_supported and not form_field.required:
+                # `FormField`'s own docstring promises this: an unrecognized
+                # native input type (e.g. "number", "date") is only fatal
+                # when required -- discovery already raises
+                # GreenhouseFormSchemaMismatch for a *required* one, so
+                # reaching here means it's optional, and there is no fill
+                # strategy for it below regardless of whether it has a
+                # value. Verified against a real production failure (a
+                # non-required "End date year" `<input type=number>`
+                # crashed with "No fill strategy for field ... of type
+                # 'number'" despite having a perfectly fine answer) --
+                # skipping leaves it exactly as unanswered as never
+                # rendering an answer for it at all.
+                logger.debug(
+                    "Skipping unsupported optional field %r of type %r.",
+                    label, form_field.field_type,
+                )
                 continue
 
             control = self._locate_control(page, form_field, label)
 
             if form_field.field_type in (TEXT, TEXTAREA):
-                control.fill(str(value))
-                expect(control).to_have_value(str(value))
+                # The DOM value a browser actually stores after `.fill()`
+                # can differ from the literal answer string per the HTML
+                # value-sanitization algorithm, so a verbatim comparison
+                # below fails even when the fill itself succeeded. Verified
+                # against a real production failure (a Canonical draft
+                # whose LLM-drafted multi-paragraph answer contained
+                # "\r\n\r\n") -- `TEXTAREA` converts CR/CRLF to bare LF;
+                # single-line `TEXT` inputs go further and strip newlines
+                # entirely (they have nowhere to put them), so re-collapsing
+                # CRLF to LF there would still leave a bare "\n" the DOM
+                # value never has.
+                if form_field.field_type == TEXTAREA:
+                    normalized_value = str(value).replace("\r\n", "\n").replace("\r", "\n")
+                else:
+                    normalized_value = str(value).replace("\r\n", "").replace("\r", "").replace("\n", "")
+                control.fill(normalized_value)
+                expect(control).to_have_value(normalized_value)
             elif form_field.field_type == SINGLE_SELECT:
                 try:
                     control.select_option(label=str(value))
@@ -1022,8 +1169,38 @@ class GreenhouseFormClient:
                     )
             elif form_field.field_type == FILE:
                 control.set_input_files(str(self._validated_file_path(value, label)))
+                # Verified against a real production failure: Greenhouse's
+                # upload widget shows the filename immediately (the
+                # synchronous DOM `change` event `set_input_files()`
+                # triggers), but separately uploads the file to its own
+                # backend asynchronously -- clicking Submit before that
+                # completes left a real board's page showing "Resume/CV is
+                # required." despite the filename chip already being
+                # visible, and the submission never went anywhere (no
+                # navigation, no success signal, ever). Same best-effort,
+                # bounded pattern as `_goto_and_settle()`: wait for the
+                # upload's network activity to quiesce, but never hang the
+                # whole submission on a page that never truly goes idle.
+                try:
+                    page.wait_for_load_state("networkidle", timeout=_SETTLE_TIMEOUT_MS)
+                except Exception:  # noqa: BLE001 -- best-effort settle, not a hard requirement
+                    pass
             elif form_field.field_type == COMBOBOX_SELECT:
-                self._fill_combobox(page, control, str(value), label)
+                if isinstance(value, (list, tuple)):
+                    # A COMBOBOX_SELECT is normally single-value, but a
+                    # "select up to N" tag-style combobox widget genuinely
+                    # accepts multiple picks through the same type-and-click
+                    # interaction repeated once per value -- verified
+                    # against a real production failure where a list answer
+                    # (correctly validated by _enforce_option_constraint,
+                    # which already supports list-shaped answers for any
+                    # option-bearing field) reached here and got mangled
+                    # into the single literal string "['Java', 'Go
+                    # (Golang)']" by `str(value)`, matching no real option.
+                    for item in value:
+                        self._fill_combobox(page, control, str(item), label, control_id=form_field.control_id)
+                else:
+                    self._fill_combobox(page, control, str(value), label, control_id=form_field.control_id)
             elif form_field.field_type == CHECKBOX_GROUP:
                 self._fill_checkbox_group(page, control, value, label)
             elif form_field.field_type == CHECKBOX_ACKNOWLEDGEMENT:
@@ -1057,7 +1234,7 @@ class GreenhouseFormClient:
                 return control.first
         return page.get_by_label(label, exact=True).first
 
-    def _fill_combobox(self, page, control, value: str, label: str) -> None:
+    def _fill_combobox(self, page, control, value: str, label: str, *, control_id: str | None = None) -> None:
         """Fill a JS-driven combobox widget (react-select and similar):
         click to open it, type the answer to filter its listbox, then click
         the resulting matching option. Verified live against a real
@@ -1066,6 +1243,19 @@ class GreenhouseFormClient:
         option, and that clicking it -- not `.fill()` alone -- is what
         actually registers the selection (the control's own `.value` stays
         empty afterward; the widget tracks the choice elsewhere).
+
+        School/Degree/Discipline (education-API-backed, see
+        `education_api.py`'s module docstring) are a *different* widget
+        shape that doesn't filter live as the user types -- it only
+        paginates via a real scroll interaction, mirroring discovery's own
+        `_extract_options` scroll loop -- confirmed against a real
+        production failure where a value verbatim-equal to one of
+        discovery's own fetched education-API options (a "Discipline"
+        answer) still raised "No matching option found" because typing
+        never filtered that widget down to it. Typing is still tried first
+        (cheap, and correct for the react-select-style fields), falling
+        back to scrolling only for a field this module's control_id
+        pattern recognizes as education-API-backed.
         """
         control.click()
         control.fill(value)
@@ -1073,10 +1263,42 @@ class GreenhouseFormClient:
         try:
             options.first.wait_for(state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS)
         except Exception as exc:  # noqa: BLE001 -- convert to typed submission failure
-            raise GreenhouseFormSubmissionFailed(
-                f"No matching option for {value!r} found in combobox field {label!r}."
-            ) from exc
+            match = None
+            if education_type_for_control_id(control_id) is not None:
+                match = self._scroll_for_combobox_option(page, value)
+            if match is None:
+                raise GreenhouseFormSubmissionFailed(
+                    f"No matching option for {value!r} found in combobox field {label!r}."
+                ) from exc
+            match.click()
+            return
         self._best_option_match(options, value).click()
+
+    @staticmethod
+    def _scroll_for_combobox_option(page, value: str):
+        """Scroll an education-API-backed combobox's listbox to find
+        `value`, for the School/Degree/Discipline widget shape that loads
+        more options via real scroll interaction rather than live typing
+        (see `_fill_combobox`'s docstring). Returns the matching option
+        locator, or `None` if `_COMBOBOX_SCROLL_ITERATIONS` is exhausted
+        without finding it.
+        """
+        listbox = page.get_by_role("listbox")
+        try:
+            listbox.first.get_by_role("option").first.wait_for(
+                state="visible", timeout=_COMBOBOX_OPTION_TIMEOUT_MS
+            )
+        except Exception:  # noqa: BLE001 -- no listbox open at all; nothing to scroll
+            return None
+        options_locator = listbox.first.get_by_role("option")
+        for _ in range(_COMBOBOX_SCROLL_ITERATIONS):
+            match = page.get_by_role("option", name=value, exact=False)
+            if match.count() > 0:
+                return GreenhouseFormClient._best_option_match(match, value)
+            options_locator.last.scroll_into_view_if_needed()
+            page.wait_for_timeout(_COMBOBOX_SCROLL_WAIT_MS)
+        match = page.get_by_role("option", name=value, exact=False)
+        return GreenhouseFormClient._best_option_match(match, value) if match.count() > 0 else None
 
     @staticmethod
     def _best_option_match(options, value: str):
@@ -1304,6 +1526,14 @@ class GreenhouseFormClient:
             if result is not None:
                 return result
             if self._verification_interstitial_detected(page, schema_now):
+                # Safe to capture here (unlike the post-code path below,
+                # which deliberately suppresses capture so a live OTP is
+                # never written to disk): no code has been looked up or
+                # typed yet, so this screenshot/a11y-tree can only ever show
+                # the bare interstitial -- exactly what's needed to identify
+                # the real verify/confirm button's text and shape on a given
+                # employer's board without any OTP-exposure risk.
+                self._capture_debug_artifacts(page)
                 if provider is None:
                     self._raise_with_debug_artifacts(
                         GreenhouseFormVerificationFailed,
@@ -1368,16 +1598,31 @@ class GreenhouseFormClient:
                             "Deadline expired while entering the verification code",
                             outcome=VerificationOutcome.CODE_TIMEOUT,
                         )
-                    submit_button = page.locator(
-                        "button[type='submit'], input[type='submit'], button:has-text('Submit'), button:has-text('Verify')"
-                    ).first
+                    submit_button = self._find_verification_submit_button(page)
                     click_timeout = self._verification_timeout_ms(deadline)
                     submit_button.click(timeout=click_timeout)
                     post_code_deadline = min(
                         deadline, time.monotonic() + self.confirmation_timeout_ms / 1000
                     )
                     while True:
-                        post_code_check = self._check_success_signal(page, before)
+                        try:
+                            post_code_check = self._check_success_signal(page, before)
+                        except Exception as check_exc:  # noqa: BLE001
+                            # A destroyed execution context almost always
+                            # means the page just navigated -- likely TO the
+                            # real success page, right as this check read
+                            # from the outgoing document. Verified against a
+                            # real production failure: this previously
+                            # propagated straight to the outer handler as a
+                            # hard "Failed while submitting verification
+                            # code", discarding what was probably a genuine
+                            # success. Treat it as "keep polling" instead --
+                            # the next iteration reads the settled (likely
+                            # new, successful) page -- rather than an
+                            # immediate failure.
+                            if "execution context was destroyed" not in str(check_exc).lower():
+                                raise
+                            post_code_check = None
                         if post_code_check is not None:
                             return post_code_check
                         remaining = post_code_deadline - time.monotonic()
@@ -1387,6 +1632,20 @@ class GreenhouseFormClient:
                 except GreenhouseFormVerificationFailed:
                     raise
                 except Exception as exc:
+                    # Safe to log: every exception on this path (a length
+                    # mismatch from _fill_verification_code, a Playwright
+                    # actionability/timeout error from the click) describes
+                    # locator/shape state, never the code value itself --
+                    # unlike a screenshot, this can't expose a live OTP.
+                    # Without it, every real failure here collapsed into
+                    # the single generic "Failed while submitting
+                    # verification code" outer message, permanently hiding
+                    # e.g. a code-length-vs-box-count mismatch from ever
+                    # being diagnosed.
+                    logger.warning(
+                        "Verification code submission raised %s: %s",
+                        type(exc).__name__, exc,
+                    )
                     if time.monotonic() >= deadline:
                         raise GreenhouseFormVerificationFailed(
                             "Deadline expired while submitting verification code",
@@ -1398,10 +1657,56 @@ class GreenhouseFormClient:
                         outcome=VerificationOutcome.CODE_REJECTED,
                     ) from exc
 
-                # Still on verification page: post-code path, raise WITHOUT debug artifacts
-                raise GreenhouseFormVerificationFailed(
-                    "Verification code entered but application success not confirmed",
-                    outcome=VerificationOutcome.CODE_REJECTED,
+                # Still on verification page: post-code path, raise WITHOUT debug artifacts.
+                #
+                # Verified against a real production failure (draft #266):
+                # this previously raised GreenhouseFormVerificationFailed
+                # with outcome=CODE_REJECTED, which `_reason_code_for`
+                # (apps/auto_apply/tasks.py) maps to
+                # ReasonCode.VERIFICATION_CODE_REJECTED -- a code *we know*
+                # was rejected, safe to blindly retry. But reaching this
+                # line means the code was actually typed and submitted
+                # (Greenhouse accepted the Verify click); we only failed to
+                # *observe* a success signal afterward in time. The
+                # employer may already have the real application -- exactly
+                # the ambiguous situation `GreenhouseFormSubmissionUnconfirmed`
+                # exists for (see its docstring and the identical "No
+                # post-submit success signal found" case above, pre-
+                # verification). Using the wrong exception type here let
+                # `trigger_auto_apply`'s SUBMISSION_UNCONFIRMED duplicate-
+                # application guard (apps/web/views.py) be silently
+                # bypassed -- a Retry could have submitted a second real
+                # application to the same employer.
+                # Diagnostic only, never a debug-artifact file: log the
+                # page's *rendered text* and URL so a repeat of this exact
+                # failure (3x in a row on one real board as of this fix) is
+                # finally debuggable instead of a black box.
+                # `Locator.inner_text()` reflects only rendered text nodes,
+                # never a form control's `value` -- confirmed safe, this
+                # cannot include the just-typed OTP, unlike a screenshot or
+                # accessibility-tree dump (which is why those stay
+                # suppressed on this path). If `_CONFIRMATION_TEXT_PATTERNS`
+                # simply doesn't match this employer's real confirmation
+                # copy, this log line is what finally proves it.
+                try:
+                    full_body = page.locator("body").inner_text()
+                    # Greenhouse keeps the static job title/description at
+                    # the TOP of this same page through the whole flow
+                    # (form, verification, and success state all render
+                    # below it) -- a [:2000] head slice (the first attempt
+                    # at this diagnostic) only ever captured that unchanging
+                    # boilerplate, never the actual dynamic state. The tail
+                    # is where the live application-flow content sits.
+                    logger.warning(
+                        "Post-verification-code success check exhausted its budget at "
+                        "url=%s. Rendered body text length=%d. Last 3000 chars (no form "
+                        "values, safe to log): %r",
+                        page.url, len(full_body), full_body[-3000:],
+                    )
+                except Exception:  # noqa: BLE001 -- best-effort diagnostic, never fatal
+                    pass
+                raise GreenhouseFormSubmissionUnconfirmed(
+                    "Verification code entered but application success not confirmed"
                 )
 
             remaining = classification_deadline - time.monotonic()
@@ -1463,6 +1768,58 @@ class GreenhouseFormClient:
                 return SubmissionResult(success=True, confirmation_text=phrase)
         return None
 
+    @staticmethod
+    def _find_verification_submit_button(page):
+        """Locate the verification interstitial's own submit control,
+        scoped to its enclosing `<form>` rather than searched for globally.
+
+        Real production failure (Canonical): that employer's interstitial
+        button is literally labeled "Submit application" -- the exact same
+        text as the original, now-stale application-form submit button
+        still present elsewhere in the DOM. Preferring text="Verify" (the
+        earlier fix for a *different* employer) does nothing here, since
+        neither button says "Verify"; a page-wide "Submit" search is
+        ambiguous between two identically-labeled buttons, and `.first`
+        silently landed on the stale, inert one -- the code was typed and a
+        click happened, but against a dead button, so the interstitial sat
+        asking for the same code forever with no error and no progress.
+
+        Scoping to the code input's own enclosing `<form>` disambiguates
+        correctly regardless of button text, since Greenhouse always
+        renders the interstitial as its own separate `<form>`.
+        """
+        # Best-effort: any unexpected shape here (including a test double
+        # that doesn't model a real Playwright locator chain) falls through
+        # to the unscoped heuristic below rather than raising -- scoping is
+        # a precision improvement, not something submission should ever
+        # hard-fail on.
+        try:
+            code_input = page.locator(_VERIFICATION_CODE_INPUT_SELECTOR).first
+            if code_input.count() == 0:
+                code_input = page.locator(_VERIFICATION_CODE_BOX_SELECTOR).first
+            if code_input.count() > 0:
+                form_scope = code_input.locator("xpath=ancestor::form[1]").first
+                if form_scope.count() > 0:
+                    verify_in_form = form_scope.locator("button:has-text('Verify')").first
+                    if verify_in_form.count() > 0:
+                        return verify_in_form
+                    submit_in_form = form_scope.locator(
+                        "button[type='submit'], input[type='submit'], button:has-text('Submit')"
+                    ).first
+                    if submit_in_form.count() > 0:
+                        return submit_in_form
+        except Exception:  # noqa: BLE001 -- fall through to the unscoped heuristic
+            pass
+
+        # No enclosing <form> found (interstitial isn't form-wrapped) --
+        # fall back to the old page-wide heuristic rather than raising.
+        verify_button = page.locator("button:has-text('Verify')").first
+        if verify_button.count() > 0:
+            return verify_button
+        return page.locator(
+            "button[type='submit'], input[type='submit'], button:has-text('Submit')"
+        ).first
+
     def _verification_timeout_ms(self, deadline: float) -> float:
         remaining_ms = (deadline - time.monotonic()) * 1000
         if remaining_ms <= 0:
@@ -1500,8 +1857,21 @@ class GreenhouseFormClient:
         box_count = boxes.count()
         if box_count >= 2:
             if box_count == len(code):
+                # Real per-character keystrokes (press_sequentially), not
+                # .fill(): verified against a real production failure on
+                # Greenhouse's own native 8-box verification widget (the
+                # same shape on three unrelated employer boards) -- the
+                # "Submit application" button stays `disabled` until every
+                # box has a value, and .fill() sets each box's value
+                # directly without dispatching the keydown/keyup events an
+                # OTP widget's auto-advance/completion-detection logic
+                # listens for, so the button never actually enabled and the
+                # eventual click either hit a disabled control or landed
+                # before the framework's state caught up.
                 for i, char in enumerate(code):
-                    boxes.nth(i).fill(char, timeout=self._verification_timeout_ms(deadline_monotonic))
+                    boxes.nth(i).press_sequentially(
+                        char, timeout=self._verification_timeout_ms(deadline_monotonic)
+                    )
                 return
             raise RuntimeError(
                 f"Verification code length ({len(code)}) does not match the "

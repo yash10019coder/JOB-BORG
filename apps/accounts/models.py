@@ -87,6 +87,14 @@ class Profile(models.Model):
     headline = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="")
     linkedin_url = models.URLField(max_length=255, blank=True, default="")
+    # Standard-field sources for auto-apply drafting (see
+    # apps.auto_apply.services.drafting._STANDARD_FIELD_PATTERNS), same role
+    # as linkedin_url above -- collected once here instead of the LLM
+    # guessing (or leaving blank) every "GitHub"/"Website"/"Current Company"
+    # question on every application.
+    github_url = models.URLField(max_length=255, blank=True, default="")
+    portfolio_url = models.URLField(max_length=255, blank=True, default="")
+    current_employer = models.CharField(max_length=255, blank=True, default="")
 
     # Resume -- standard-field source for auto-apply drafting (see
     # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md U1).

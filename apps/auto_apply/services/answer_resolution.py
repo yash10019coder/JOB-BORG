@@ -33,6 +33,13 @@ from apps.auto_apply.models import ExplicitAnswer
 # outcomes; kept here so callers/tests can reference it by name.
 EXPLICIT_ANSWER_REASON = "explicit_answer"
 
+# An answer sourced from a `Profile` field collected for a different purpose
+# (matching, not this exact question's wording) -- see `_profile_derived_answer`.
+# Unlike EXPLICIT_ANSWER_REASON, always marked `needs_review=True`: the value
+# is real and usable but was never confirmed by the user as *this* question's
+# answer, so it surfaces in the review queue rather than being sent silently.
+PROFILE_DERIVED_REASON = "profile_derived"
+
 # Which ExplicitAnswer.Category values satisfy a question classified into a
 # given QuestionCategory (categories.py). Only categories with a real
 # analog in ExplicitAnswer.Category are mapped here -- QuestionCategory.
@@ -85,6 +92,23 @@ def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ..
     return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
 
 
+def _profile_derived_answer(category: str, profile) -> str | None:
+    """A direct value derivable from `Profile` data for a hard-excluded
+    category with no `ExplicitAnswer` saved -- currently just salary
+    expectation from `Profile.min_salary` (collected at signup for
+    matching, per `apps.matching.scoring`, but otherwise unused here).
+
+    Returns `None` when nothing on the profile answers this category, so
+    the question falls through to its normal blank/needs_review handling
+    exactly as before this existed.
+    """
+    if category == QuestionCategory.SALARY_EXPECTATION:
+        min_salary = getattr(profile, "min_salary", None)
+        if min_salary:
+            return str(min_salary)
+    return None
+
+
 def resolve_field_answers(
     user,
     questions: list[Question],
@@ -92,14 +116,18 @@ def resolve_field_answers(
     profile,
     llm_client: AnswerInferenceClient,
 ) -> list[ResolvedAnswer]:
-    """Resolve every question, preferring a saved `ExplicitAnswer` over LLM
-    inference.
+    """Resolve every question, preferring a saved `ExplicitAnswer`, then a
+    directly-derivable `Profile` field, over LLM inference.
 
-    For each question: classify it, and if the classified category maps
-    onto an `ExplicitAnswer.Category` the user has a saved answer for, use
-    it directly (`needs_review=False`; the LLM client is never called for
-    that question). Every remaining question is handed to
-    `llm.base.resolve_answers()` as a single batch.
+    For each question: classify it. If the classified category maps onto an
+    `ExplicitAnswer.Category` the user has a saved answer for, use it
+    directly (`needs_review=False`; the LLM client is never called for that
+    question). Otherwise, if `_profile_derived_answer` can answer it from
+    `Profile` data collected for another purpose (e.g. salary expectation
+    from `Profile.min_salary`), use that instead (`needs_review=True`, since
+    the value was never confirmed as *this* question's answer). Every
+    remaining question is handed to `llm.base.resolve_answers()` as a single
+    batch.
 
     Returns one `ResolvedAnswer` per input `question`, in the same order.
     """
@@ -129,6 +157,20 @@ def resolve_field_answers(
                     answer=explicit.answer_text,
                     needs_review=False,
                     reason=EXPLICIT_ANSWER_REASON,
+                ),
+                question,
+            )
+            continue
+
+        profile_answer = _profile_derived_answer(category, profile)
+        if profile_answer is not None:
+            resolved[question.id] = _enforce_option_constraint(
+                ResolvedAnswer(
+                    question_id=question.id,
+                    category=category,
+                    answer=profile_answer,
+                    needs_review=True,
+                    reason=PROFILE_DERIVED_REASON,
                 ),
                 question,
             )
@@ -163,8 +205,13 @@ def _enforce_option_constraint(answer: ResolvedAnswer, question: Question) -> Re
     (`question.options` empty) are untouched. A list-shaped answer (multiple
     simultaneous selections for MULTI_SELECT/CHECKBOX_GROUP) is valid only
     when every item in the list is a real option.
+
+    Skipped entirely when `question.options_enforced` is `False` (an
+    incomplete COMBOBOX_SELECT sample, per `Question`'s docstring) -- those
+    `options` are shown to the LLM as a prompt hint only, not a closed set
+    safe to reject an out-of-sample answer against.
     """
-    if not question.options or not answer.answer:
+    if not question.options or not answer.answer or not question.options_enforced:
         return answer
     if isinstance(answer.answer, (list, tuple)):
         if all(value in question.options for value in answer.answer):

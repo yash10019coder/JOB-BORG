@@ -9,7 +9,9 @@ from django.test import TestCase
 
 from apps.auto_apply.llm.base import Question, QuestionAnswer, ResolutionReason
 from apps.auto_apply.models import ExplicitAnswer
-from apps.auto_apply.services.answer_resolution import resolve_field_answers
+from apps.auto_apply.services.answer_resolution import (
+    PROFILE_DERIVED_REASON, resolve_field_answers,
+)
 
 User = get_user_model()
 
@@ -161,6 +163,49 @@ class OptionConstraintEnforcementTests(TestCase):
 
         self.assertEqual(resolved.answer, "Five years of backend engineering.")
         self.assertFalse(resolved.needs_review)
+
+    def test_options_enforced_false_lets_an_out_of_sample_answer_through(self):
+        # An incomplete COMBOBOX_SELECT sample (options_enforced=False, per
+        # drafting.py) is a hint for the LLM, not a closed set -- a real
+        # answer the sample simply didn't happen to include must not be
+        # rejected the way test_answer_not_in_options_is_treated_as_
+        # unanswerable's fully-enforced case is.
+        self.profile.resume_text += " Holds a Master's degree in Computer Science."
+        self.profile.save()
+        question = Question(
+            id="q1", text="What is your highest level of education?",
+            field_type="combobox_select", options=("High School", "Bachelor's"),
+            options_enforced=False,
+        )
+        answer = QuestionAnswer(
+            question_id="q1", answer="Master's",
+            evidence=["Master's degree"], self_reported_confidence=0.9,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertEqual(resolved.answer, "Master's")
+        self.assertFalse(resolved.needs_review)
+
+    def test_options_enforced_true_still_rejects_out_of_sample_by_default(self):
+        # Default (options_enforced=True, unset) preserves the existing
+        # exact-match gate -- this is the same scenario as
+        # test_answer_not_in_options_is_treated_as_unanswerable, confirming
+        # the new field doesn't weaken enforcement when not explicitly opted
+        # out of.
+        question = Question(
+            id="q1", text="What is your highest level of education?",
+            field_type="single_select", options=("High School", "Bachelor's"),
+        )
+        answer = QuestionAnswer(
+            question_id="q1", answer="Master's",
+            evidence=["Master's degree"], self_reported_confidence=0.9,
+        )
+
+        resolved = self._resolve(question, answer)
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
 
     def test_case_sensitive_mismatch_is_rejected(self):
         question = Question(
@@ -387,3 +432,81 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
                 self.assertTrue(resolved.needs_review)
                 self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
                 self.assertEqual(client.calls, [])
+
+
+class ProfileDerivedSalaryFallbackTests(TestCase):
+    """`SALARY_EXPECTATION` is a hard-excluded category (never sent to the
+    LLM); with no saved `ExplicitAnswer`, a salary question used to always
+    come back blank/needs_review even though `Profile.min_salary` was
+    already collected at signup for matching. It should be used as a
+    fallback instead -- surfaced for review rather than trusted outright,
+    since it was never confirmed as *this* question's exact answer."""
+
+    SALARY_Q = "What is your desired salary?"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="grace", password="pw", email="grace@example.com"
+        )
+        self.profile = self.user.profile
+        self.profile.resume_text = "Grace."
+
+    def _resolve(self, text=SALARY_Q, field_type="text", options=None):
+        question = Question(id=text, text=text, field_type=field_type, options=options)
+        client = FakeLLMClient()
+        resolved = resolve_field_answers(
+            self.user, [question], self.profile.resume_text, self.profile, client
+        )[0]
+        return resolved, client
+
+    def test_min_salary_answers_a_salary_question_when_no_explicit_answer(self):
+        self.profile.min_salary = 150000
+        self.profile.save()
+
+        resolved, client = self._resolve()
+
+        self.assertEqual(resolved.answer, "150000")
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, PROFILE_DERIVED_REASON)
+        self.assertEqual(client.calls, [])  # never reaches the LLM either
+
+    def test_explicit_answer_still_wins_over_profile_min_salary(self):
+        self.profile.min_salary = 150000
+        self.profile.save()
+        ExplicitAnswer.objects.create(
+            user=self.user,
+            category=ExplicitAnswer.Category.SALARY_EXPECTATION,
+            answer_text="Negotiable",
+        )
+
+        resolved, _ = self._resolve()
+
+        self.assertEqual(resolved.answer, "Negotiable")
+        self.assertFalse(resolved.needs_review)
+        self.assertEqual(resolved.reason, "explicit_answer")
+
+    def test_no_min_salary_falls_through_to_hard_exclusion_as_before(self):
+        self.profile.min_salary = None
+        self.profile.save()
+
+        resolved, client = self._resolve()
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
+        self.assertEqual(client.calls, [])
+
+    def test_min_salary_is_still_option_constrained(self):
+        # A salary *range* select shouldn't get the raw number rubber-stamped
+        # if it doesn't exactly match a listed range -- same backstop as
+        # every other option-bearing answer.
+        self.profile.min_salary = 150000
+        self.profile.save()
+
+        resolved, _ = self._resolve(
+            field_type="single_select", options=("$50k-100k", "$100k-150k", "$150k+"),
+        )
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)

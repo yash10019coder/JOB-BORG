@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
-from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
+from apps.auto_apply.greenhouse_form.client import _SETTLE_TIMEOUT_MS, GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormChallenged,
     GreenhouseFormError,
@@ -269,6 +269,12 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(by_label["Resume/CV"].control_id, "resume")
         self.assertEqual(by_label["Cover Letter"].field_type, FILE)
         self.assertEqual(by_label["Cover Letter"].control_id, "cover_letter")
+        # Neither <input type=file> itself carries a required/aria-required
+        # attribute in this fixture (see its own comment) -- required-ness
+        # for a FILE field must come from the group's own label asterisk
+        # instead (`_group_label_and_required_for`), not the input.
+        self.assertTrue(by_label["Resume/CV"].required)
+        self.assertFalse(by_label["Cover Letter"].required)
 
         # Reproduces the real Blacksky Greenhouse board: individual
         # checkboxes sharing a <fieldset><legend>, previously entirely
@@ -390,6 +396,22 @@ class GreenhouseFormClientTests(SimpleTestCase):
         self.assertEqual(len(school_field.options), 12)
         self.assertIn("Aalborg University", school_field.options)
         self.assertIn("Adams State University", school_field.options)
+        # The scroll loop stopped growing before hitting the iteration cap
+        # -- a strong signal this really is the whole list.
+        self.assertTrue(school_field.options_complete)
+
+    def test_inspect_marks_options_incomplete_when_still_growing_at_scroll_cap(self):
+        # The mirror case: more pages than _COMBOBOX_SCROLL_ITERATIONS can
+        # exhaust -- the option count is still growing on the last scroll
+        # attempt, so discovery must not claim completeness (the live
+        # combobox search could still find a later-page value at submit
+        # time -- see answer_resolution.Question.options_enforced).
+        client = self._client(_fixture_html("greenhouse_combobox_still_growing_at_scroll_cap_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        school_field = schema.by_label()["School"]
+        self.assertLess(len(school_field.options), 32)  # never reached all 8 pages
+        self.assertFalse(school_field.options_complete)
 
     # -- inspect(): education-API-backed combobox (School/Degree/Discipline) ---
 
@@ -472,7 +494,11 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         school_field = schema.by_label()["School"]
         self.assertEqual(set(school_field.options), {"DOM Sample School A", "DOM Sample School B"})
-        self.assertFalse(school_field.options_complete)
+        # This fixture's DOM sample is a static, non-paginated 2-item list
+        # (see its own comment) -- the scroll loop finds no growth on the
+        # very first attempt, which is itself a legitimate completeness
+        # signal, independent of the (failed) education API.
+        self.assertTrue(school_field.options_complete)
 
     def test_inspect_does_not_call_education_api_for_non_education_combobox(self):
         # A combobox whose control_id doesn't match Greenhouse's Education
@@ -589,6 +615,31 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 "Resume/CV": str(resume_path),
                 "Cover Letter": str(cover_path),
                 "Which languages do you know?": ["Python", "Rust"],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+
+    def test_submit_education_api_combobox_scrolls_to_find_option_typing_cannot_filter(self):
+        # Regression test for a real production failure: School/Degree/
+        # Discipline (education-API-backed, see education_api.py) is a
+        # widget shape that only paginates via a real scroll interaction --
+        # typing into it never filters the rendered listbox, unlike the
+        # react-select-style Country/Location fields `_fill_combobox()` was
+        # originally verified against. A genuinely valid answer
+        # ("Information Systems", only rendered after a scroll loads its
+        # page) must not raise "No matching option found".
+        html = _fixture_html("greenhouse_discipline_scroll_not_type_filter_form.html")
+        client = self._client(html)
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(html)
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Discipline": "Information Systems",
             },
             expected_schema=schema,
         )
@@ -722,6 +773,25 @@ class GreenhouseFormClientTests(SimpleTestCase):
         )
         self.assertTrue(result.success)
 
+    def test_stale_required_attribute_on_optional_file_input_does_not_block_submission(self):
+        # Real production failure: the <input type=file> for an optional
+        # Cover Letter field carries a stale/incorrect aria-required="true",
+        # while the group's own visible label has no asterisk. Discovery
+        # must trust the group label over the input's own attribute (see
+        # `_group_label_and_required_for`), so a blank Cover Letter answer
+        # is skipped instead of crashing on `_validated_file_path("", ...)`.
+        html = _fixture_html("greenhouse_file_upload_stale_required_attribute_form.html")
+        client = self._client(html)
+        schema = client.inspect(JOB_URL)
+        self.assertFalse(schema.by_label()["Cover Letter"].required)
+
+        result = self._client(html).submit(
+            JOB_URL,
+            {"First Name": "Ada", "Cover Letter": ""},
+            expected_schema=schema,
+        )
+        self.assertTrue(result.success)
+
     # -- required unsupported field type ----------------------------------
 
     def test_required_unsupported_field_type_raises_schema_mismatch(self):
@@ -851,6 +921,64 @@ class GreenhouseFormClientTests(SimpleTestCase):
 
         self.assertTrue(result.success)
         self.assertIn("submitted successfully", result.confirmation_text.lower())
+
+    def test_submit_textarea_with_crlf_answer_does_not_raise_submission_failed(self):
+        # Browsers normalize CRLF to bare LF when a textarea's value is set,
+        # so an LLM-drafted multi-paragraph answer containing "\r\n" (as
+        # happened on a real production draft) must not be compared
+        # verbatim against the post-fill DOM value.
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Last Name": "Lovelace",
+                "Email": "ada@example.com",
+                "Phone": "555-0100",
+                "Resume/CV": str(self._resume_file()),
+                "Why do you want to work here?": "First paragraph.\r\n\r\nSecond paragraph.",
+                "Are you legally authorized to work in the US?": "Yes",
+                "Which of the following technologies have you used professionally?": [
+                    "Python",
+                    "Go",
+                ],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
+
+    def test_submit_text_input_with_embedded_newline_does_not_raise_submission_failed(self):
+        # Single-line `<input type="text">` controls strip newlines from
+        # their value entirely (not convert them to "\n" like a textarea
+        # does) -- an answer with a stray newline must be normalized the
+        # same way before the post-fill DOM-value comparison.
+        client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        schema = client.inspect(JOB_URL)
+
+        submit_client = self._client(_fixture_html("greenhouse_custom_questions_form.html"))
+        result = submit_client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada\nGrace",
+                "Last Name": "Lovelace",
+                "Email": "ada@example.com",
+                "Phone": "555-0100",
+                "Resume/CV": str(self._resume_file()),
+                "Why do you want to work here?": "Because I love hard problems.",
+                "Are you legally authorized to work in the US?": "Yes",
+                "Which of the following technologies have you used professionally?": [
+                    "Python",
+                    "Go",
+                ],
+            },
+            expected_schema=schema,
+        )
+
+        self.assertTrue(result.success)
 
     def test_submit_single_select_mismatch_raises_typed_submission_failed(self):
         # U5: a SINGLE_SELECT answer with no matching option must fail
@@ -1050,6 +1178,103 @@ class GreenhouseFormClientTests(SimpleTestCase):
                 deadline_monotonic=time.monotonic() + 60,
             )
         self.assertEqual(ctx.exception.outcome, VerificationOutcome.CODE_REJECTED)
+
+    def test_submit_verification_confirmed_but_no_success_signal_raises_unconfirmed(self):
+        # Regression test for a real production failure (AutoApplyDraft
+        # #266): the code is entered and the Confirm click goes through
+        # (no "Invalid code" copy ever appears), but no success signal is
+        # ever rendered either -- genuinely ambiguous, not a case we know
+        # failed. This must raise GreenhouseFormSubmissionUnconfirmed (so
+        # the duplicate-application retry guard in apps/web/views.py
+        # applies), NOT a plain GreenhouseFormVerificationFailed with
+        # outcome=CODE_REJECTED, which that guard doesn't check for and
+        # would let a Retry submit a second real application.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        from apps.auto_apply.greenhouse_form.exceptions import GreenhouseFormSubmissionUnconfirmed
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+
+        client = self._client(
+            _fixture_html("greenhouse_verification_confirmed_but_no_success_signal_form.html"),
+            confirmation_timeout_ms=800,
+        )
+        with self.assertRaises(GreenhouseFormSubmissionUnconfirmed) as ctx:
+            client.submit(
+                JOB_URL,
+                {
+                    "First Name": "Ada",
+                    "Email": "ada@example.com",
+                    "Resume/CV": str(self._resume_file()),
+                },
+                email_code_provider=_FakeProvider(),
+                deadline_monotonic=time.monotonic() + 60,
+            )
+        self.assertNotIsInstance(ctx.exception, GreenhouseFormVerificationFailed)
+
+    def test_submit_verification_button_same_text_as_stale_button_still_clicks_right_one(self):
+        # Regression test for a real production failure (Canonical): the
+        # interstitial's own submit button is labeled "Submit application"
+        # -- the EXACT same text as the stale original application-form
+        # button still present in the DOM. Preferring "Verify"-labeled text
+        # (the fix for test_submit_verification_overlay_clicks_verify_not_stale_submit_button)
+        # does nothing here since neither button says "Verify"; only
+        # scoping to the code input's own enclosing <form> disambiguates.
+        # Confirmed live: without this fix, the click silently lands on the
+        # stale button and the interstitial sits asking for the same code
+        # forever with no error -- exactly the "entered but success not
+        # confirmed" (GreenhouseFormSubmissionUnconfirmed) symptom seen in
+        # production, repeatedly, on this employer's real board.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+
+        client = self._client(_fixture_html("greenhouse_verification_same_text_as_stale_submit_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            email_code_provider=_FakeProvider(),
+            deadline_monotonic=time.monotonic() + 60,
+        )
+        self.assertTrue(result.success)
+
+    def test_submit_verification_overlay_clicks_verify_not_stale_submit_button(self):
+        # Real production failure: when the verification interstitial
+        # renders as an overlay on top of the original form (rather than
+        # replacing it, as greenhouse_email_verification_multibox_form.html
+        # does), the original "Submit Application" button (type=submit,
+        # text "Submit") stays in the DOM alongside the interstitial's own
+        # "Verify" button. The old button selector took whichever the
+        # browser found first in DOM order -- clicking the stale button
+        # does nothing, so the code is never actually submitted and the
+        # page is stuck on the interstitial forever ("Verification code
+        # entered but application success not confirmed"). The fix prefers
+        # a button whose visible text says "Verify".
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+
+        class _FakeProvider:
+            def get_code(self, *, since, deadline_monotonic):
+                return CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
+
+        client = self._client(_fixture_html("greenhouse_email_verification_overlay_form.html"))
+        result = client.submit(
+            JOB_URL,
+            {
+                "First Name": "Ada",
+                "Email": "ada@example.com",
+                "Resume/CV": str(self._resume_file()),
+            },
+            email_code_provider=_FakeProvider(),
+            deadline_monotonic=time.monotonic() + 60,
+        )
+        self.assertTrue(result.success)
 
     def test_submit_bare_multibox_interstitial_still_detected(self):
         # Regression test for the bug fixed here: the real interstitial
@@ -1467,6 +1692,41 @@ class EmptyFileAnswerTests(SimpleTestCase):
             validate.assert_not_called()
             control.set_input_files.assert_not_called()
 
+    def test_optional_blank_choice_type_fields_are_skipped_not_filled(self):
+        # Production failure: an LLM inference failure (or an unfilled
+        # optional needs_review placeholder) can leave a choice-type
+        # question's answer blank -- attempting to fill it always crashes
+        # ("No matching option for '' found..."). Verified for every
+        # option-bearing field type, not just FILE.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(
+            FormField("Location (City)", COMBOBOX_SELECT, False, ("NYC", "SF")),
+            FormField("Willing to relocate?", SINGLE_SELECT, False, ("Yes", "No")),
+            FormField("Languages", MULTI_SELECT, False, ("Python", "Go")),
+            FormField("Skills", CHECKBOX_GROUP, False, ("Python", "Go")),
+        ))
+        with patch.object(client, "_locate_control") as locate:
+            client._fill_answers(MagicMock(), schema, {
+                "Location (City)": "",
+                "Willing to relocate?": "",
+                "Languages": [],
+                "Skills": [],
+            })
+            locate.assert_not_called()
+
+    def test_required_blank_choice_type_fields_still_attempt_a_fill(self):
+        # A required blank choice-type answer must still reach the fill
+        # logic (not be silently skipped) -- same fail-closed posture as a
+        # required blank FILE field, which `_validated_file_path` enforces
+        # by raising. Here it's enough to confirm the field wasn't skipped
+        # before ever locating its control.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Willing to relocate?", SINGLE_SELECT, True, ("Yes", "No")),))
+        with patch.object(client, "_locate_control", side_effect=AssertionError("reached fill")) as locate:
+            with self.assertRaisesMessage(AssertionError, "reached fill"):
+                client._fill_answers(MagicMock(), schema, {"Willing to relocate?": ""})
+            locate.assert_called_once()
+
     def test_required_empty_file_still_validates_and_raises(self):
         client = GreenhouseFormClient()
         schema = FormSchema(fields=(FormField("Upload", FILE, True),))
@@ -1478,6 +1738,67 @@ class EmptyFileAnswerTests(SimpleTestCase):
                 client._fill_answers(MagicMock(), schema, {"Upload": ""})
             validate.assert_called_once_with("", "Upload")
             control.set_input_files.assert_not_called()
+
+    def test_file_upload_waits_for_network_to_settle_before_proceeding(self):
+        # Production failure: Greenhouse's upload widget shows the filename
+        # immediately (the synchronous DOM `change` event set_input_files()
+        # triggers) but uploads the file to its own backend asynchronously.
+        # Clicking Submit before that completed left a real board showing
+        # "Resume/CV is required." despite the filename chip already being
+        # visible. A bounded, best-effort network-idle wait right after
+        # set_input_files() -- same pattern as _goto_and_settle() -- gives
+        # that upload a chance to finish first.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Resume/CV", FILE, True),))
+        control = MagicMock()
+        page = MagicMock()
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", return_value="/tmp/resume.pdf"
+        ):
+            client._fill_answers(page, schema, {"Resume/CV": "resumes/resume.pdf"})
+            control.set_input_files.assert_called_once_with("/tmp/resume.pdf")
+            page.wait_for_load_state.assert_called_once_with(
+                "networkidle", timeout=_SETTLE_TIMEOUT_MS
+            )
+
+    def test_file_upload_settle_timeout_does_not_propagate(self):
+        # The wait is best-effort (mirrors _goto_and_settle()): a page that
+        # never truly goes network-idle (an analytics beacon, a long poll)
+        # must not turn into a hard submission failure.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("Resume/CV", FILE, True),))
+        control = MagicMock()
+        page = MagicMock()
+        page.wait_for_load_state.side_effect = TimeoutError("never idle")
+        with patch.object(client, "_locate_control", return_value=control), patch.object(
+            client, "_validated_file_path", return_value="/tmp/resume.pdf"
+        ):
+            client._fill_answers(page, schema, {"Resume/CV": "resumes/resume.pdf"})  # must not raise
+
+    def test_optional_unsupported_field_type_is_skipped_not_filled(self):
+        # FormField's own docstring promises this: an unrecognized native
+        # input type (e.g. "number", "date") is only fatal when required --
+        # verified against a real production failure where a non-required
+        # "End date year" <input type=number> crashed with "No fill
+        # strategy ... of type 'number'" despite having a valid answer.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("End date year", "number", False),))
+        with patch.object(client, "_locate_control") as locate:
+            client._fill_answers(MagicMock(), schema, {"End date year": "2024"})
+            locate.assert_not_called()
+
+    def test_required_unsupported_field_type_still_attempts_a_fill(self):
+        # Discovery already raises GreenhouseFormSchemaMismatch for a
+        # *required* unsupported field (see _discover_schema), so this
+        # shouldn't normally be reachable -- but as defense-in-depth,
+        # _fill_answers must not silently skip a required one the way it
+        # does an optional one.
+        client = GreenhouseFormClient()
+        schema = FormSchema(fields=(FormField("End date year", "number", True),))
+        with patch.object(client, "_locate_control", side_effect=AssertionError("reached fill")) as locate:
+            with self.assertRaisesMessage(AssertionError, "reached fill"):
+                client._fill_answers(MagicMock(), schema, {"End date year": "2024"})
+            locate.assert_called_once()
 
 
 class ValidatedFilePathTests(SimpleTestCase):
@@ -1546,6 +1867,8 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         def mock_locator(sel):
             if "code" in sel:
                 return MagicMock(count=lambda: 1 if call_count["val"] == 0 else 0, first=code_input)
+            if "Verify" in sel:
+                return MagicMock(first=MagicMock(count=lambda: 0))
             if "button" in sel or "input[type='submit']" in sel:
                 return MagicMock(first=submit_btn)
             if sel == "body":
@@ -1597,9 +1920,13 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                 MagicMock(count=lambda: 1, first=code_input)
                 if "code" in sel
                 else (
-                    MagicMock(first=submit_btn)
-                    if "button" in sel
-                    else MagicMock(count=lambda: 0, inner_text=lambda: "enter your verification code")
+                    MagicMock(first=MagicMock(count=lambda: 0))
+                    if "Verify" in sel
+                    else (
+                        MagicMock(first=submit_btn)
+                        if "button" in sel
+                        else MagicMock(count=lambda: 0, inner_text=lambda: "enter your verification code")
+                    )
                 )
             )
             mock_page.get_by_role.return_value = status_reg
@@ -1622,13 +1949,86 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             self.assertIsNone(cm.exception.debug_artifacts)
             self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
 
-    def test_post_code_success_check_exception_also_suppresses_debug_artifacts(self):
+    def test_interstitial_detection_captures_artifacts_before_any_code_is_typed(self):
+        # Deliberately the one safe capture point on the whole verification
+        # path: the interstitial is confirmed present but no code has been
+        # looked up or typed yet, so a screenshot here can only ever show
+        # the bare interstitial -- exactly what's needed to identify a real
+        # employer board's actual verify/confirm button text, with no OTP
+        # ever at risk of appearing in it. A fully successful run (code
+        # found, entered, confirmed on the first post-code check) never
+        # touches any of the failure paths' own capture calls, isolating
+        # this one call to the interstitial-detection point itself.
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        from apps.auto_apply.greenhouse_form.field_mapping import SubmissionResult
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle)
+        mock_page = MagicMock()
+        mock_page.locator.return_value.first.count.return_value = 0  # no "Verify"-text button -- use fallback
+        mock_provider = MagicMock()
+        mock_provider.get_code.return_value = CodeLookupResult(
+            outcome=VerificationOutcome.FOUND, code="654321"
+        )
+        success = SubmissionResult(success=True)
+
+        with patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"), patch.object(
+            client, "_check_success_signal", side_effect=[None, success]
+        ), patch.object(client, "_capture_debug_artifacts") as capture:
+            result = client._confirm_success(
+                mock_page, _EMPTY_BEFORE_SNAPSHOT,
+                provider=mock_provider, deadline_monotonic=time.monotonic() + 300,
+            )
+        self.assertIs(result, success)
+        capture.assert_called_once_with(mock_page)
+
+    def test_post_code_destroyed_context_recovers_to_confirmed_success(self):
+        """A "destroyed execution context" exception from the post-code
+        success check almost always means the page just navigated -- likely
+        TO the real success page, right as this check read from the
+        outgoing document. Verified against a real production failure: this
+        previously propagated straight out as a hard "Failed while
+        submitting verification code", discarding what was probably a
+        genuine success. It must instead be treated as "keep polling" --
+        the very next check, against the now-settled page, can still
+        confirm success."""
+        from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
+        from apps.auto_apply.greenhouse_form.field_mapping import SubmissionResult
+
+        client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
+        mock_page = MagicMock()
+        mock_page.locator.return_value.first.count.return_value = 0  # no "Verify"-text button -- use fallback
+        mock_provider = MagicMock()
+        mock_provider.get_code.return_value = CodeLookupResult(
+            outcome=VerificationOutcome.FOUND, code="654321"
+        )
+        success = SubmissionResult(success=True)
+
+        with patch.object(
+            client,
+            "_check_success_signal",
+            side_effect=[None, Exception("Execution context was destroyed, most likely because of a navigation"), success],
+        ), patch.object(
+            client, "_verification_interstitial_detected", return_value=True
+        ), patch.object(client, "_fill_verification_code"):
+            result = client._confirm_success(
+                mock_page, _EMPTY_BEFORE_SNAPSHOT,
+                provider=mock_provider, deadline_monotonic=time.monotonic() + 300,
+            )
+        self.assertIs(result, success)
+
+    def test_post_code_unrelated_success_check_exception_still_suppresses_debug_artifacts(self):
         """Regression test for a code-review finding (P0, adversarial):
         the post-code success check (after code fill+click succeed) sat
         outside the try/except that suppresses debug artifacts, so an
-        exception from THAT call (e.g. a Playwright "execution context
-        destroyed" navigation race) could escape and capture a screenshot
-        with the just-typed OTP still on screen -- exactly what R9 forbids."""
+        exception from THAT call could escape and capture a screenshot with
+        the just-typed OTP still on screen -- exactly what R9 forbids. A
+        "destroyed context" exception specifically is now recovered from
+        (see test_post_code_destroyed_context_recovers_to_confirmed_success)
+        since it usually signals real progress, not failure -- this test
+        covers every *other* kind of exception, which must still fail
+        immediately without ever capturing artifacts."""
         from apps.auto_apply.email_verification.base import VerificationOutcome
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1643,7 +2043,11 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             mock_page.locator.side_effect = lambda sel: (
                 MagicMock(count=lambda: 1, first=code_input)
                 if "code" in sel
-                else MagicMock(first=submit_btn)
+                else (
+                    MagicMock(first=MagicMock(count=lambda: 0))
+                    if "Verify" in sel
+                    else MagicMock(first=submit_btn)
+                )
             )
 
             mock_provider = MagicMock()
@@ -1655,7 +2059,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             with patch.object(
                 client,
                 "_check_success_signal",
-                side_effect=[None, Exception("execution context was destroyed")],
+                side_effect=[None, Exception("some unrelated Playwright error")],
             ), patch.object(
                 client, "_verification_interstitial_detected", return_value=True
             ):
@@ -1715,13 +2119,13 @@ class VerificationDeadlineTests(SimpleTestCase):
         def fill(*args, **kwargs):
             clock.return_value += 0.25
         for field in fields:
-            field.fill.side_effect = fill
+            field.press_sequentially.side_effect = fill
         with self.assertRaises(GreenhouseFormVerificationFailed) as caught:
             client._fill_verification_code(page, "123", deadline_monotonic=100.5)
         self.assertEqual(caught.exception.outcome, VerificationOutcome.CODE_TIMEOUT)
-        fields[0].fill.assert_called_once_with("1", timeout=500.0)
-        fields[1].fill.assert_called_once_with("2", timeout=250.0)
-        fields[2].fill.assert_not_called()
+        fields[0].press_sequentially.assert_called_once_with("1", timeout=500.0)
+        fields[1].press_sequentially.assert_called_once_with("2", timeout=250.0)
+        fields[2].press_sequentially.assert_not_called()
 
 
 class EmailVerificationProviderDeadlineTests(SimpleTestCase):
@@ -1749,6 +2153,7 @@ class EmailVerificationProviderDeadlineTests(SimpleTestCase):
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
         page = MagicMock()
+        page.locator.return_value.first.count.return_value = 0  # no "Verify"-text button -- use fallback selector
         provider = MagicMock()
         provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
         success = SubmissionResult(success=True)
@@ -1763,13 +2168,14 @@ class EmailVerificationProviderDeadlineTests(SimpleTestCase):
             )
         self.assertEqual(page.wait_for_timeout.call_count, 2)
 
-    def test_post_code_polling_stops_at_shared_deadline_without_artifacts(self):
+    def test_post_code_polling_stops_at_shared_deadline_without_extra_artifacts(self):
         from apps.auto_apply.email_verification.base import CodeLookupResult, VerificationOutcome
 
         client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=1000)
         provider = MagicMock()
         provider.get_code.return_value = CodeLookupResult(outcome=VerificationOutcome.FOUND, code="654321")
         page = MagicMock()
+        page.locator.return_value.first.count.return_value = 0  # no "Verify"-text button -- use fallback selector
         clock = [100.0]
         provider.get_code.side_effect = lambda **kwargs: (clock.__setitem__(0, 129.9) or provider.get_code.return_value)
         page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
@@ -1778,11 +2184,22 @@ class EmailVerificationProviderDeadlineTests(SimpleTestCase):
         ), patch.object(client, "_fill_verification_code"), patch.object(
             client, "_check_success_signal", return_value=None
         ), patch.object(client, "_capture_debug_artifacts") as capture:
-            with self.assertRaises(GreenhouseFormVerificationFailed) as raised:
+            # A code was entered and submitted but no success signal ever
+            # appeared -- ambiguous, not a case known to be safely
+            # retryable, so this must raise GreenhouseFormSubmissionUnconfirmed
+            # (see that exception's docstring and the real production
+            # failure it was fixed for, AutoApplyDraft #266), not a plain
+            # GreenhouseFormVerificationFailed(outcome=CODE_REJECTED) --
+            # the latter bypasses trigger_auto_apply's SUBMISSION_UNCONFIRMED
+            # duplicate-application retry guard entirely.
+            with self.assertRaises(GreenhouseFormSubmissionUnconfirmed) as raised:
                 client._confirm_success(page, _EMPTY_BEFORE_SNAPSHOT, provider=provider, deadline_monotonic=130)
-        self.assertEqual(raised.exception.outcome, VerificationOutcome.CODE_REJECTED)
+        self.assertNotIsInstance(raised.exception, GreenhouseFormVerificationFailed)
         self.assertAlmostEqual(clock[0], 130)
-        capture.assert_not_called()
+        # Captured once, safely, at interstitial detection -- before any
+        # code was looked up or typed -- but never again on the post-code
+        # path, which still must never risk writing a live OTP to disk.
+        capture.assert_called_once()
 
     def test_large_task_deadline_does_not_extend_classification_timeout(self):
         client = GreenhouseFormClient(context_factory=_TestContextHandle, confirmation_timeout_ms=500)

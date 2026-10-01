@@ -101,13 +101,50 @@ class ExtractionLogicTests(SimpleTestCase):
 
 
 class EvaluateEmailCandidateTests(SimpleTestCase):
-    def test_disallowed_sender_ignored(self):
+    def test_matching_is_sender_independent(self):
+        # Deliberate design choice (see extraction.py's evaluate_email_
+        # candidate docstring): a real verification email can legitimately
+        # arrive from any address an employer's own Greenhouse-hosted flow
+        # happens to use -- verified against real production failures where
+        # a strict "greenhouse.io" sender allowlist caused every single
+        # verification lookup to time out because the real sender didn't
+        # match. Content (contextual phrasing + a code-shaped token) is what
+        # identifies a genuine verification email, not the sender address;
+        # `sender_allowlist` is accepted for signature compatibility only.
         raw_msg = (
-            b"From: attacker@bad.com\r\n"
+            b"From: notifications@some-other-domain.example\r\n"
             b"Subject: Greenhouse verification code\r\n"
             b"Date: Wed, 05 Aug 2026 12:00:00 +0000\r\n"
             b"\r\n"
             b"Your verification code is 123456."
+        )
+        since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
+        code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"], since)
+        self.assertEqual(code, "123456")
+
+    def test_matches_even_with_an_empty_sender_allowlist(self):
+        # sender_allowlist no longer participates in matching at all.
+        raw_msg = (
+            b"From: notifications@some-other-domain.example\r\n"
+            b"Subject: Greenhouse verification code\r\n"
+            b"Date: Wed, 05 Aug 2026 12:00:00 +0000\r\n"
+            b"\r\n"
+            b"Your verification code is 123456."
+        )
+        since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
+        code = evaluate_email_candidate(raw_msg, since, [], since)
+        self.assertEqual(code, "123456")
+
+    def test_missing_contextual_phrasing_still_ignored_regardless_of_sender(self):
+        # Sender-independence doesn't mean "match anything" -- an email with
+        # no verification-code phrasing at all must still be ignored, from
+        # any sender.
+        raw_msg = (
+            b"From: no-reply@greenhouse.io\r\n"
+            b"Subject: Your weekly newsletter\r\n"
+            b"Date: Wed, 05 Aug 2026 12:00:00 +0000\r\n"
+            b"\r\n"
+            b"Here are this week's top jobs: 123456 new postings!"
         )
         since = datetime(2026, 8, 5, 11, 0, 0, tzinfo=timezone.utc)
         code = evaluate_email_candidate(raw_msg, since, ["greenhouse.io"], since)
