@@ -368,12 +368,20 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
     exact job, forcing a re-answer of the same voluntary self-ID questions
     on every retry.
 
-    Only reuses an answer the user actually confirmed on the prior draft
-    (`needs_review` False there -- never itself an uncarried LLM guess or
-    an earlier carry-forward of one) for the exact same question label and
-    field type, and -- for an option-bearing field -- only when that value
-    is still a valid option on the schema just re-inspected for *this*
-    draft, since Greenhouse's rendered options can drift between attempts.
+    Only reuses an answer explicitly marked `user_confirmed` on the prior
+    draft -- set only by `edit_auto_apply_draft`'s save path
+    (apps/web/views.py), never by drafting itself -- for the exact same
+    question label and field type, and -- for an option-bearing field --
+    only when that value is still a valid option on the schema just
+    re-inspected for *this* draft, since Greenhouse's rendered options can
+    drift between attempts.
+
+    `needs_review=False` alone is NOT used as the confirmation signal: a
+    confident LLM answer also gets `needs_review=False` (see
+    `answer_resolution`/`llm/base.py`) with no human ever having looked at
+    it, so carrying that forward on a retry would silently present an
+    LLM guess as something the user vouched for (CodeRabbit finding on
+    PR #99).
     """
     previous = (
         AutoApplyDraft.objects.filter(user=user, job=job)
@@ -388,14 +396,25 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         if not entry.get("needs_review") or not _is_blank(entry.get("value")):
             continue
         prior_entry = (previous.answers or {}).get(label)
-        if not isinstance(prior_entry, dict) or prior_entry.get("needs_review"):
+        if not isinstance(prior_entry, dict) or not prior_entry.get("user_confirmed"):
             continue
         if prior_entry.get("field_type") != entry.get("field_type"):
             continue
         prior_value = prior_entry.get("value")
         if _is_blank(prior_value):
             continue
-        if entry.get("field_type") in (SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP) and entry.get("options"):
+        # Re-validate against the *current* schema's options before
+        # reusing a confirmed value. SINGLE_SELECT/MULTI_SELECT/
+        # CHECKBOX_GROUP always carry a complete option set (see
+        # field_mapping._OPTION_BEARING_TYPES), so always enforced here.
+        # COMBOBOX_SELECT only carries a complete sample sometimes
+        # (`options_complete`); enforcing against an incomplete sample
+        # would wrongly reject a value that's legitimately outside the
+        # DOM's partial render (CodeRabbit finding on PR #99).
+        option_bearing = entry.get("field_type") in (SINGLE_SELECT, MULTI_SELECT, CHECKBOX_GROUP) or (
+            entry.get("field_type") == COMBOBOX_SELECT and entry.get("options_complete")
+        )
+        if option_bearing and entry.get("options"):
             values = prior_value if isinstance(prior_value, (list, tuple)) else [prior_value]
             if any(v not in entry["options"] for v in values):
                 continue

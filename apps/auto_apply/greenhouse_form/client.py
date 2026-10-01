@@ -1589,6 +1589,7 @@ class GreenhouseFormClient:
                 # success check too (not just fill/submit): a Playwright race right after a
                 # submit-triggered navigation (e.g. "execution context was destroyed") must not
                 # escape this suppression and capture a screenshot of the just-typed code.
+                code_submitted = False
                 try:
                     self._fill_verification_code(page, lookup_res.code, deadline_monotonic=deadline)
                     # Filling can itself take a while; don't submit the code
@@ -1601,6 +1602,14 @@ class GreenhouseFormClient:
                     submit_button = self._find_verification_submit_button(page)
                     click_timeout = self._verification_timeout_ms(deadline)
                     submit_button.click(timeout=click_timeout)
+                    # Once the click itself has returned, Greenhouse may
+                    # already have the application -- any exception from
+                    # here on (including from the polling loop below, for a
+                    # reason other than the recovered "destroyed context"
+                    # case) must not be classified as a known-safe-to-retry
+                    # CODE_REJECTED. See the `except Exception as exc`
+                    # branch below.
+                    code_submitted = True
                     post_code_deadline = min(
                         deadline, time.monotonic() + self.confirmation_timeout_ms / 1000
                     )
@@ -1651,6 +1660,19 @@ class GreenhouseFormClient:
                             "Deadline expired while submitting verification code",
                             outcome=VerificationOutcome.CODE_TIMEOUT,
                         ) from exc
+                    if code_submitted:
+                        # The click already returned before this exception
+                        # (e.g. a success-check error that isn't the
+                        # recovered "destroyed context" case) -- Greenhouse
+                        # may already have the application. Must not be a
+                        # "known-safe-to-retry" rejection, same reasoning as
+                        # the "entered but not confirmed" raise below.
+                        raise GreenhouseFormSubmissionUnconfirmed(
+                            "Verification code submitted but a later error prevented "
+                            "confirming the outcome"
+                        ) from exc
+                    # Pre-click failure (e.g. a code-length-vs-box-count
+                    # mismatch): nothing was submitted, safe to retry.
                     # Post-code path: raise WITHOUT debug artifacts
                     raise GreenhouseFormVerificationFailed(
                         "Failed while submitting verification code",

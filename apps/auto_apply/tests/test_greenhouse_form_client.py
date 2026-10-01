@@ -2028,7 +2028,11 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
         (see test_post_code_destroyed_context_recovers_to_confirmed_success)
         since it usually signals real progress, not failure -- this test
         covers every *other* kind of exception, which must still fail
-        immediately without ever capturing artifacts."""
+        immediately without ever capturing artifacts, and -- since the
+        submit click has already returned by this point -- as
+        GreenhouseFormSubmissionUnconfirmed (CodeRabbit finding on PR #99:
+        the click already happened, so Greenhouse may already have the
+        application; this must not be a known-safe-to-retry CODE_REJECTED)."""
         from apps.auto_apply.email_verification.base import VerificationOutcome
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2063,7 +2067,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
             ), patch.object(
                 client, "_verification_interstitial_detected", return_value=True
             ):
-                with self.assertRaises(GreenhouseFormVerificationFailed) as cm:
+                with self.assertRaises(GreenhouseFormSubmissionUnconfirmed) as cm:
                     client._confirm_success(
                         mock_page,
                         _EMPTY_BEFORE_SNAPSHOT,
@@ -2071,7 +2075,7 @@ class EmailVerificationProviderIntegrationTests(SimpleTestCase):
                         deadline_monotonic=time.monotonic() + 300,
                     )
 
-            self.assertEqual(cm.exception.outcome, VerificationOutcome.CODE_REJECTED)
+            self.assertNotIsInstance(cm.exception, GreenhouseFormVerificationFailed)
             self.assertIsNone(cm.exception.debug_artifacts)
             self.assertEqual(len(list(Path(tmpdir).glob("*"))), 0)
 

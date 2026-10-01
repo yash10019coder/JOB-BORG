@@ -468,9 +468,15 @@ class RequiredQuestionUnanswerableTests(DraftingServiceTestCase):
 class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
     """A hard-excluded (e.g. DEMOGRAPHIC) question the user already
     answered by hand on a prior FAILED/EXCLUDED draft for this exact job --
-    via `edit_auto_apply_draft`, so `needs_review` is False on that row --
+    via `edit_auto_apply_draft`, which marks the entry `user_confirmed` --
     must not come back blank on a fresh draft (e.g. a Retry) for the same
-    (user, job). See `_carry_forward_confirmed_answers`."""
+    (user, job). See `_carry_forward_confirmed_answers`.
+
+    `user_confirmed` (not `needs_review=False`) is the carry-forward
+    signal: a confident LLM answer also gets `needs_review=False` with no
+    human involved (see `test_unconfirmed_prior_answer_is_not_reused`'s
+    sibling below), so `needs_review` alone can't prove the user actually
+    looked at it."""
 
     def _gender_schema(self):
         return FormSchema(
@@ -499,6 +505,7 @@ class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
         # then the draft later failing at send time.
         first_draft.answers["Gender"]["value"] = "Male"
         first_draft.answers["Gender"]["needs_review"] = False
+        first_draft.answers["Gender"]["user_confirmed"] = True
         first_draft.status = AutoApplyDraft.Status.FAILED
         first_draft.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
         first_draft.save()
@@ -521,6 +528,7 @@ class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
         )
         first_draft.answers["Gender"]["value"] = "Male"
         first_draft.answers["Gender"]["needs_review"] = False
+        first_draft.answers["Gender"]["user_confirmed"] = True
         first_draft.status = AutoApplyDraft.Status.FAILED
         first_draft.save()
 
@@ -553,6 +561,83 @@ class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
             self.user, self.job,
             form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
         )
+        first_draft.status = AutoApplyDraft.Status.FAILED
+        first_draft.save()
+
+        retry_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+
+        entry = retry_draft.answers["Gender"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_confirmed_combobox_answer_not_reused_when_complete_options_drop_it(self):
+        # Regression test for a CodeRabbit finding on PR #99: the original
+        # option-revalidation only covered SINGLE_SELECT/MULTI_SELECT/
+        # CHECKBOX_GROUP, silently skipping COMBOBOX_SELECT entirely --
+        # a confirmed combobox value that's no longer in a now-COMPLETE
+        # option set must not be carried forward and marked reviewed.
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="Discipline",
+                    field_type=COMBOBOX_SELECT,
+                    required=False,
+                    options=("Computer Science", "Mathematics"),
+                    options_complete=True,
+                ),
+            )
+        )
+        first_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first_draft.answers["Discipline"]["value"] = "Computer Science"
+        first_draft.answers["Discipline"]["needs_review"] = False
+        first_draft.answers["Discipline"]["user_confirmed"] = True
+        first_draft.status = AutoApplyDraft.Status.FAILED
+        first_draft.save()
+
+        drifted_schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label="Discipline",
+                    field_type=COMBOBOX_SELECT,
+                    required=False,
+                    options=("Mathematics", "Physics"),  # complete -- CS dropped
+                    options_complete=True,
+                ),
+            )
+        )
+        retry_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=drifted_schema), llm_client=FakeLLMClient(),
+        )
+
+        entry = retry_draft.answers["Discipline"]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_confident_llm_answer_without_human_review_is_not_reused(self):
+        # Regression test for a CodeRabbit finding on PR #99: a confident
+        # LLM answer gets needs_review=False too (see llm/base.py), with no
+        # human ever having looked at it. Reusing it on a retry would
+        # silently present an unreviewed LLM guess as something the user
+        # vouched for. Only edit_auto_apply_draft's save path sets
+        # `user_confirmed`, never drafting itself.
+        schema = self._gender_schema()
+        first_draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        # Simulate a confident LLM answer landing with needs_review=False,
+        # but with no user_confirmed marker (drafting never sets one).
+        first_draft.answers["Gender"]["value"] = "Male"
+        first_draft.answers["Gender"]["needs_review"] = False
         first_draft.status = AutoApplyDraft.Status.FAILED
         first_draft.save()
 

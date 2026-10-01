@@ -497,6 +497,14 @@ def edit_auto_apply_draft(request, pk):
         # required-ness, so an optional placeholder doesn't quietly lose its
         # flag the moment the queue is re-rendered/saved.
         answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
+        # Explicit provenance marker: `needs_review=False` alone doesn't
+        # prove a human looked at this answer -- a confident LLM guess also
+        # gets `needs_review=False` (see answer_resolution/llm/base.py) with
+        # no human ever involved. Only THIS save path represents a human
+        # actually reviewing/confirming the value, which is what
+        # drafting._carry_forward_confirmed_answers() requires before
+        # reusing an answer on a later retry (CodeRabbit finding on PR #99).
+        answers[label]["user_confirmed"] = not _is_blank_answer_value(cleaned)
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])
