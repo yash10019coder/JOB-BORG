@@ -11,13 +11,23 @@ from apps.jobs.models import JobSource
 from .ashby_client import AshbyClient
 from .greenhouse_client import GreenhouseClient
 from .lever_client import LeverClient
+from .oracle_cloud_client import OracleCloudClient
+from .personio_client import PersonioClient
+from .recruitee_client import RecruiteeClient
+from .smartrecruiters_client import SmartRecruitersClient
 from .workday_client import WorkdayClient
+from .workable_client import WorkableClient
 
 CLIENT_REGISTRY = {
     JobSource.ATS.GREENHOUSE: GreenhouseClient,
     JobSource.ATS.LEVER: LeverClient,
     JobSource.ATS.ASHBY: AshbyClient,
     JobSource.ATS.WORKDAY: WorkdayClient,
+    JobSource.ATS.SMARTRECRUITERS: SmartRecruitersClient,
+    JobSource.ATS.WORKABLE: WorkableClient,
+    JobSource.ATS.RECRUITEE: RecruiteeClient,
+    JobSource.ATS.PERSONIO: PersonioClient,
+    JobSource.ATS.ORACLE_CLOUD: OracleCloudClient,
 }
 
 

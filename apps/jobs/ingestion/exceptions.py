@@ -60,3 +60,64 @@ class WorkdayUnavailable(WorkdayError, IngestionUnavailable):
 
 class WorkdayParseError(WorkdayError, IngestionParseError):
     """The response was reached but its body was malformed / unexpected shape."""
+
+
+class SmartRecruitersError(IngestionError):
+    """Base class for all SmartRecruiters client failures."""
+
+
+class SmartRecruitersUnavailable(SmartRecruitersError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class SmartRecruitersParseError(SmartRecruitersError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""
+
+
+class WorkableError(IngestionError):
+    """Base class for all Workable client failures."""
+
+
+class WorkableUnavailable(WorkableError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class WorkableParseError(WorkableError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""
+
+
+class RecruiteeError(IngestionError):
+    """Base class for all Recruitee client failures."""
+
+
+class RecruiteeUnavailable(RecruiteeError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class RecruiteeParseError(RecruiteeError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""
+
+
+class PersonioError(IngestionError):
+    """Base class for all Personio client failures."""
+
+
+class PersonioUnavailable(PersonioError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class PersonioParseError(PersonioError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""
+
+
+class OracleCloudError(IngestionError):
+    """Base class for all Oracle Cloud client failures."""
+
+
+class OracleCloudUnavailable(OracleCloudError, IngestionUnavailable):
+    """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class OracleCloudParseError(OracleCloudError, IngestionParseError):
+    """The response was reached but its body was malformed / unexpected shape."""
+
