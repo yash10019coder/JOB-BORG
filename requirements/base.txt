@@ -15,7 +15,7 @@ python-json-logger==2.0.7
 # pandas, which vendoring the scraper source directly avoids. See
 # docs/plans/2026-07-21-001-feat-ats-platform-expansion-plan.md.
 httpx==0.28.1
-pydantic==2.13.4
+pydantic==2.13.5
 # Auto-apply LLM answer inference (apps/auto_apply/llm/langchain_client.py) --
 # one LangChain-backed client drives all four providers (Anthropic, OpenAI,
 # Google Gemini, NVIDIA NIM via langchain-openai's base_url override) through
