@@ -406,6 +406,208 @@ class AutoApplyQueueViewTests(AutoApplyViewsTestCase):
         response = client.get(reverse("auto_apply_queue"))
         self.assertContains(response, "Applied")
 
+    def test_status_filter_returns_only_matching_status(self):
+        job1, job2, job3 = self._job(), self._job(), self._job()
+        self._draft(self.alice, job1, status=AutoApplyDraft.Status.FAILED)
+        self._draft(self.alice, job2, status=AutoApplyDraft.Status.DRAFTED)
+        self._draft(self.alice, job3, status=AutoApplyDraft.Status.APPLIED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"status": "failed"})
+
+        drafts = list(response.context["page_obj"])
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].status, AutoApplyDraft.Status.FAILED)
+
+    def test_status_filter_all_shows_all_statuses_by_default(self):
+        job1, job2, job3 = self._job(), self._job(), self._job()
+        self._draft(self.alice, job1, status=AutoApplyDraft.Status.DRAFTED)
+        self._draft(self.alice, job2, status=AutoApplyDraft.Status.EXCLUDED,
+                    exclusion_reason="Required question(s) could not be answered: Visa status")
+        self._draft(self.alice, job3, status=AutoApplyDraft.Status.STALE)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertEqual(len(response.context["page_obj"]), 3)
+
+    def test_status_filter_invalid_value_falls_back_to_all(self):
+        job1, job2 = self._job(), self._job()
+        self._draft(self.alice, job1, status=AutoApplyDraft.Status.DRAFTED)
+        self._draft(self.alice, job2, status=AutoApplyDraft.Status.APPLIED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"status": "bogus"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["page_obj"]), 2)
+
+    def test_status_filter_preserves_param_in_pagination_links(self):
+        for _ in range(25):
+            self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.FAILED)
+        self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.APPLIED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"status": "failed", "page": "1"})
+
+        self.assertContains(response, "status=failed")
+
+    def test_status_filter_empty_result_shows_filtered_empty_message(self):
+        self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"status": "applied"})
+
+        self.assertContains(response, "No drafts")
+        self.assertContains(response, "Applied")
+        self.assertNotContains(response, "No auto-apply drafts yet")
+
+    def test_ats_filter_returns_only_matching_ats(self):
+        gh_job = self._job(ats="greenhouse")
+        lever_job = self._job(ats="lever")
+        self._draft(self.alice, gh_job, status=AutoApplyDraft.Status.DRAFTED)
+        self._draft(self.alice, lever_job, status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"ats": "lever"})
+
+        drafts = list(response.context["page_obj"])
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].job_id, lever_job.id)
+
+    def test_ats_filter_invalid_value_falls_back_to_all(self):
+        self._draft(self.alice, self._job(ats="greenhouse"), status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"ats": "bogus"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["page_obj"]), 1)
+
+    def test_status_and_ats_filters_combine(self):
+        gh_job, lever_job = self._job(ats="greenhouse"), self._job(ats="lever")
+        self._draft(self.alice, gh_job, status=AutoApplyDraft.Status.FAILED)
+        self._draft(self.alice, lever_job, status=AutoApplyDraft.Status.FAILED)
+        self._draft(self.alice, self._job(ats="greenhouse"), status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"), {"status": "failed", "ats": "lever"})
+
+        drafts = list(response.context["page_obj"])
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual(drafts[0].job_id, lever_job.id)
+
+    def test_collapsible_cards_default_closed_regardless_of_status(self):
+        # Every card starts collapsed, including FAILED and a DRAFTED draft
+        # with blocking fields -- the user always clicks to expand.
+        failed_draft = self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.FAILED)
+        blocking_draft = self._draft(
+            self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED,
+            answers={"Visa status": {"value": "", "required": True, "needs_review": True}},
+        )
+        job = self._job()
+        job_application = JobApplication.objects.create(
+            user=self.alice, job=job, status=JobApplication.Status.APPLIED
+        )
+        self._draft(self.alice, job, status=AutoApplyDraft.Status.APPLIED, job_application=job_application)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertNotIn("<details open", response.content.decode())
+        del failed_draft, blocking_draft  # used only to create the rows
+
+    def test_collapsible_summary_shows_blocking_and_review_counts(self):
+        self._draft(
+            self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED,
+            answers={
+                "Visa status": {"value": "", "required": True, "needs_review": True},
+                "Work permit": {"value": "", "required": True, "needs_review": True},
+                "Gender": {"value": "Male", "required": False, "needs_review": True},
+            },
+        )
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertContains(response, "2 required fields missing")
+        self.assertContains(response, "3 needs review")
+
+    def test_repeat_attempts_for_same_job_nest_under_one_card(self):
+        # Multiple failed retries for the same job (e.g. while a bug was
+        # being fixed) must collapse into one top-level card with the
+        # older attempts nested, instead of one redundant card each.
+        job = self._job()
+        import time as _time
+
+        d1 = self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED,
+                          error_message="first failure")
+        _time.sleep(0.01)
+        d2 = self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED,
+                          error_message="second failure")
+        _time.sleep(0.01)
+        d3 = self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED,
+                          error_message="third failure")
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertEqual(len(response.context["job_groups"]), 1)
+        group = response.context["job_groups"][0]
+        self.assertEqual(group["latest"].pk, d3.pk)
+        self.assertEqual([d.pk for d in group["earlier"]], [d2.pk, d1.pk])
+        self.assertContains(response, "2 earlier attempts for this job")
+
+    def test_different_jobs_each_get_their_own_card(self):
+        self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.FAILED)
+        self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED)
+
+        client = self._client_for(self.alice)
+        response = client.get(reverse("auto_apply_queue"))
+
+        self.assertEqual(len(response.context["job_groups"]), 2)
+        for group in response.context["job_groups"]:
+            self.assertEqual(group["earlier"], [])
+
+    def test_discard_redirect_preserves_status_filter(self):
+        draft = self._draft(self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED)
+        client = self._client_for(self.alice)
+
+        response = client.post(
+            reverse("discard_auto_apply_draft", args=[draft.id]),
+            {"status": "drafted", "ats": "greenhouse"},
+        )
+
+        self.assertIn("status=drafted", response.url)
+        self.assertIn("ats=greenhouse", response.url)
+
+    def test_send_redirect_preserves_status_filter(self):
+        draft = self._draft(
+            self.alice, self._job(), status=AutoApplyDraft.Status.DRAFTED,
+            answers={"Visa status": {"value": "", "required": True, "needs_review": True}},
+        )
+        client = self._client_for(self.alice)
+
+        response = client.post(
+            reverse("send_auto_apply_draft", args=[draft.id]),
+            {"status": "drafted"},
+        )
+
+        self.assertIn("status=drafted", response.url)
+
+    @mock.patch("apps.web.views.draft_auto_apply")
+    def test_retry_redirect_preserves_status_filter(self, mock_task):
+        job = self._job()
+        self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED)
+        client = self._client_for(self.alice)
+
+        response = client.post(
+            reverse("trigger_auto_apply", args=[job.id]),
+            {"next": "queue", "status": "failed"},
+        )
+
+        self.assertIn("status=failed", response.url)
+
 
 class EditAutoApplyDraftTests(AutoApplyViewsTestCase):
     def test_edit_validates_choices_and_leaves_blank_answers_unconfirmed(self):

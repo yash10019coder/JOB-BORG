@@ -40,6 +40,49 @@ REMOTE_MARKERS = (
 
 _MULTI_LOCATION_DELIMITERS = (" or ", "/")
 
+# ISO 3166-1 alpha-3 codes for the handful of countries whose alias list in
+# the checked-in dataset carries only a 2-letter code (or, for Portugal, only
+# a full name), so they get no alpha-3 from the alias scan in _GeoIndex.
+# Verified against v3.yaml: these are the ONLY 4 of 252 countries in that
+# dataset without a 3-letter alphabetic alias. If a future dataset drops one of
+# these countries or the engine starts emitting a different canonical name for
+# it, country_records() simply omits it -- country records are additive
+# metadata, never a reason for the engine itself to fail.
+country_alpha3_supplement = {
+    "CU": "cub",
+    "EE": "est",
+    "KW": "kwt",
+    "PT": "prt",
+}
+
+# Human-facing names for countries whose v3.yaml alias list carries no
+# full-name alias at all -- only bare codes ("geo", "dji") or a name with
+# punctuation the label heuristic rejects ("bonaire, saint eustatius and
+# saba"). Purely cosmetic: these countries still normalize, index, and map
+# to a region by their canonical name/alpha-3 exactly as before. Remove an
+# entry once its country gains a clean full-name alias in the dataset.
+country_label_supplement = {
+    "BQ": "Bonaire, Sint Eustatius and Saba",
+    "DJ": "Djibouti",
+    "GE": "Georgia",
+    "LC": "Saint Lucia",
+    "LU": "Luxembourg",
+}
+
+# Words kept lowercase mid-name when title-casing a country label, so
+# "united states of america" reads "United States of America" rather than
+# "...Of America". Never applied to the first or last word.
+_TITLECASE_MINOR_WORDS = frozenset(
+    {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "nor",
+     "of", "on", "or", "the", "to", "up", "v", "via", "with"}
+)
+
+# Uppercased alpha-3 values from country_alpha3_supplement, for cheap
+# membership tests in alpha3_for_country().
+_SUPPLEMENT_ALPHA3_VALUES = frozenset(
+    code.upper() for code in country_alpha3_supplement.values()
+)
+
 _UNRESOLVED = {"city": None, "region": None, "country": None, "resolved": False}
 
 # A defined "no place information, and that's fine" state -- distinct from
@@ -156,6 +199,8 @@ class _GeoIndex:
 
     def __init__(self, data):
         self.country_by_alias = {}
+        self.country_alpha3 = {}
+        self.country_alpha3_by_name = {}
         # R8's dedicated country-code-prefix lookup, always populated for
         # every country's ISO code (except the ones colliding with a US
         # state postal abbreviation) -- independent of country_by_alias,
@@ -193,6 +238,31 @@ class _GeoIndex:
             self.country_population[name] = country.get("population")
             for alias in country.get("aliases") or []:
                 self.country_by_alias[alias] = name
+            for alias in country.get("aliases") or []:
+                # Skip an alias that merely repeats the canonical name: for a
+                # country whose canonical name is already a 3-letter code
+                # ("UAE"), that alias is the alpha-2, not the alpha-3, and
+                # keeping it would let the wrong one win the tiebreak.
+                if alias.lower() == name.lower():
+                    continue
+                if len(alias) == 3 and alias.isalpha():
+                    self.country_alpha3[alias.lower()] = name
+            # ISO 3166-1 alpha-3 per country, taken from the alias list above.
+            # This is the only *unambiguous* join key from a standards-based
+            # code to this dataset's canonical country name: the canonical
+            # `name` is itself a mix (bare ISO-2 for some countries -- "US",
+            # "SG", "Australia" -> "AU" -- and a full name for others --
+            # "Germany", "India", "Canada"), and `country_by_prefix_code`
+            # deliberately omits alpha-2 codes colliding with a US state
+            # postal abbreviation, so alpha-2 can't bridge `CA`/`DE`/`IN`.
+            # Alpha-3 is present and collision-free for 248 of the 252
+            # countries here; country_records() supplements the remaining 4.
+            for alpha3 in country.get("aliases") or []:
+                if len(alpha3) == 3 and alpha3.isalpha() and alpha3.lower() != name.lower():
+                    self.country_alpha3_by_name[name.lower()] = alpha3.upper()
+                    break
+            else:
+                self.country_alpha3_by_name.setdefault(name.lower(), None)
 
         for region in data.get("regions") or []:
             code = region["code"]
@@ -229,6 +299,173 @@ class _GeoIndex:
             self.region_full_by_alias[alias] = (code, country)
         self.region_any_by_alias.setdefault(alias, []).append((code, country))
         self.region_scoped_by_country_alias[(country, alias)] = code
+
+
+@lru_cache(maxsize=None)
+def country_records():
+    """Return the dataset's countries as sorted
+    ``{"name", "alpha3", "label"}`` dicts -- the public way for another app
+    to enumerate every country this engine can emit, so nothing has to
+    re-derive the vocabulary (or guess at ISO codes) from scratch.
+
+    ``name`` is the engine's canonical country string, exactly as it appears
+    in a ``normalize_location()`` result's ``country`` key, so callers can
+    build a lookup keyed on it without a second normalization pass.
+    ``alpha3`` is the ISO 3166-1 alpha-3 code, or ``None`` for the four
+    countries whose alias list carries only a 2-letter code (see
+    ``country_alpha3_supplement``). ``label`` is a human-facing name: the
+    canonical name, or the country's full name from its aliases when the
+    canonical name is a bare 2-letter code ("US" -> "United States").
+
+    Never raises: a missing/malformed dataset degrades to an empty list,
+    honoring the same contract as ``normalize_location``.
+    """
+    try:
+        index = _try_load_index()
+    except LocationDataError:
+        return []
+    records = {}
+    for alpha3, canonical in index.country_alpha3.items():
+        records[canonical] = alpha3
+    for canonical, alpha3 in country_alpha3_supplement.items():
+        records.setdefault(canonical, alpha3)
+
+    out = []
+    for canonical, alpha3 in records.items():
+        out.append(
+            {
+                "name": canonical,
+                "alpha3": (alpha3 or "").upper() or None,
+                "label": _country_label(canonical),
+            }
+        )
+    return sorted(out, key=lambda record: record["label"])
+
+
+def country_alpha2_map():
+    """Return ``{ISO 3166-1 alpha-2: engine canonical country name}`` for every
+    country the dataset can resolve.
+
+    Sourced from the same prefix index ``normalize_location``'s R8 handling
+    uses, so it carries that index's one documented gap: countries whose
+    alpha-2 collides with a US state postal abbreviation are **absent**,
+    because the index drops those codes outright rather than let "CA" mean
+    both California and Canada. In this dataset that is a handful of countries
+    (``CA``, ``DE``, ``IN``, ``NO``, ...). Callers needing those few must
+    supplement explicitly rather than infer, so a missing entry is never
+    mistaken for "this country doesn't exist".
+
+    Never raises; returns ``{}`` if the dataset can't load.
+    """
+    try:
+        return dict(_try_load_index().country_by_prefix_code)
+    except LocationDataError:
+        return {}
+
+
+def alpha3_for_country(value: str) -> str | None:
+    """Normalize a country to its ISO 3166-1 alpha-3 code, or ``None``.
+
+    Tries, in order: an alpha-3 code; the engine's own canonical country name
+    ("US", "UK", "Germany", "India", "Canada" -- what a
+    ``normalize_location()`` result's ``"country"`` holds, so a caller already
+    holding one needs no conversion); then any alias the dataset resolves
+    unambiguously (a full name like "Singapore", or a non-colliding alpha-2
+    like "FR").
+
+    **Some ISO alpha-2 codes do not resolve, by design.**
+    ``country_by_prefix_code`` and ``country_by_alias`` both omit any code
+    colliding with a US state postal abbreviation, so "CA", "DE", "IN", "AL",
+    "AR", "ID", "GA", "LA", "MS", "MT", ... return ``None`` -- "CA" means both
+    California and Canada and the engine refuses to guess. This is why alpha-3
+    is the key country-keyed data (Profile's per-country fields, region
+    membership) should store: alpha-3 has no such collisions, and is present
+    for all 252 countries once ``country_alpha3_supplement`` is applied.
+
+    Never raises; returns ``None`` for blank/unrecognized input.
+    """
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    try:
+        index = _try_load_index()
+    except LocationDataError:
+        return None
+    if index is None:
+        return None
+
+    upper = candidate.upper()
+    # Already alpha-3. `country_alpha3` is keyed by *lowercase* alpha-3, so
+    # membership must be tested against its keys -- testing .values() would
+    # match any canonical name that happens to be 3 letters (e.g. "UAE") and
+    # wrongly return it as its own alpha-3.
+    if len(upper) == 3 and (
+        upper.lower() in index.country_alpha3 or upper in _SUPPLEMENT_ALPHA3_VALUES
+    ):
+        return upper
+    # Canonical name, then any unambiguous alias.
+    for canonical in (candidate, index.country_by_alias.get(candidate.lower(), "")):
+        if not canonical:
+            continue
+        alpha3 = index.country_alpha3_by_name.get(canonical.lower())
+        if alpha3:
+            return alpha3
+        supplement = country_alpha3_supplement.get(canonical)
+        if supplement:
+            return supplement.upper()
+    return None
+
+
+def _titlecase_country(name: str) -> str:
+    """Title-case a country name, keeping minor words lowercase except at
+    the start and end of the name ("united states of america" ->
+    "United States of America")."""
+    words = name.split()
+    out = []
+    for position, word in enumerate(words):
+        lowered = word.lower()
+        if position not in (0, len(words) - 1) and lowered in _TITLECASE_MINOR_WORDS:
+            out.append(lowered)
+        else:
+            out.append(lowered[:1].upper() + lowered[1:])
+    return " ".join(out)
+
+
+def _country_label(canonical: str) -> str:
+    """Human-facing name for a canonical country string.
+
+    A bare 2-letter canonical name ("US", "UK", "SG") is replaced with the
+    country's full name taken from its own aliases, so dropdowns don't read
+    "US, AU, SG" next to "Germany, India, Canada". Picks the longest purely
+    alphabetic alias, which in this dataset is consistently the full name
+    ("United States", "United Kingdom", "Singapore"). Falls back to the
+    canonical name when no such alias exists.
+    """
+    # A canonical name of 2-3 uppercase letters is a country *code* standing in
+    # for a name ("US", "UK", "SG", and also the 3-letter "UAE"), not a real
+    # name -- look up the full name from its aliases. Anything else is already
+    # a real name ("Germany", "India") and is returned as-is.
+    if not (len(canonical) <= 3 and canonical.isalpha() and canonical.isupper()):
+        return canonical
+    if canonical in country_label_supplement:
+        return country_label_supplement[canonical]
+    try:
+        index = _try_load_index()
+    except LocationDataError:
+        return canonical
+    best = None
+    for alias, owner in index.country_by_alias.items():
+        if owner != canonical:
+            continue
+        # `str.isalpha()` alone would reject every multi-word alias
+        # ("united kingdom"), since a space is not alphabetic -- compare the
+        # letters only, so "great britain" and "united states" both qualify
+        # while codes ("gbr", "usa") and dotted abbreviations ("u.k.") don't.
+        letters = alias.replace(" ", "").replace("-", "").replace(".", "")
+        if len(alias) > 3 and letters.isalpha() and alias.isascii():
+            if best is None or len(alias) > len(best):
+                best = alias
+    return _titlecase_country(best) if best else canonical
 
 
 @lru_cache(maxsize=None)

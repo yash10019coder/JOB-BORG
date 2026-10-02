@@ -36,6 +36,13 @@ from apps.auto_apply.models import AutoApplyDraft
 from apps.jobs.models import JobSource
 
 from . import answer_resolution
+from apps.web.salary_bands import (
+    DEFAULT_SALARY_BANDS,
+    SALARY_BANDS_BY_REGION,
+    _get_salary_band_label,
+    validate_salary_by_region,
+)
+from apps.web.regions import region_for_country
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +59,7 @@ logger = logging.getLogger(__name__)
 # threshold, where an answer legitimately outside the DOM sample is a real
 # possibility worth not blocking.
 _SMALL_OPTION_SET_ENFORCE_THRESHOLD = 15
+
 
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
@@ -319,6 +327,44 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         }
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
+
+    # -- Salary region resolution from Profile.salary_by_region ---------------
+    if profile and profile.salary_by_region:
+        # Validate the stored salary_by_region first
+        cleaned_salary_by_region = validate_salary_by_region(profile.salary_by_region)
+
+        # Get job's country from normalized location
+        job_country = ""
+        if job.target_locations_normalized:
+            # target_locations_normalized is a list of {"raw": ..., "country": ...}
+            for loc in job.target_locations_normalized:
+                if loc.get("country"):
+                    job_country = loc["country"]
+                    break
+        job_region = region_for_country(job_country)
+
+        if job_region and job_region in cleaned_salary_by_region:
+            band_key = cleaned_salary_by_region[job_region]
+            label = _get_salary_band_label(job_region, band_key)
+
+            # Find the salary_expectation question in answers_payload and override
+            for q_label, entry in answers_payload.items():
+                if entry.get("category") == "salary_expectation":
+                    # Do not override user-confirmed answers
+                    if entry.get("user_confirmed"):
+                        continue
+                    # For option-bearing fields, validate the band key against form options
+                    field_options = entry.get("options") or []
+                    if field_options and label not in field_options:
+                        # Band key not in current form's options - keep existing answer with needs_review
+                        entry["needs_review"] = True
+                        entry["reason"] = "profile_derived_region_invalid_option"
+                        continue
+                    # Valid override
+                    entry["value"] = label
+                    entry["needs_review"] = False
+                    entry["reason"] = "profile_derived_region"
+                    break
 
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here

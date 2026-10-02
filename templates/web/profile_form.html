@@ -3,9 +3,100 @@
 {% block content %}
 <h1>Your job search profile</h1>
 <p class="muted">Set your criteria — saving refreshes your recommendations.</p>
-<form method="post" enctype="multipart/form-data">
+<form method="post" enctype="multipart/form-data" id="profile-form">
     {% csrf_token %}
-    {{ form.as_p }}
+    {{ form.non_field_errors }}
+
+    {# Everything except the per-country authorization repeater, which is
+       repeater-shaped and rendered by hand just below. #}
+    {% for field in form.hidden_fields %}{{ field }}{% endfor %}
+    {% for field in form.visible_fields %}
+        {% if field.name == "citizenship_countries" %}
+            <p>
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+                {{ field.errors }}
+            </p>
+
+            <fieldset id="visa-authorization">
+                <legend>Work authorization by country</legend>
+                <p class="muted">
+                    Authorization is country-specific — being authorized to work in
+                    the US says nothing about Germany. Add one row per country you
+                    would be applying to.
+                </p>
+                <div id="visa-rows"></div>
+                <button type="button" id="visa-add">Add country</button>
+                <template id="visa-row-template">
+                    <p class="visa-row">
+                        <select name="visa_country[]" aria-label="Country">
+                            <option value="">— Select country —</option>
+                            {% for value, label in country_choices %}
+                                <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <select name="visa_status[]" aria-label="Work authorization">
+                            <option value="">— Select status —</option>
+                            {% for value, label in visa_status_choices %}
+                                <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="button" class="visa-remove">Remove</button>
+                    </p>
+                </template>
+            </fieldset>
+        {% else %}
+            <p>
+                {{ field.label_tag }}
+                {{ field }}
+                {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+                {{ field.errors }}
+            </p>
+        {% endif %}
+    {% endfor %}
+
     <button type="submit">Save profile</button>
+</form>
+
+<script>
+(function () {
+    var rows = document.getElementById("visa-rows");
+    var template = document.getElementById("visa-row-template");
+    var existing = {{ visa_rows_json|safe }};
+
+    function addRow(country, status) {
+        var row = template.content.cloneNode(true);
+        if (country) row.querySelector("select[name='visa_country[]']").value = country;
+        if (status) row.querySelector("select[name='visa_status[]']").value = status;
+        rows.appendChild(row);
+    }
+
+    // Seed from stored Profile.visa_status_by_country, one row per country.
+    existing.forEach(function (pair) { addRow(pair[0], pair[1]); });
+    // Always leave one blank row so the form is usable without JS add-clicks.
+    if (!existing.length) addRow("", "");
+
+    document.getElementById("visa-add").addEventListener("click", function () {
+        addRow("", "");
+    });
+
+    rows.addEventListener("click", function (event) {
+        if (event.target.classList.contains("visa-remove")) {
+            event.target.closest(".visa-row").remove();
+        }
+    });
+})();
+</script>
+
+<hr style="margin: 2rem 0;">
+
+<h2>Saved answers</h2>
+<p class="muted">Reused automatically for work authorization, sponsorship, and salary questions on auto-apply forms. Pre-filled from your Profile — review and adjust.</p>
+
+<form method="post" action="{% url 'explicit_answers' %}" id="explicit-answers-form">
+    {% csrf_token %}
+    {{ explicit_answers_form.as_p }}
+    <button type="submit">Save answers</button>
 </form>
 {% endblock %}
