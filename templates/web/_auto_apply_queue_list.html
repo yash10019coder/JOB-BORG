@@ -21,6 +21,8 @@
         {% endif %}
         {% if draft.status == "drafted" %}
         <button type="button" class="btn" data-modal-open="draft-modal-{{ draft.id }}">Review & edit</button>
+        {% else %}
+        <button type="button" class="btn" data-modal-open="draft-modal-{{ draft.id }}">Details</button>
         {% endif %}
     </div>
 

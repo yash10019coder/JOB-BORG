@@ -8,13 +8,17 @@
     function initInfiniteScroll() {
         var sentinel = document.querySelector("[data-scroll-sentinel]");
         if (!sentinel) {
+            console.log("Infinite scroll: no sentinel found");
             return;
         }
 
         var nav = document.querySelector("#rec-pagination-nav, #queue-pagination-nav");
         var listContainer = document.querySelector("#recommendations-list, #auto-apply-queue-list");
 
+        console.log("Infinite scroll init:", { sentinel: !!sentinel, nav: !!nav, listContainer: !!listContainer });
+
         if (!listContainer) {
+            console.log("Infinite scroll: no listContainer");
             return;
         }
 
@@ -22,7 +26,7 @@
             function (entries) {
                 entries.forEach(function (entry) {
                     if (entry.isIntersecting) {
-                        loadNextPage(sentinel, listContainer, nav, observer);
+                        loadNextPage(entry.target, listContainer, nav, observer);
                     }
                 });
             },
@@ -33,21 +37,24 @@
 
         // Hide pagination nav on successful setup (progressive enhancement)
         if (nav) {
+            console.log("Hiding pagination nav");
             nav.style.display = "none";
+        } else {
+            console.log("Infinite scroll: nav not found");
         }
     }
 
-    function loadNextPage(sentinel, listContainer, nav, observer) {
-        var nextUrl = sentinel.dataset.nextUrl;
+    function loadNextPage(currentSentinel, listContainer, nav, observer) {
+        var nextUrl = currentSentinel.dataset.nextUrl;
         if (!nextUrl) {
             return;
         }
 
         // Prevent double-fetch
-        if (sentinel.dataset.loading === "true") {
+        if (currentSentinel.dataset.loading === "true") {
             return;
         }
-        sentinel.dataset.loading = "true";
+        currentSentinel.dataset.loading = "true";
 
         fetch(nextUrl, {
             headers: { "X-Requested-With": "XMLHttpRequest" },
@@ -62,30 +69,35 @@
                 var tempDiv = document.createElement("div");
                 tempDiv.innerHTML = html.trim();
 
+                // Remove any pagination nav elements from the fetched fragment
+                var fetchedNavs = tempDiv.querySelectorAll("#rec-pagination-nav, #queue-pagination-nav");
+                fetchedNavs.forEach(function (nav) {
+                    nav.remove();
+                });
+
                 // Insert new cards before the old sentinel
                 var newSentinel = tempDiv.querySelector("[data-scroll-sentinel]");
                 var newCards = tempDiv.querySelectorAll(":scope > *:not([data-scroll-sentinel])");
 
                 newCards.forEach(function (node) {
-                    sentinel.parentNode.insertBefore(node, sentinel);
+                    currentSentinel.parentNode.insertBefore(node, currentSentinel);
                 });
 
                 // Replace sentinel with new one (or remove if no more pages)
                 if (newSentinel) {
-                    sentinel.parentNode.replaceChild(newSentinel, sentinel);
-                    observer.unobserve(sentinel);
+                    currentSentinel.parentNode.replaceChild(newSentinel, currentSentinel);
+                    observer.unobserve(currentSentinel);
                     observer.observe(newSentinel);
-                    sentinel = newSentinel;
                 } else {
-                    observer.unobserve(sentinel);
-                    sentinel.parentNode.removeChild(sentinel);
+                    observer.unobserve(currentSentinel);
+                    currentSentinel.parentNode.removeChild(currentSentinel);
                 }
             })
             .catch(function (err) {
                 console.error("Infinite scroll fetch failed:", err);
             })
             .finally(function () {
-                sentinel.dataset.loading = "false";
+                currentSentinel.dataset.loading = "false";
             });
     }
 

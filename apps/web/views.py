@@ -88,7 +88,13 @@ def profile(request):
         form = ProfileForm(instance=instance)
     # Also pass the explicit answers form for the "Saved answers" section
     explicit_answers_form = ExplicitAnswersForm(user=request.user)
-    return render(request, "web/profile_form.html", {"form": form, "explicit_answers_form": explicit_answers_form})
+    from apps.web.salary_bands import SALARY_BANDS_BY_REGION
+    import json
+    return render(request, "web/profile_form.html", {
+        "form": form,
+        "explicit_answers_form": explicit_answers_form,
+        "salary_bands_json": json.dumps(SALARY_BANDS_BY_REGION),
+    })
 
 
 @login_required
@@ -101,12 +107,14 @@ def explicit_answers(request):
             # Also persist salary_by_region from POST (region-specific values)
             salary_by_region = request.POST.get("salary_by_region")
             if salary_by_region:
+                from apps.accounts.models import Profile
+                from apps.web.salary_bands import validate_salary_by_region
+                import json
                 try:
-                    from apps.accounts.models import Profile
-                    import json
                     data = json.loads(salary_by_region)
+                    cleaned = validate_salary_by_region(data)
                     profile = request.user.profile
-                    profile.salary_by_region = data
+                    profile.salary_by_region = cleaned
                     profile.save(update_fields=["salary_by_region"])
                 except (json.JSONDecodeError, Profile.DoesNotExist):
                     pass
@@ -114,7 +122,14 @@ def explicit_answers(request):
             return redirect("profile")
     else:
         form = ExplicitAnswersForm(user=request.user)
-    return render(request, "web/profile_form.html", {"explicit_answers_form": form, "form": ProfileForm(instance=request.user.profile)})
+    # Pass salary bands to template for region tabs
+    from apps.web.salary_bands import SALARY_BANDS_BY_REGION
+    import json
+    return render(request, "web/profile_form.html", {
+        "explicit_answers_form": form,
+        "form": ProfileForm(instance=request.user.profile),
+        "salary_bands_json": json.dumps(SALARY_BANDS_BY_REGION),
+    })
 
 
 # --- Recommendations ------------------------------------------------------

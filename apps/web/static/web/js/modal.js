@@ -29,11 +29,21 @@
             }
         });
 
-        // Close on backdrop click
+        // Close on backdrop click (click outside dialog content)
         document.addEventListener("click", function (e) {
             var modal = e.target.closest("dialog");
             if (modal && e.target === modal) {
-                modal.close();
+                // Click was directly on the dialog element (backdrop)
+                var rect = modal.getBoundingClientRect();
+                var isInDialog = (
+                    e.clientX >= rect.left &&
+                    e.clientX <= rect.right &&
+                    e.clientY >= rect.top &&
+                    e.clientY <= rect.bottom
+                );
+                if (!isInDialog) {
+                    modal.close();
+                }
             }
         });
 

@@ -32,7 +32,7 @@
             {% if status_filter %}with status "{{ status_filter_label }}"{% endif %}
             {% if status_filter and ats_filter %} and{% endif %}
             {% if ats_filter %}on {{ ats_filter_label }}{% endif %}.
-            <a href="{% querystring status=None ats=None %}">Clear filters</a> to see all.
+            <a href="{% querystring status=None ats=None page=None %}">Clear filters</a> to see all.
         </p>
     {% else %}
         <p class="muted">No auto-apply drafts yet. Trigger "Auto-apply" on a Greenhouse-sourced job from your <a href="{% url 'recommendations' %}">recommendations</a>.</p>

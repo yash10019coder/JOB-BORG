@@ -155,14 +155,14 @@ class ExplicitAnswersViewTests(TestCase):
                 "work_authorization": "yes_authorized",
                 "sponsorship": "no",
                 "salary_expectation": "175-200k",
-                "salary_by_region": json.dumps({"US": "175-200k", "IN": "30-50L"}),
+                "salary_by_region": json.dumps({"US": "175-200k", "IN": "10-15L"}),
             },
         )
         self.assertRedirects(response, reverse("profile"))
 
         self.user.profile.refresh_from_db()
         self.assertEqual(
-            self.user.profile.salary_by_region, {"US": "175-200k", "IN": "30-50L"}
+            self.user.profile.salary_by_region, {"US": "175-200k", "IN": "10-15L"}
         )
 
 
