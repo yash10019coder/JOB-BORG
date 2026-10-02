@@ -53,8 +53,7 @@ class AuthProfileTests(TestCase):
                 "min_salary": "120000",
                 "remote_pref": Profile.RemotePref.REMOTE_ONLY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         self.assertRedirects(resp, reverse("recommendations"), fetch_redirect_response=False)
@@ -105,7 +104,7 @@ class AuthProfileTests(TestCase):
     def test_target_locations_normalized_on_save(self):
         user = User.objects.create_user(username="carol", password="pw")
         self.client.force_login(user)
-        self.client.post(
+        response = self.client.post(
             reverse("profile"),
             {
                 "full_name": "", "headline": "",
@@ -114,8 +113,10 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                # citizenship_countries and visa_status_by_country are handled
+                # by the repeater UI (visa_country[]/visa_status[]) and
+                # multi-select; omit here so the form uses defaults.
+                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="carol").profile
@@ -156,8 +157,7 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="erin").profile
@@ -172,13 +172,12 @@ class AuthProfileTests(TestCase):
             reverse("profile"),
             {
                 "full_name": "", "headline": "",
-                "target_titles": "", "target_tags": "",
+"target_titles": "", "target_tags": "",
                 "target_locations": "SF, San Francisco",
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="frank").profile
@@ -199,8 +198,7 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         self.mock_schedule.assert_called_with(user.profile.pk)
@@ -216,8 +214,7 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "not-a-number", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         self.assertEqual(resp.status_code, 200)  # re-rendered, not redirected
@@ -238,8 +235,7 @@ class AuthProfileTests(TestCase):
                     "target_locations": "", "excluded_employers": "",
                     "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                     "is_active": "on",
-                    "visa_status_by_country": "", "citizenship_countries": "",
-                                        "preferred_currency": "USD",
+                    "preferred_currency": "USD",
                     "resume": SimpleUploadedFile(
                         "resume.pdf", make_pdf_bytes("Grace's resume"), content_type="application/pdf"
                     ),
@@ -255,7 +251,7 @@ class AuthProfileTests(TestCase):
         alice = User.objects.create_user(username="alice", password="pw")
         bob = User.objects.create_user(username="bob", password="pw")
         self.client.force_login(alice)
-        self.client.post(
+        resp = self.client.post(
             reverse("profile"),
             {
                 "full_name": "Alice", "headline": "",
@@ -263,8 +259,7 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status_by_country": "", "citizenship_countries": "",
-                                "preferred_currency": "USD",
+                "preferred_currency": "USD",
             },
         )
         # Bob's profile is untouched — the view only ever edits request.user's.

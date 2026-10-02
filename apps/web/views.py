@@ -1,5 +1,7 @@
 """Web views: signup, profile setup (U11), recommendations + actions (U12),
 auto-apply trigger/queue/edit/send (U8)."""
+import json
+
 from django import forms
 from django.contrib import messages
 from django.contrib.auth import login
@@ -17,7 +19,7 @@ from django.utils.html import format_html, format_html_join
 from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
-from apps.accounts.models import EmailInboxCredential
+from apps.accounts.models import EmailInboxCredential, Profile
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
@@ -27,6 +29,7 @@ from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
+from apps.web.regions import country_choices
 
 from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
 
@@ -76,6 +79,33 @@ def signup(request):
     return render(request, "registration/signup.html", {"form": form})
 
 
+def _profile_form_context(request, form):
+    """Template context shared by the profile and explicit-answers views.
+
+    Both render `web/profile_form.html`, and the per-country authorization
+    repeater needs the country list and status vocabulary in both. Salary
+    bands no longer go through here: they are now real per-region
+    `<select>` fields on `ProfileForm`, so there is no JSON blob to hand the
+    template and no client-side state to reconcile.
+    """
+    profile_obj = request.user.profile
+    return {
+        "form": form,
+        "explicit_answers_form": ExplicitAnswersForm(user=request.user),
+        "country_choices": country_choices(),
+        "visa_status_choices": Profile.VisaStatus.choices,
+        # One [alpha3, status] pair per stored row, so the repeater can
+        # re-render what's already saved. JSON-encoded here rather than in
+        # the template to keep quoting/escaping correct.
+        "visa_rows_json": json.dumps(
+            [
+                [alpha3, status]
+                for alpha3, status in (profile_obj.visa_status_by_country or {}).items()
+            ]
+        ),
+    }
+
+
 @login_required
 def profile(request):
     instance = request.user.profile  # always the requesting user's own profile
@@ -86,15 +116,7 @@ def profile(request):
             return redirect("recommendations")
     else:
         form = ProfileForm(instance=instance)
-    # Also pass the explicit answers form for the "Saved answers" section
-    explicit_answers_form = ExplicitAnswersForm(user=request.user)
-    from apps.web.salary_bands import SALARY_BANDS_BY_REGION
-    import json
-    return render(request, "web/profile_form.html", {
-        "form": form,
-        "explicit_answers_form": explicit_answers_form,
-        "salary_bands_json": json.dumps(SALARY_BANDS_BY_REGION),
-    })
+    return render(request, "web/profile_form.html", _profile_form_context(request, form))
 
 
 @login_required
@@ -104,32 +126,19 @@ def explicit_answers(request):
         form = ExplicitAnswersForm(request.POST, user=request.user)
         if form.is_valid():
             form.save()
-            # Also persist salary_by_region from POST (region-specific values)
-            salary_by_region = request.POST.get("salary_by_region")
-            if salary_by_region:
-                from apps.accounts.models import Profile
-                from apps.web.salary_bands import validate_salary_by_region
-                import json
-                try:
-                    data = json.loads(salary_by_region)
-                    cleaned = validate_salary_by_region(data)
-                    profile = request.user.profile
-                    profile.salary_by_region = cleaned
-                    profile.save(update_fields=["salary_by_region"])
-                except (json.JSONDecodeError, Profile.DoesNotExist):
-                    pass
+            # `salary_by_region` and the per-country authorization rows are
+            # Profile fields now, edited by the profile form above; the
+            # explicit-answers form saves only the free-text answer rows, so
+            # it cannot clobber the Profile-owned structured values.
             messages.info(request, "Saved answers updated.")
             return redirect("profile")
     else:
         form = ExplicitAnswersForm(user=request.user)
-    # Pass salary bands to template for region tabs
-    from apps.web.salary_bands import SALARY_BANDS_BY_REGION
-    import json
-    return render(request, "web/profile_form.html", {
-        "explicit_answers_form": form,
-        "form": ProfileForm(instance=request.user.profile),
-        "salary_bands_json": json.dumps(SALARY_BANDS_BY_REGION),
-    })
+    return render(
+        request,
+        "web/profile_form.html",
+        _profile_form_context(request, ProfileForm(instance=request.user.profile)),
+    )
 
 
 # --- Recommendations ------------------------------------------------------

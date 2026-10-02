@@ -3,125 +3,100 @@
 {% block content %}
 <h1>Your job search profile</h1>
 <p class="muted">Set your criteria — saving refreshes your recommendations.</p>
-<form method="post" enctype="multipart/form-data">
+<form method="post" enctype="multipart/form-data" id="profile-form">
     {% csrf_token %}
-    {{ form.as_p }}
+    {{ form.non_field_errors }}
+
+    {# Everything except the per-country authorization repeater, which is
+       repeater-shaped and rendered by hand just below. #}
+    {% for field in form.hidden_fields %}{{ field }}{% endfor %}
+    {% for field in form.visible_fields %}
+        {% if field.name == "citizenship_countries" %}
+            <p>
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+                {{ field.errors }}
+            </p>
+
+            <fieldset id="visa-authorization">
+                <legend>Work authorization by country</legend>
+                <p class="muted">
+                    Authorization is country-specific — being authorized to work in
+                    the US says nothing about Germany. Add one row per country you
+                    would be applying to.
+                </p>
+                <div id="visa-rows"></div>
+                <button type="button" id="visa-add">Add country</button>
+                <template id="visa-row-template">
+                    <p class="visa-row">
+                        <select name="visa_country[]" aria-label="Country">
+                            <option value="">— Select country —</option>
+                            {% for value, label in country_choices %}
+                                <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <select name="visa_status[]" aria-label="Work authorization">
+                            <option value="">— Select status —</option>
+                            {% for value, label in visa_status_choices %}
+                                <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="button" class="visa-remove">Remove</button>
+                    </p>
+                </template>
+            </fieldset>
+        {% else %}
+            <p>
+                {{ field.label_tag }}
+                {{ field }}
+                {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+                {{ field.errors }}
+            </p>
+        {% endif %}
+    {% endfor %}
+
     <button type="submit">Save profile</button>
 </form>
+
+<script>
+(function () {
+    var rows = document.getElementById("visa-rows");
+    var template = document.getElementById("visa-row-template");
+    var existing = {{ visa_rows_json|safe }};
+
+    function addRow(country, status) {
+        var row = template.content.cloneNode(true);
+        if (country) row.querySelector("select[name='visa_country[]']").value = country;
+        if (status) row.querySelector("select[name='visa_status[]']").value = status;
+        rows.appendChild(row);
+    }
+
+    // Seed from stored Profile.visa_status_by_country, one row per country.
+    existing.forEach(function (pair) { addRow(pair[0], pair[1]); });
+    // Always leave one blank row so the form is usable without JS add-clicks.
+    if (!existing.length) addRow("", "");
+
+    document.getElementById("visa-add").addEventListener("click", function () {
+        addRow("", "");
+    });
+
+    rows.addEventListener("click", function (event) {
+        if (event.target.classList.contains("visa-remove")) {
+            event.target.closest(".visa-row").remove();
+        }
+    });
+})();
+</script>
 
 <hr style="margin: 2rem 0;">
 
 <h2>Saved answers</h2>
 <p class="muted">Reused automatically for work authorization, sponsorship, and salary questions on auto-apply forms. Pre-filled from your Profile — review and adjust.</p>
 
-<!-- Region tabs for salary -->
-<div class="salary-region-tabs" role="tablist" aria-label="Salary region">
-  <button role="tab" data-region="US" aria-selected="true" aria-controls="salary-US-panel" id="salary-US-tab" type="button">US ($)</button>
-  <button role="tab" data-region="EU" aria-selected="false" aria-controls="salary-EU-panel" id="salary-EU-tab" type="button">EU (€)</button>
-  <button role="tab" data-region="IN" aria-selected="false" aria-controls="salary-IN-panel" id="salary-IN-tab" type="button">India (₹)</button>
-  <button role="tab" data-region="UK" aria-selected="false" aria-controls="salary-UK-panel" id="salary-UK-tab" type="button">UK (£)</button>
-  <button role="tab" data-region="CA" aria-selected="false" aria-controls="salary-CA-panel" id="salary-CA-tab" type="button">Canada (C$)</button>
-  <button role="tab" data-region="AU" aria-selected="false" aria-controls="salary-AU-panel" id="salary-AU-tab" type="button">Australia (A$)</button>
-  <button role="tab" data-region="SG" aria-selected="false" aria-controls="salary-SG-panel" id="salary-SG-tab" type="button">Singapore (S$)</button>
-</div>
-
 <form method="post" action="{% url 'explicit_answers' %}" id="explicit-answers-form">
     {% csrf_token %}
     {{ explicit_answers_form.as_p }}
-    
-    <!-- Hidden input to capture per-region salary JSON -->
-    <input type="hidden" name="salary_by_region" id="id_salary_by_region" value="">
     <button type="submit">Save answers</button>
 </form>
-
-<script>
-// Salary region bands from shared config
-const SALARY_BANDS_BY_REGION = JSON.parse('{{ salary_bands_json|escapejs }}');
-
-// Track user's selection per region
-const salarySelections = {};
-
-// Initialize from existing form values
-document.addEventListener("DOMContentLoaded", function() {
-    const salarySelect = document.getElementById("id_salary_expectation");
-    if (salarySelect && salarySelect.value) {
-        // Default to US region for existing value
-        salarySelections["US"] = salarySelect.value;
-    }
-    
-    // Set up tab click handlers
-    document.querySelectorAll(".salary-region-tabs button[role='tab']").forEach(btn => {
-        btn.addEventListener("click", function() {
-            const region = this.dataset.region;
-            switchSalaryRegion(region);
-        });
-    });
-    
-    // Capture salary_expectation changes for the active region
-    if (salarySelect) {
-        salarySelect.addEventListener("change", function() {
-            const activeTab = document.querySelector(".salary-region-tabs button[aria-selected='true']");
-            if (activeTab) {
-                salarySelections[activeTab.dataset.region] = this.value;
-            }
-        });
-    }
-    
-    // On form submit, build salary_by_region JSON
-    const form = document.getElementById("explicit-answers-form");
-    if (form) {
-        form.addEventListener("submit", function() {
-            const hiddenInput = document.getElementById("id_salary_by_region");
-            hiddenInput.value = JSON.stringify(salarySelections);
-        });
-    }
-    
-    // Initialize with US as active
-    switchSalaryRegion("US");
-});
-
-function switchSalaryRegion(region) {
-    // Capture the previously selected region's value BEFORE switching
-    const prevActiveTab = document.querySelector(".salary-region-tabs button[aria-selected='true']");
-    const salarySelect = document.getElementById("id_salary_expectation");
-    
-    // Save current value to selections for the region we're leaving
-    if (prevActiveTab && prevActiveTab.dataset.region !== region && salarySelect) {
-        salarySelections[prevActiveTab.dataset.region] = salarySelect.value;
-    }
-    
-    // Update tab states
-    document.querySelectorAll(".salary-region-tabs button[role='tab']").forEach(btn => {
-        const isActive = btn.dataset.region === region;
-        btn.setAttribute("aria-selected", isActive);
-        btn.setAttribute("tabindex", isActive ? "0" : "-1");
-    });
-    
-    // Update salary_expectation dropdown options
-    if (!salarySelect) return;
-    
-    const currentValue = salarySelect.value;
-    const bands = SALARY_BANDS_BY_REGION[region] || SALARY_BANDS_BY_REGION["US"];
-    
-    // Rebuild options
-    salarySelect.innerHTML = "";
-    bands.forEach(([value, label]) => {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        salarySelect.appendChild(option);
-    });
-    
-    // Restore selection for this region if exists, else keep current
-    if (salarySelections[region]) {
-        salarySelect.value = salarySelections[region];
-    } else if (currentValue) {
-        // Try to keep the current value if it exists in new options
-        const exists = Array.from(salarySelect.options).some(opt => opt.value === currentValue);
-        if (exists) {
-            salarySelect.value = currentValue;
-        }
-    }
-}
-</script>
 {% endblock %}

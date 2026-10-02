@@ -8,17 +8,13 @@
     function initInfiniteScroll() {
         var sentinel = document.querySelector("[data-scroll-sentinel]");
         if (!sentinel) {
-            console.log("Infinite scroll: no sentinel found");
             return;
         }
 
         var nav = document.querySelector("#rec-pagination-nav, #queue-pagination-nav");
         var listContainer = document.querySelector("#recommendations-list, #auto-apply-queue-list");
 
-        console.log("Infinite scroll init:", { sentinel: !!sentinel, nav: !!nav, listContainer: !!listContainer });
-
         if (!listContainer) {
-            console.log("Infinite scroll: no listContainer");
             return;
         }
 
@@ -37,10 +33,7 @@
 
         // Hide pagination nav on successful setup (progressive enhancement)
         if (nav) {
-            console.log("Hiding pagination nav");
             nav.style.display = "none";
-        } else {
-            console.log("Infinite scroll: nav not found");
         }
     }
 

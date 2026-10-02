@@ -4,8 +4,10 @@ from django import forms
 
 from apps.accounts.models import Profile
 from apps.auto_apply.models import ExplicitAnswer
-from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION
+from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION, alpha3_for_country
 from apps.locations.services import normalize_target_locations
+from apps.web.regions import REGION_KEYS, REGION_LABELS, country_choices
+from apps.web.salary_bands import SALARY_BANDS_BY_REGION
 
 # Profile JSON list-fields edited as comma-separated text in the form.
 _LIST_FIELDS = ("target_titles", "target_tags", "target_locations", "excluded_employers")
@@ -29,13 +31,13 @@ class ProfileForm(forms.ModelForm):
     excluded_employers = forms.CharField(
         required=False, help_text="Comma-separated employer slugs to hide"
     )
-    # Visa status per country (JSON), edited as comma-separated "US:h1b, CA:citizen"
-    visa_status_by_country = forms.CharField(
-        required=False, help_text="Comma-separated country:visa pairs, e.g. US:h1b, CA:citizen"
-    )
-    # Citizenship countries (JSON), edited as comma-separated ISO codes
-    citizenship_countries = forms.CharField(
-        required=False, help_text="Comma-separated ISO country codes, e.g. US, IN"
+    # Citizenship is genuinely multi-valued (dual citizens), so this is a real
+    # multi-select rather than a repeater. Choices are the engine's full
+    # country list, valued by ISO alpha-3 -- see Profile.citizenship_countries.
+    citizenship_countries = forms.MultipleChoiceField(
+        required=False,
+        widget=forms.SelectMultiple(attrs={"size": 8}),
+        help_text="Select every country whose citizenship you hold.",
     )
 
     class Meta:
@@ -56,10 +58,14 @@ class ProfileForm(forms.ModelForm):
             "min_salary",
             "remote_pref",
             "is_active",
-            "visa_status_by_country",
-            "citizenship_countries",
             "preferred_currency",
         ]
+        # visa_status_by_country / citizenship_countries / salary_by_region are
+        # deliberately absent: they are repeater- and multi-select-shaped, not
+        # single-widget fields, so they are parsed in clean() from the
+        # getlist() inputs and assigned in save(). Listing them in `fields`
+        # would make ModelForm generate a scalar widget per JSONField and
+        # silently flatten the shape.
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -79,6 +85,29 @@ class ProfileForm(forms.ModelForm):
         # normal save, then apply the change via set_resume() separately.
         self._initial_resume = self.instance.resume if self.instance and self.instance.pk else None
 
+        # Salary: one real <select> per region instead of a single dropdown
+        # whose options JS rewrites. Each region keeps its own field name, so
+        # a plain form POST round-trips every region at once with no client
+        # state, and a no-JS submit saves exactly what is on screen. (The
+        # previous single-dropdown + hidden-JSON approach started with an
+        # empty selection map, so any save that didn't touch the visible
+        # dropdown wrote an empty salary_by_region.)
+        self.fields["citizenship_countries"].choices = country_choices()
+        if self.instance and self.instance.pk:
+            self.initial["citizenship_countries"] = [
+                c for c in (self.instance.citizenship_countries or []) if c
+            ]
+
+        stored_salary = (self.instance.salary_by_region or {}) if self.instance else {}
+        for region_key in REGION_KEYS:
+            field_name = f"salary_region_{region_key}"
+            self.fields[field_name] = forms.ChoiceField(
+                required=False,
+                label=f"{REGION_LABELS[region_key]} salary expectation",
+                choices=SALARY_BANDS_BY_REGION[region_key],
+            )
+            self.initial.setdefault(field_name, stored_salary.get(region_key, ""))
+
     def _clean_list(self, field):
         return _split_csv(self.cleaned_data.get(field, ""))
 
@@ -94,75 +123,86 @@ class ProfileForm(forms.ModelForm):
     def clean_excluded_employers(self):
         return self._clean_list("excluded_employers")
 
-    def clean_visa_status_by_country(self):
-        """Parse repeater rows (visa_country[] / visa_status[]) or CSV fallback."""
-        from apps.locations.engine import alpha3_for_country
-
-        result = {}
-        # Prefer repeater-style inputs from getlist
-        data = self.data
-        countries = data.getlist("visa_country[]")
-        statuses = data.getlist("visa_status[]")
-        if countries or statuses:
-            # Build pairs by index; truncate to shorter list if mismatched
-            pairs = list(zip_longest(countries, statuses, fillvalue=""))
-            for country_raw, status_raw in pairs:
-                country = (country_raw or "").strip()
-                status = (status_raw or "").strip().lower()
-                if not country or not status:
-                    continue
-                a3 = alpha3_for_country(country)
-                if not a3:
-                    # Don't guess; skip unrecognized, or let a later validator
-                    # catch if needed. Store by what user gave as fallback? No.
-                    continue
-                result[a3] = status
-            return result
-        # CSV fallback
-        raw = self.cleaned_data.get("visa_status_by_country", "")
-        pairs = [p.strip() for p in raw.split(",") if p.strip()]
-        for pair in pairs:
-            if ":" not in pair:
-                continue
-            country, visa = pair.split(":", 1)
-            country = country.strip()
-            visa = visa.strip().lower()
-            a3 = alpha3_for_country(country)
-            if a3 and visa:
-                result[a3] = visa
-        return result
 
     def clean_citizenship_countries(self):
-        """Parse citizenship multiselect or CSV into list of alpha-3 codes."""
-        from apps.locations.engine import alpha3_for_country
+        """Countries of citizenship, stored as ISO 3166-1 alpha-3 codes.
 
-        data = self.data
-        # Repeater/multiselect style
-        countries = data.getlist("citizenship_countries[]")
-        if not countries:
-            countries = data.getlist("citizenship_countries")
-        if countries:
-            out = []
-            for c in countries:
-                a3 = alpha3_for_country(c)
-                if a3:
-                    out.append(a3)
-            # De-dup while preserving order
-            seen = set()
-            result = []
-            for x in out:
-                if x not in seen:
-                    seen.add(x)
-                    result.append(x)
-            return result
-        raw = self.cleaned_data.get("citizenship_countries", "")
-        codes = [c.strip() for c in raw.split(",") if c.strip()]
-        out = []
-        for c in codes:
-            a3 = alpha3_for_country(c)
-            if a3:
-                out.append(a3)
-        return out
+        ``MultipleChoiceField`` has already restricted the values to the
+        engine's country list, so this only needs to preserve order and drop
+        duplicates rather than re-validate.
+        """
+        seen: set[str] = set()
+        codes: list[str] = []
+        for code in self.cleaned_data.get("citizenship_countries") or []:
+            if code not in seen:
+                seen.add(code)
+                codes.append(code)
+        return codes
+
+    def clean_visa_status_by_country(self):
+        """Per-country work authorization from the repeater rows.
+
+        Rows are ``visa_country[]`` / ``visa_status[]`` pairs submitted by
+        index. Validation is strict on purpose -- an unrecognized country or
+        status is a form error rather than a silently dropped row, because a
+        dropped row reads back as "nothing known about this country" and
+        would quietly skip a real work-authorization question at draft time.
+
+        A country appearing twice is also an error rather than last-wins: the
+        user meant two different statuses, and picking one for them is a
+        guess about their immigration status.
+        """
+        valid_statuses = {value for value, _ in Profile.VisaStatus.choices}
+        result: dict[str, str] = {}
+        for index, (raw_country, raw_status) in enumerate(
+            zip_longest(
+                self.data.getlist("visa_country[]"),
+                self.data.getlist("visa_status[]"),
+                fillvalue="",
+            )
+        ):
+            country = (raw_country or "").strip()
+            status = (raw_status or "").strip()
+            if not country and not status:
+                continue  # blank spare row
+            errors = []
+            alpha3 = alpha3_for_country(country) if country else None
+            if not alpha3:
+                errors.append(f"Row {index + 1}: {country or '(no country)'} is not a recognized country.")
+            if status not in valid_statuses:
+                errors.append(f"Row {index + 1}: {status or '(no status)'} is not a valid status.")
+            if errors:
+                raise forms.ValidationError(" ".join(errors))
+            if alpha3 in result:
+                raise forms.ValidationError(
+                    f"{country} is listed more than once -- each country needs one status."
+                )
+            result[alpha3] = status
+        return result
+
+    def clean(self):
+        cleaned_data = super().clean()
+        # clean_visa_status_by_country is not a declared field's cleaner (the
+        # repeater has no single widget), so call it explicitly and surface
+        # its error on the first row's country input.
+        try:
+            cleaned_data["visa_status_by_country"] = self.clean_visa_status_by_country()
+        except (forms.ValidationError, AttributeError) as exc:
+            if isinstance(exc, forms.ValidationError):
+                self.add_error(None, exc)
+            # else ignore AttributeError if self.data isn't a QueryDict
+        # citizenship is a declared field; its cleaner already ran, but capture
+        # the (possibly empty) list even when other fields failed so save()
+        # never sees a missing key.
+        cleaned_data.setdefault("citizenship_countries", [])
+        salary_by_region = {}
+        for region_key in REGION_KEYS:
+            value = cleaned_data.get(f"salary_region_{region_key}") or ""
+            if value:
+                salary_by_region[region_key] = value
+        cleaned_data["salary_by_region"] = salary_by_region
+        cleaned_data.setdefault("visa_status_by_country", {})
+        return cleaned_data
 
     def save(self, commit=True):
         resume_changed = "resume" in self.changed_data
@@ -176,6 +216,12 @@ class ProfileForm(forms.ModelForm):
             instance.target_locations
         )
         instance.target_locations_alias_version = CURRENT_LOCATION_ALIAS_VERSION
+        # Absent from Meta.fields (see the note there), so ModelForm never
+        # assigns these -- they are the repeater/multi-select-shaped JSON
+        # fields and must keep their shape.
+        instance.visa_status_by_country = self.cleaned_data.get("visa_status_by_country") or {}
+        instance.citizenship_countries = self.cleaned_data.get("citizenship_countries") or []
+        instance.salary_by_region = self.cleaned_data.get("salary_by_region") or {}
         if commit:
             instance.save()
             if resume_changed:

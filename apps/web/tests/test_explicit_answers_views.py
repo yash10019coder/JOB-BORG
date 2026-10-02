@@ -149,6 +149,12 @@ class ExplicitAnswersViewTests(TestCase):
         )
 
     def test_post_saves_salary_by_region_to_profile(self):
+        """Test that explicit_answers view no longer handles salary_by_region.
+
+        The salary_by_region field is now managed by ProfileForm with per-region
+        salary dropdowns. The explicit_answers view only saves free-text
+        ExplicitAnswer rows.
+        """
         response = self.client.post(
             reverse("explicit_answers"),
             {
@@ -160,10 +166,9 @@ class ExplicitAnswersViewTests(TestCase):
         )
         self.assertRedirects(response, reverse("profile"))
 
+        # salary_by_region should NOT be updated by explicit_answers view anymore
         self.user.profile.refresh_from_db()
-        self.assertEqual(
-            self.user.profile.salary_by_region, {"US": "175-200k", "IN": "10-15L"}
-        )
+        self.assertEqual(self.user.profile.salary_by_region, {})
 
 
 class ProfileFormIncludesExplicitAnswersFormTests(TestCase):
