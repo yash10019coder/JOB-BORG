@@ -39,10 +39,10 @@ from . import answer_resolution
 from apps.web.salary_bands import (
     DEFAULT_SALARY_BANDS,
     SALARY_BANDS_BY_REGION,
-    _map_country_to_region,
     _get_salary_band_label,
     validate_salary_by_region,
 )
+from apps.web.regions import region_for_country
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +341,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 if loc.get("country"):
                     job_country = loc["country"]
                     break
-        job_region = _map_country_to_region(job_country)
+        job_region = region_for_country(job_country)
 
         if job_region and job_region in cleaned_salary_by_region:
             band_key = cleaned_salary_by_region[job_region]

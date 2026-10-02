@@ -53,9 +53,8 @@ class AuthProfileTests(TestCase):
                 "min_salary": "120000",
                 "remote_pref": Profile.RemotePref.REMOTE_ONLY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         self.assertRedirects(resp, reverse("recommendations"), fetch_redirect_response=False)
@@ -115,9 +114,8 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="carol").profile
@@ -139,9 +137,8 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="dave").profile
@@ -159,9 +156,8 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="erin").profile
@@ -181,9 +177,8 @@ class AuthProfileTests(TestCase):
                 "excluded_employers": "",
                 "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         profile = User.objects.get(username="frank").profile
@@ -204,9 +199,8 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         self.mock_schedule.assert_called_with(user.profile.pk)
@@ -222,9 +216,8 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "not-a-number", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         self.assertEqual(resp.status_code, 200)  # re-rendered, not redirected
@@ -245,9 +238,8 @@ class AuthProfileTests(TestCase):
                     "target_locations": "", "excluded_employers": "",
                     "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                     "is_active": "on",
-                    "visa_status": "",
-                    "citizenship": "",
-                    "preferred_currency": "USD",
+                    "visa_status_by_country": "", "citizenship_countries": "",
+                                        "preferred_currency": "USD",
                     "resume": SimpleUploadedFile(
                         "resume.pdf", make_pdf_bytes("Grace's resume"), content_type="application/pdf"
                     ),
@@ -271,9 +263,8 @@ class AuthProfileTests(TestCase):
                 "target_locations": "", "excluded_employers": "",
                 "min_salary": "", "remote_pref": Profile.RemotePref.ANY,
                 "is_active": "on",
-                "visa_status": "",
-                "citizenship": "",
-                "preferred_currency": "USD",
+                "visa_status_by_country": "", "citizenship_countries": "",
+                                "preferred_currency": "USD",
             },
         )
         # Bob's profile is untouched — the view only ever edits request.user's.

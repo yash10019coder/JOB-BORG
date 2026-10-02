@@ -70,6 +70,36 @@ def validate_resume_file(file):
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
+# Profile.VisaStatus value -> (work_authorization option key, sponsorship option
+# key), as consumed by `Profile.authorization_for_country` and
+# `drafting.py`. The keys match `apps.web.forms.WORK_AUTH_CHOICES` /
+# `SPONSORSHIP_CHOICES`, and every one is re-validated against the live
+# Greenhouse form's actual options before it is used for a draft.
+#
+# An empty sponsorship key ("") means *deliberately unknown*, and is the
+# point of this table: a US visa status tells us the applicant is authorized
+# in the US but says nothing reliable about whether they will require
+# sponsorship (someone extending from F-1 onto a new H-1B did; a green card
+# holder did not). Inferring one from the other would be a guess, and
+# `drafting.py` leaves such a field blank + needs_review instead -- the same
+# "a confidently wrong resolution is worse than an unresolved one" rule
+# `apps.locations.engine` follows.
+_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[str, str]] = {
+    "citizen": ("yes_authorized", "no"),
+    "permanent_resident": ("yes_green_card", "no"),
+    "work_permit": ("yes_authorized", "no"),
+    "requires_sponsorship": ("no_need_sponsorship", "other"),
+    "not_authorized": ("no_sponsorship_needed", "no"),
+    # US/AU statuses: authorized yes, sponsorship unknown -- see above.
+    "h1b": ("yes_h1b", ""),
+    "opt": ("yes_opt", ""),
+    "o1": ("yes_o1", ""),
+    "tn": ("yes_tn", ""),
+    "e3": ("yes_e3", ""),
+    "other": ("other", ""),
+}
+
+
 class Profile(models.Model):
     class RemotePref(models.TextChoices):
         ANY = "any", "Any"
@@ -137,26 +167,45 @@ class Profile(models.Model):
     )
     min_salary = models.IntegerField(null=True, blank=True)
 
-    # Auto-apply explicit answers (work auth, sponsorship, salary by region)
+    # Auto-apply explicit answers (work auth, sponsorship, salary by region).
+    #
+    # Authorization is inherently per-country: "authorized to work here" is
+    # meaningless without knowing *where* "here" is, and a single flat
+    # `visa_status` column silently answered that question with US-centric
+    # values (H-1B/OPT/E-3) for jobs in every country. These two fields are
+    # keyed by country for that reason:
+    #   visa_status_by_country: {"IND": "citizen", "DEU": "requires_sponsorship"}
+    #   citizenship_countries:  ["IND"]  (dual citizens list several)
+    #
+    # Keys are ISO 3166-1 alpha-3 (see apps.web.regions for why alpha-3 and
+    # not alpha-2/the engine's canonical name).
     class VisaStatus(models.TextChoices):
+        # Country-agnostic, and the only statuses a non-US applicant should
+        # normally need: they are what most countries' forms actually offer.
         CITIZEN = "citizen", "Citizen"
-        PERMANENT_RESIDENT = "permanent_resident", "Permanent resident (Green card)"
-        H1B = "h1b", "H-1B"
-        OPT = "opt", "OPT (F-1 OPT)"
-        CPT = "cpt", "CPT (F-1 CPT)"
-        O1 = "o1", "O-1"
-        TN = "tn", "TN (NAFTA)"
-        E3 = "e3", "E-3 (Australian)"
-        OTHER = "other", "Other visa status"
-        NOT_AUTHORIZED = "not_authorized", "Not authorized"
+        PERMANENT_RESIDENT = "permanent_resident", "Permanent resident / Green card"
+        WORK_PERMIT = "work_permit", "Work permit held (no sponsorship needed)"
+        REQUIRES_SPONSORSHIP = "requires_sponsorship", "Will require visa sponsorship"
+        NOT_AUTHORIZED = "not_authorized", "Not authorized to work"
+        # US-specific, with the country named in the label so the value is
+        # never ambiguous about where it applies.
+        H1B = "h1b", "H-1B (US)"
+        OPT = "opt", "OPT or CPT (US)"
+        O1 = "o1", "O-1 (US)"
+        TN = "tn", "TN (US)"
+        E3 = "e3", "E-3 (Australia)"
+        OTHER = "other", "Other / not listed"
 
-    visa_status = models.CharField(
-        max_length=32,
-        choices=VisaStatus.choices,
+    visa_status_by_country = models.JSONField(
+        default=dict,
         blank=True,
-        default="",
+        help_text="Per-country work authorization, e.g. {\"IND\": \"citizen\"}.",
     )
-    citizenship = models.CharField(max_length=64, blank=True, default="")
+    citizenship_countries = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='ISO alpha-3 codes of countries you are a citizen of.',
+    )
     # Multi-region salary expectations: {"US": "150-200k", "EU": "100-150k", "IN": "30-50L"}
     salary_by_region = models.JSONField(default=dict, blank=True)
     preferred_currency = models.CharField(
@@ -186,6 +235,43 @@ class Profile(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def authorization_for_country(self, country):
+        """``(work_authorization, sponsorship)`` option keys for `country`, or
+        ``None`` if this profile says nothing about it.
+
+        `country` may be given in any form :func:`apps.web.regions.region_for_country`
+        accepts (alpha-3, alpha-2, or the locations engine's canonical name),
+        because the caller usually has the last of those off a
+        ``Job.target_locations_normalized`` entry.
+
+        Both returned values are option keys drawn from the auto-apply form
+        vocabularies (``WORK_AUTH_CHOICES`` / ``SPONSORSHIP_CHOICES``); either
+        may be ``""`` meaning *deliberately unknown*. That is the important
+        part of the contract: a US work visa tells us the applicant is
+        authorized in the US, but says nothing reliable about whether they
+        will *require sponsorship* (an H-1B holder renewing from F-1 did, a
+        green-card holder did not), so a per-country visa status alone must
+        not produce a sponsorship answer. ``drafting.py`` leaves such a field
+        blank and needs_review rather than guessing.
+
+        Returns ``None`` -- not a blank pair -- when the profile has no entry
+        for the country at all, so callers can tell "nothing known" apart from
+        "known to require sponsorship".
+        """
+        from apps.locations.engine import alpha3_for_country
+
+        alpha3 = alpha3_for_country(country)
+        if alpha3 is None:
+            return None
+        if alpha3 in set(self.citizenship_countries or []):
+            # Citizenship is authoritative for its own country: no
+            # sponsorship is ever needed at home.
+            return ("yes_authorized", "no")
+        status = (self.visa_status_by_country or {}).get(alpha3)
+        if status is None:
+            return None
+        return _AUTHORIZATION_BY_VISA_STATUS.get(status)
 
     def set_resume(self, file):
         """Assign an uploaded resume file, or clear it if `file` is falsy,
