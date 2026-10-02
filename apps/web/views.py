@@ -33,6 +33,17 @@ from .forms import EmailInboxCredentialForm, ProfileForm
 
 RECOMMENDATIONS_PER_PAGE = 20
 
+# Valid values for auto_apply_queue's `?status=` filter -- any value outside
+# this set (including a stale/renamed status from an old bookmark) fails
+# closed to "show everything", never a 500.
+VALID_QUEUE_STATUSES = {choice.value for choice in AutoApplyDraft.Status}
+
+# Valid values for auto_apply_queue's `?ats=` filter. Auto-apply only drafts
+# Greenhouse jobs today, but `Job.source_ats` isn't restricted to that at the
+# DB level and the ingestion-side ATS registry already covers the others, so
+# this filters against the full JobSource.ATS enum, not just Greenhouse.
+VALID_QUEUE_ATS = {choice.value for choice in JobSource.ATS}
+
 # Map an action name from the UI to a JobApplication status.
 _ACTION_STATUS = {
     "save": JobApplication.Status.SAVED,
@@ -328,6 +339,25 @@ def _friendly_draft_message(draft):
     return ""
 
 
+def _auto_apply_queue_redirect(request):
+    """Redirect back to the auto-apply queue, preserving the `status`/`ats`
+    filter the request was made under (posted as hidden fields on every
+    queue form) -- without this, discarding/sending/editing/retrying a
+    draft while filtered would silently bounce the user back to the
+    unfiltered view, losing their place."""
+    params = {}
+    status = request.POST.get("status", "")
+    if status in VALID_QUEUE_STATUSES:
+        params["status"] = status
+    ats = request.POST.get("ats", "")
+    if ats in VALID_QUEUE_ATS:
+        params["ats"] = ats
+    redirect_url = reverse("auto_apply_queue")
+    if params:
+        redirect_url = f"{redirect_url}?{urlencode(params)}"
+    return redirect(redirect_url)
+
+
 def _recommendations_redirect(request):
     # A posted "next=queue" lets `trigger_auto_apply` be reused as the
     # auto-apply queue's own "Retry" action (for a FAILED draft) without
@@ -335,7 +365,7 @@ def _recommendations_redirect(request):
     # (the recommendations page's own "Auto-apply" button) never sets it,
     # so the default stays recommendations.
     if request.POST.get("next") == "queue":
-        return redirect(reverse("auto_apply_queue"))
+        return _auto_apply_queue_redirect(request)
 
     redirect_url = reverse("recommendations")
     params = {}
@@ -399,19 +429,37 @@ def trigger_auto_apply(request, job_id):
 
 @login_required
 def auto_apply_queue(request):
-    """List the requesting user's `AutoApplyDraft`s across all statuses
-    (F2) -- `EXCLUDED`/`STALE` are shown, not hidden by default, so a user
-    can always see why a job didn't become sendable.
+    """List the requesting user's `AutoApplyDraft`s, optionally narrowed by
+    `?status=` to one `AutoApplyDraft.Status` value (F2) and/or `?ats=` to
+    one `JobSource.ATS` value -- with neither set, everything is shown,
+    including `EXCLUDED`/`STALE`, so a user can always see why a job didn't
+    become sendable. The two filters combine (AND), mirroring how
+    `recommendations`' `?q=` search layers on top of its `?all=` toggle
+    rather than replacing it. An unrecognized value for either (a stale
+    bookmark, a renamed status) fails closed to "show everything" for that
+    filter rather than 500ing or silently matching nothing.
 
     `select_related("job", "job__employer")` batch-fetches the related Job
     (and its Employer) in the same query as the drafts, following
     `recommendations`' batch-fetch pattern rather than N+1 per-draft lookups.
     """
+    status_filter = request.GET.get("status", "")
+    if status_filter not in VALID_QUEUE_STATUSES:
+        status_filter = ""
+    ats_filter = request.GET.get("ats", "")
+    if ats_filter not in VALID_QUEUE_ATS:
+        ats_filter = ""
+
     drafts_qs = (
         AutoApplyDraft.objects.filter(user=request.user)
         .select_related("job", "job__employer")
         .order_by("-updated_at")
     )
+    if status_filter:
+        drafts_qs = drafts_qs.filter(status=status_filter)
+    if ats_filter:
+        drafts_qs = drafts_qs.filter(job__source_ats=ats_filter)
+
     paginator = Paginator(drafts_qs, RECOMMENDATIONS_PER_PAGE)
     page_obj = paginator.get_page(request.GET.get("page"))
 
@@ -423,6 +471,7 @@ def auto_apply_queue(request):
         # stored JSONField entries in place would persist rendered HTML
         # (`control`) into the model the moment anything calls `draft.save()`.
         display_answers = {}
+        needs_review_count = 0
         for index, (label, entry) in enumerate((draft.answers or {}).items()):
             if not isinstance(entry, dict):
                 continue
@@ -437,9 +486,39 @@ def auto_apply_queue(request):
                     f"value__{index}", value, attrs={"id": display_entry["control_id"]}
                 )
             display_answers[label] = display_entry
+            if entry.get("needs_review"):
+                needs_review_count += 1
         draft.display_answers = display_answers
+        draft.needs_review_count = needs_review_count
 
-    return render(request, "web/auto_apply_queue.html", {"page_obj": page_obj})
+    # Group same-job repeat attempts (e.g. several FAILED retries before a
+    # fix landed) under one card instead of one redundant top-level card
+    # per attempt. Grouped within this page only -- drafts_qs is ordered by
+    # `-updated_at`, so repeat attempts for the same job are normally
+    # adjacent and the first one seen per job_id is the most recent; a
+    # cross-page split is an acceptable rare edge case rather than
+    # complicating pagination to group before it.
+    job_groups_by_id = {}
+    job_groups = []
+    for draft in page_obj:
+        group = job_groups_by_id.get(draft.job_id)
+        if group is None:
+            group = {"latest": draft, "earlier": []}
+            job_groups_by_id[draft.job_id] = group
+            job_groups.append(group)
+        else:
+            group["earlier"].append(draft)
+
+    return render(request, "web/auto_apply_queue.html", {
+        "page_obj": page_obj,
+        "job_groups": job_groups,
+        "status_filter": status_filter,
+        "status_filter_label": AutoApplyDraft.Status(status_filter).label if status_filter else "",
+        "status_choices": AutoApplyDraft.Status,
+        "ats_filter": ats_filter,
+        "ats_filter_label": JobSource.ATS(ats_filter).label if ats_filter else "",
+        "ats_choices": JobSource.ATS,
+    })
 
 
 @login_required
@@ -510,7 +589,7 @@ def edit_auto_apply_draft(request, pk):
     draft.save(update_fields=["answers", "updated_at"])
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
-    return redirect("auto_apply_queue")
+    return _auto_apply_queue_redirect(request)
 
 
 @login_required
@@ -523,7 +602,7 @@ def discard_auto_apply_draft(request, pk):
     if not deleted:
         raise Http404("Draft not found or not discardable.")
     messages.info(request, "Draft discarded. You can draft this application again from recommendations.")
-    return redirect("auto_apply_queue")
+    return _auto_apply_queue_redirect(request)
 
 
 @login_required
@@ -562,7 +641,7 @@ def send_auto_apply_draft(request, pk):
             request,
             "Answer these required question(s) before sending: " + "; ".join(blocking),
         )
-        return redirect("auto_apply_queue")
+        return _auto_apply_queue_redirect(request)
 
     # A blank, optional needs_review placeholder (R5's "float unanswerable
     # questions to review instead of excluding the draft") isn't actually
@@ -575,7 +654,7 @@ def send_auto_apply_draft(request, pk):
         for entry in (draft.answers or {}).values()
     ):
         messages.error(request, "Please review and save all flagged answers before sending.")
-        return redirect("auto_apply_queue")
+        return _auto_apply_queue_redirect(request)
 
     # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
     # sweep keys off it, and a draft that sat in the queue before Send would
@@ -589,7 +668,7 @@ def send_auto_apply_draft(request, pk):
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")
-    return redirect("auto_apply_queue")
+    return _auto_apply_queue_redirect(request)
 
 
 @login_required
