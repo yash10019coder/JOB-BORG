@@ -187,3 +187,223 @@ class EmailInboxCredentialForm(forms.ModelForm):
 
         return cleaned_data
 
+
+# Common Greenhouse options for work authorization questions
+WORK_AUTH_CHOICES = [
+    ("", "— Select —"),
+    ("yes_authorized", "Yes, I am authorized to work in this country"),
+    ("yes_h1b", "Yes, on H-1B"),
+    ("yes_opt", "Yes, on OPT (F-1)"),
+    ("yes_cpt", "Yes, on CPT (F-1)"),
+    ("yes_o1", "Yes, on O-1"),
+    ("yes_tn", "Yes, on TN"),
+    ("yes_e3", "Yes, on E-3"),
+    ("yes_green_card", "Yes, I have a Green Card (permanent resident)"),
+    ("no_sponsorship_needed", "No, but I do not require sponsorship"),
+    ("no_need_sponsorship", "No, I require visa sponsorship"),
+    ("other", "Other"),
+]
+
+SPONSORSHIP_CHOICES = [
+    ("", "— Select —"),
+    ("no", "No, I do not require sponsorship"),
+    ("yes_h1b", "Yes, H-1B"),
+    ("yes_opt", "Yes, OPT (F-1)"),
+    ("yes_cpt", "Yes, CPT (F-1)"),
+    ("yes_o1", "Yes, O-1"),
+    ("yes_tn", "Yes, TN"),
+    ("yes_e3", "Yes, E-3"),
+    ("yes_green_card_process", "Yes, Green Card process (PERM/I-140)"),
+    ("other", "Other"),
+]
+
+# Salary bands per currency/region
+SALARY_BANDS_BY_REGION = {
+    "US": [
+        ("", "— Select —"),
+        ("<50k", "< $50,000"),
+        ("50-75k", "$50,000 – $75,000"),
+        ("75-100k", "$75,000 – $100,000"),
+        ("100-125k", "$100,000 – $125,000"),
+        ("125-150k", "$125,000 – $150,000"),
+        ("150-175k", "$150,000 – $175,000"),
+        ("175-200k", "$175,000 – $200,000"),
+        ("200-250k", "$200,000 – $250,000"),
+        ("250-300k", "$250,000 – $300,000"),
+        ("300-400k", "$300,000 – $400,000"),
+        ("400k+", "$400,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "EU": [
+        ("", "— Select —"),
+        ("<40k", "< €40,000"),
+        ("40-55k", "€40,000 – €55,000"),
+        ("55-70k", "€55,000 – €70,000"),
+        ("70-90k", "€70,000 – €90,000"),
+        ("90-120k", "€90,000 – €120,000"),
+        ("120-150k", "€120,000 – €150,000"),
+        ("150-200k", "€150,000 – €200,000"),
+        ("200k+", "€200,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "IN": [
+        ("", "— Select —"),
+        ("<10L", "< ₹10 LPA"),
+        ("10-15L", "₹10 – 15 LPA"),
+        ("15-25L", "₹15 – 25 LPA"),
+        ("25-35L", "₹25 – 35 LPA"),
+        ("35-50L", "₹35 – 50 LPA"),
+        ("50-70L", "₹50 – 70 LPA"),
+        ("70-100L", "₹70 – 100 LPA"),
+        ("100L+", "₹1 Cr+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "UK": [
+        ("", "— Select —"),
+        ("<35k", "< £35,000"),
+        ("35-45k", "£35,000 – £45,000"),
+        ("45-60k", "£45,000 – £60,000"),
+        ("60-80k", "£60,000 – £80,000"),
+        ("80-100k", "£80,000 – £100,000"),
+        ("100-130k", "£100,000 – £130,000"),
+        ("130-160k", "£130,000 – £160,000"),
+        ("160k+", "£160,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "CA": [
+        ("", "— Select —"),
+        ("<60k", "< C$60,000"),
+        ("60-80k", "C$60,000 – C$80,000"),
+        ("80-100k", "C$80,000 – C$100,000"),
+        ("100-130k", "C$100,000 – C$130,000"),
+        ("130-160k", "C$130,000 – C$160,000"),
+        ("160-200k", "C$160,000 – C$200,000"),
+        ("200k+", "C$200,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "AU": [
+        ("", "— Select —"),
+        ("<70k", "< A$70,000"),
+        ("70-90k", "A$70,000 – A$90,000"),
+        ("90-120k", "A$90,000 – A$120,000"),
+        ("120-150k", "A$120,000 – A$150,000"),
+        ("150-180k", "A$150,000 – A$180,000"),
+        ("180-220k", "A$180,000 – A$220,000"),
+        ("220k+", "A$220,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "SG": [
+        ("", "— Select —"),
+        ("<60k", "< S$60,000"),
+        ("60-80k", "S$60,000 – S$80,000"),
+        ("80-110k", "S$80,000 – S$110,000"),
+        ("110-140k", "S$110,000 – S$140,000"),
+        ("140-180k", "S$140,000 – S$180,000"),
+        ("180-220k", "S$180,000 – S$220,000"),
+        ("220k+", "S$220,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+}
+
+DEFAULT_SALARY_BANDS = SALARY_BANDS_BY_REGION["US"]
+
+
+class ExplicitAnswersForm(forms.Form):
+    work_authorization = forms.ChoiceField(
+        choices=WORK_AUTH_CHOICES, required=False, label="Work authorization"
+    )
+    sponsorship = forms.ChoiceField(
+        choices=SPONSORSHIP_CHOICES, required=False, label="Sponsorship"
+    )
+    salary_expectation = forms.ChoiceField(
+        choices=DEFAULT_SALARY_BANDS, required=False, label="Salary expectation"
+    )
+    other = forms.CharField(
+        widget=forms.Textarea, required=False, label="Other"
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        initial = kwargs.pop("initial", {}) or {}
+        if user is not None:
+            # Load from ExplicitAnswer DB rows
+            from apps.auto_apply.models import ExplicitAnswer
+            for ea in ExplicitAnswer.objects.filter(user=user):
+                initial[ea.category] = ea.answer_text
+            # Autofill from Profile if no explicit answer exists yet
+            profile = getattr(user, "profile", None)
+            if profile:
+                if "salary_expectation" not in initial and profile.min_salary:
+                    initial["salary_expectation"] = self._salary_to_band(profile.min_salary)
+                if "work_authorization" not in initial and profile.visa_status:
+                    initial["work_authorization"] = self._visa_status_to_auth(profile.visa_status)
+                if "sponsorship" not in initial and profile.visa_status:
+                    initial["sponsorship"] = self._visa_status_to_sponsorship(profile.visa_status)
+        # Ensure all fields have an initial value (empty string if not set)
+        # This ensures ChoiceFields render with the "— Select —" option
+        for category, _label in ExplicitAnswer.Category.choices:
+            initial.setdefault(category, "")
+        super().__init__(*args, initial=initial, **kwargs)
+
+    @staticmethod
+    def _salary_to_band(min_salary: int) -> str:
+        if min_salary < 50000: return "<50k"
+        if min_salary < 75000: return "50-75k"
+        if min_salary < 100000: return "75-100k"
+        if min_salary < 125000: return "100-125k"
+        if min_salary < 150000: return "125-150k"
+        if min_salary < 175000: return "150-175k"
+        if min_salary < 200000: return "175-200k"
+        if min_salary < 250000: return "200-250k"
+        if min_salary < 300000: return "250-300k"
+        if min_salary < 400000: return "300-400k"
+        return "400k+"
+
+    @staticmethod
+    def _visa_status_to_auth(visa_status: str) -> str:
+        mapping = {
+            "citizen": "yes_authorized",
+            "permanent_resident": "yes_green_card",
+            "h1b": "yes_h1b",
+            "opt": "yes_opt",
+            "cpt": "yes_cpt",
+            "o1": "yes_o1",
+            "tn": "yes_tn",
+            "e3": "yes_e3",
+            "not_authorized": "no_need_sponsorship",
+        }
+        return mapping.get(visa_status, "other")
+
+    @staticmethod
+    def _visa_status_to_sponsorship(visa_status: str) -> str:
+        mapping = {
+            "citizen": "no",
+            "permanent_resident": "no",
+            "h1b": "yes_h1b",
+            "opt": "yes_opt",
+            "cpt": "yes_cpt",
+            "o1": "yes_o1",
+            "tn": "yes_tn",
+            "e3": "yes_e3",
+            "not_authorized": "yes_h1b",
+        }
+        return mapping.get(visa_status, "other")
+
+    def save(self):
+        from apps.auto_apply.models import ExplicitAnswer
+        for category, _label in ExplicitAnswer.Category.choices:
+            value = self.cleaned_data.get(category, "")
+            if value:
+                ExplicitAnswer.objects.update_or_create(
+                    user=self.user, category=category, defaults={"answer_text": value}
+                )
+            else:
+                ExplicitAnswer.objects.filter(user=self.user, category=category).delete()
+

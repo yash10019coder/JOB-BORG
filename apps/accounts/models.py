@@ -136,6 +136,45 @@ class Profile(models.Model):
         help_text="Employer slugs to exclude from recommendations.",
     )
     min_salary = models.IntegerField(null=True, blank=True)
+
+    # Auto-apply explicit answers (work auth, sponsorship, salary by region)
+    class VisaStatus(models.TextChoices):
+        CITIZEN = "citizen", "Citizen"
+        PERMANENT_RESIDENT = "permanent_resident", "Permanent resident (Green card)"
+        H1B = "h1b", "H-1B"
+        OPT = "opt", "OPT (F-1 OPT)"
+        CPT = "cpt", "CPT (F-1 CPT)"
+        O1 = "o1", "O-1"
+        TN = "tn", "TN (NAFTA)"
+        E3 = "e3", "E-3 (Australian)"
+        OTHER = "other", "Other visa status"
+        NOT_AUTHORIZED = "not_authorized", "Not authorized"
+
+    visa_status = models.CharField(
+        max_length=32,
+        choices=VisaStatus.choices,
+        blank=True,
+        default="",
+    )
+    citizenship = models.CharField(max_length=64, blank=True, default="")
+    # Multi-region salary expectations: {"US": "150-200k", "EU": "100-150k", "IN": "30-50L"}
+    salary_by_region = models.JSONField(default=dict, blank=True)
+    preferred_currency = models.CharField(
+        max_length=3,
+        choices=[
+            ("USD", "USD ($)"),
+            ("EUR", "EUR (€)"),
+            ("GBP", "GBP (£)"),
+            ("CAD", "CAD (C$)"),
+            ("AUD", "AUD (A$)"),
+            ("INR", "INR (₹)"),
+            ("SGD", "SGD (S$)"),
+            ("CHF", "CHF"),
+            ("JPY", "JPY (¥)"),
+        ],
+        default="USD",
+    )
+
     remote_pref = models.CharField(
         max_length=16,
         choices=RemotePref.choices,

@@ -1,0 +1,133 @@
+{% for group in job_groups %}
+{% with draft=group.latest %}
+<div class="card" data-draft-id="{{ draft.id }}">
+    <div class="card-summary" style="display:flex; flex-wrap:wrap; align-items:center; gap:.75rem; padding:.75rem 0;">
+        <div style="flex:1; min-width:200px;">
+            <strong>
+                {% if draft.job.source_url %}<a href="{{ draft.job.source_url }}" target="_blank" rel="noopener">{{ draft.job.title }}</a>
+                {% else %}{{ draft.job.title }}{% endif %}
+            </strong>
+            <span class="muted" style="margin-left:.5rem;">{{ draft.job.employer.name }}</span>
+        </div>
+        <span class="tag" style="background:#f3f4f6; color:#374151;">{{ draft.get_status_display }}</span>
+        {% if draft.blocking_fields %}
+        <span class="tag" style="background:#fee2e2; color:#991b1b;">{{ draft.blocking_fields|length }} required field{{ draft.blocking_fields|pluralize }} missing</span>
+        {% endif %}
+        {% if draft.needs_review_count %}
+        <span class="tag" style="background:#fef3c7; color:#92400e;">{{ draft.needs_review_count }} needs review</span>
+        {% endif %}
+        {% if group.earlier %}
+        <span class="tag" style="background:#e0e7ff; color:#3730a3;">+{{ group.earlier|length }} earlier attempt{{ group.earlier|pluralize }}</span>
+        {% endif %}
+        {% if draft.status == "drafted" %}
+        <button type="button" class="btn" data-modal-open="draft-modal-{{ draft.id }}">Review & edit</button>
+        {% endif %}
+    </div>
+
+    <!-- Modal for draft review -->
+    <dialog id="draft-modal-{{ draft.id }}">
+        <button type="button" data-modal-close>&times;</button>
+        <div style="padding:1rem 0;">
+            {% if draft.friendly_message %}
+            <p class="muted" role="status">
+                {{ draft.friendly_message }}
+                {% if draft.reason_code == "no_inbox_credentials" or draft.reason_code == "inbox_auth_failed" %}
+                <br><a href="{% url 'email_inbox_credential' %}">Manage email verification settings &rarr;</a>
+                {% endif %}
+            </p>
+            {% endif %}
+
+            {% if draft.display_answers %}
+            <form method="post" action="{% url 'edit_auto_apply_draft' draft.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="ats" value="{{ ats_filter }}">
+                {% for label, entry in draft.display_answers.items %}
+                <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
+                    <label for="{{ entry.control_id }}">
+                        {{ label }}
+                        {% if label in draft.blocking_fields %}
+                        <span class="tag" style="background:#fee2e2; color:#991b1b;" aria-label="This question must be answered before the application can be sent">Answer required</span>
+                        {% elif entry.needs_review %}
+                        <span class="tag" style="background:#fef3c7; color:#92400e;" aria-label="Needs review, please confirm this answer">Needs review</span>
+                        {% endif %}
+                    </label>
+                    <input type="hidden" name="label__{{ forloop.counter0 }}" value="{{ label }}">
+                    {% if entry.field_type == "file" %}
+                    <p>Resume attached</p>
+                    {% elif draft.status == "drafted" and entry.control %}
+                    {{ entry.control }}
+                    {% else %}
+                    <p>{{ entry.value }}</p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% if draft.status == "drafted" %}
+                <button type="submit">Save answers</button>
+                {% endif %}
+            </form>
+            {% endif %}
+
+            {% if draft.status == "drafted" %}
+            <form method="post" action="{% url 'discard_auto_apply_draft' draft.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="ats" value="{{ ats_filter }}">
+                <button type="submit">Discard draft</button>
+            </form>
+            {% if draft.blocking_fields %}
+            <p class="muted" role="status">
+                Answer {{ draft.blocking_fields|length }} required question{{ draft.blocking_fields|pluralize }} above before sending this application.
+            </p>
+            {% else %}
+            <form method="post" action="{% url 'send_auto_apply_draft' draft.id %}"
+                  onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='Sending…';">
+                {% csrf_token %}
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="ats" value="{{ ats_filter }}">
+                <button type="submit">Send application</button>
+            </form>
+            {% endif %}
+            {% endif %}
+
+            {% if draft.status == "failed" %}
+            <form method="post" action="{% url 'trigger_auto_apply' draft.job.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="queue">
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="ats" value="{{ ats_filter }}">
+                <button type="submit">Retry</button>
+            </form>
+            {% endif %}
+
+            {% if group.earlier %}
+            <details style="margin-top:.75rem;">
+                <summary class="muted" style="cursor:pointer;">{{ group.earlier|length }} earlier attempt{{ group.earlier|pluralize }} for this job</summary>
+                <div style="margin-top:.5rem;">
+                    {% for earlier in group.earlier %}
+                    <p class="muted" style="padding:.3rem .6rem; border-left:3px solid #e5e7eb;">
+                        <span class="tag" style="background:#f3f4f6; color:#374151;">{{ earlier.get_status_display }}</span>
+                        {{ earlier.updated_at }}
+                        {% if earlier.friendly_message %}&middot; {{ earlier.friendly_message }}{% endif %}
+                    </p>
+                    {% endfor %}
+                </div>
+            </details>
+            {% endif %}
+        </div>
+    </dialog>
+</div>
+{% endwith %}
+{% endfor %}
+
+{% if page_obj.has_other_pages %}
+<nav class="muted" id="queue-pagination-nav">
+    {% if page_obj.has_previous %}<a href="{% querystring page=page_obj.previous_page_number %}">&larr; Prev</a>{% endif %}
+    <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_next %}<a href="{% querystring page=page_obj.next_page_number %}">Next &rarr;</a>{% endif %}
+</nav>
+{% endif %}
+
+{% if page_obj.has_next %}
+<div data-scroll-sentinel data-next-url="{% querystring page=page_obj.next_page_number %}" id="queue-scroll-sentinel"></div>
+{% endif %}

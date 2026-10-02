@@ -28,7 +28,7 @@ from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
 
-from .forms import EmailInboxCredentialForm, ProfileForm
+from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
 
 
 RECOMMENDATIONS_PER_PAGE = 20
@@ -86,7 +86,35 @@ def profile(request):
             return redirect("recommendations")
     else:
         form = ProfileForm(instance=instance)
-    return render(request, "web/profile_form.html", {"form": form})
+    # Also pass the explicit answers form for the "Saved answers" section
+    explicit_answers_form = ExplicitAnswersForm(user=request.user)
+    return render(request, "web/profile_form.html", {"form": form, "explicit_answers_form": explicit_answers_form})
+
+
+@login_required
+def explicit_answers(request):
+    """Self-service UI for saved ExplicitAnswer values (work auth, sponsorship, salary)."""
+    if request.method == "POST":
+        form = ExplicitAnswersForm(request.POST, user=request.user)
+        if form.is_valid():
+            form.save()
+            # Also persist salary_by_region from POST (region-specific values)
+            salary_by_region = request.POST.get("salary_by_region")
+            if salary_by_region:
+                try:
+                    from apps.accounts.models import Profile
+                    import json
+                    data = json.loads(salary_by_region)
+                    profile = request.user.profile
+                    profile.salary_by_region = data
+                    profile.save(update_fields=["salary_by_region"])
+                except (json.JSONDecodeError, Profile.DoesNotExist):
+                    pass
+            messages.info(request, "Saved answers updated.")
+            return redirect("profile")
+    else:
+        form = ExplicitAnswersForm(user=request.user)
+    return render(request, "web/profile_form.html", {"explicit_answers_form": form, "form": ProfileForm(instance=request.user.profile)})
 
 
 # --- Recommendations ------------------------------------------------------
@@ -140,6 +168,14 @@ def recommendations(request):
     )
     for match in page_obj:
         match.user_status = app_status.get(match.job_id, "")
+
+    # Infinite scroll: return partial template for AJAX requests
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return render(
+            request,
+            "web/_recommendations_list.html",
+            {"page_obj": page_obj, "show_all": show_all, "query": query},
+        )
 
     return render(
         request,
@@ -509,7 +545,7 @@ def auto_apply_queue(request):
         else:
             group["earlier"].append(draft)
 
-    return render(request, "web/auto_apply_queue.html", {
+    ctx = {
         "page_obj": page_obj,
         "job_groups": job_groups,
         "status_filter": status_filter,
@@ -518,7 +554,13 @@ def auto_apply_queue(request):
         "ats_filter": ats_filter,
         "ats_filter_label": JobSource.ATS(ats_filter).label if ats_filter else "",
         "ats_choices": JobSource.ATS,
-    })
+    }
+
+    # Infinite scroll: return partial template for AJAX requests
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return render(request, "web/_auto_apply_queue_list.html", ctx)
+
+    return render(request, "web/auto_apply_queue.html", ctx)
 
 
 @login_required

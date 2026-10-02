@@ -53,6 +53,132 @@ logger = logging.getLogger(__name__)
 # possibility worth not blocking.
 _SMALL_OPTION_SET_ENFORCE_THRESHOLD = 15
 
+# Salary bands per region (must match forms.py SALARY_BANDS_BY_REGION)
+SALARY_BANDS_BY_REGION = {
+    "US": [
+        ("", "— Select —"),
+        ("<50k", "< $50,000"),
+        ("50-75k", "$50,000 – $75,000"),
+        ("75-100k", "$75,000 – $100,000"),
+        ("100-125k", "$100,000 – $125,000"),
+        ("125-150k", "$125,000 – $150,000"),
+        ("150-175k", "$150,000 – $175,000"),
+        ("175-200k", "$175,000 – $200,000"),
+        ("200-250k", "$200,000 – $250,000"),
+        ("250-300k", "$250,000 – $300,000"),
+        ("300-400k", "$300,000 – $400,000"),
+        ("400k+", "$400,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "EU": [
+        ("", "— Select —"),
+        ("<40k", "< €40,000"),
+        ("40-55k", "€40,000 – €55,000"),
+        ("55-70k", "€55,000 – €70,000"),
+        ("70-90k", "€70,000 – €90,000"),
+        ("90-120k", "€90,000 – €120,000"),
+        ("120-150k", "€120,000 – €150,000"),
+        ("150-200k", "€150,000 – €200,000"),
+        ("200k+", "€200,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "IN": [
+        ("", "— Select —"),
+        ("<10L", "< ₹10 LPA"),
+        ("10-15L", "₹10 – 15 LPA"),
+        ("15-25L", "₹15 – 25 LPA"),
+        ("25-35L", "₹25 – 35 LPA"),
+        ("35-50L", "₹35 – 50 LPA"),
+        ("50-70L", "₹50 – 70 LPA"),
+        ("70-100L", "₹70 – 100 LPA"),
+        ("100L+", "₹1 Cr+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "UK": [
+        ("", "— Select —"),
+        ("<35k", "< £35,000"),
+        ("35-45k", "£35,000 – £45,000"),
+        ("45-60k", "£45,000 – £60,000"),
+        ("60-80k", "£60,000 – £80,000"),
+        ("80-100k", "£80,000 – £100,000"),
+        ("100-130k", "£100,000 – £130,000"),
+        ("130-160k", "£130,000 – £160,000"),
+        ("160k+", "£160,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "CA": [
+        ("", "— Select —"),
+        ("<60k", "< C$60,000"),
+        ("60-80k", "C$60,000 – C$80,000"),
+        ("80-100k", "C$80,000 – C$100,000"),
+        ("100-130k", "C$100,000 – C$130,000"),
+        ("130-160k", "C$130,000 – C$160,000"),
+        ("160-200k", "C$160,000 – C$200,000"),
+        ("200k+", "C$200,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "AU": [
+        ("", "— Select —"),
+        ("<70k", "< A$70,000"),
+        ("70-90k", "A$70,000 – A$90,000"),
+        ("90-120k", "A$90,000 – A$120,000"),
+        ("120-150k", "A$120,000 – A$150,000"),
+        ("150-180k", "A$150,000 – A$180,000"),
+        ("180-220k", "A$180,000 – A$220,000"),
+        ("220k+", "A$220,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+    "SG": [
+        ("", "— Select —"),
+        ("<60k", "< S$60,000"),
+        ("60-80k", "S$60,000 – S$80,000"),
+        ("80-110k", "S$80,000 – S$110,000"),
+        ("110-140k", "S$110,000 – S$140,000"),
+        ("140-180k", "S$140,000 – S$180,000"),
+        ("180-220k", "S$180,000 – S$220,000"),
+        ("220k+", "S$220,000+"),
+        ("negotiable", "Negotiable / Open to market range"),
+        ("other", "Other (specify in notes)"),
+    ],
+}
+DEFAULT_SALARY_BANDS = SALARY_BANDS_BY_REGION["US"]
+
+
+def _map_country_to_region(country_code: str) -> str:
+    """Map ISO country code to salary region key."""
+    mapping = {
+        "US": "US",
+        "CA": "CA",
+        "MX": "US",  # NAFTA, often USD bands
+        "GB": "UK",
+        "IE": "EU",
+        "DE": "EU", "FR": "EU", "NL": "EU", "ES": "EU", "IT": "EU", "PL": "EU",
+        "SE": "EU", "DK": "EU", "FI": "EU", "NO": "EU", "CH": "EU",
+        "IN": "IN",
+        "SG": "SG",
+        "AU": "AU", "NZ": "AU",
+        "JP": "SG",  # closest band
+        "KR": "SG",
+        "HK": "SG",
+    }
+    return mapping.get(country_code.upper(), "US")
+
+
+def _get_salary_band_label(region: str, band_key: str) -> str:
+    """Get the display label for a salary band key in a region."""
+    bands = SALARY_BANDS_BY_REGION.get(region, DEFAULT_SALARY_BANDS)
+    for key, label in bands:
+        if key == band_key:
+            return label
+    return band_key
+
+
 # Rendered-field label -> standard-field key (R4), in priority order (first
 # match wins). "full_name"/"name" is anchored to the whole (stripped) label
 # so it never shadows "First Name"/"Last Name", which are matched by their
@@ -319,6 +445,28 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         }
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
+
+    # -- Salary region resolution from Profile.salary_by_region ---------------
+    if profile and profile.salary_by_region:
+        # Get job's country from normalized location
+        job_country = ""
+        if job.target_locations_normalized:
+            # target_locations_normalized is a list of {"raw": ..., "country": ...}
+            for loc in job.target_locations_normalized:
+                if loc.get("country"):
+                    job_country = loc["country"]
+                    break
+        job_region = _map_country_to_region(job_country)
+        if job_region in profile.salary_by_region:
+            band_key = profile.salary_by_region[job_region]
+            label = _get_salary_band_label(job_region, band_key)
+            # Find the salary_expectation question in answers_payload and override
+            for q_label, entry in answers_payload.items():
+                if entry.get("category") == "salary_expectation":
+                    entry["value"] = label
+                    entry["needs_review"] = False
+                    entry["reason"] = "profile_derived_region"
+                    break
 
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here
