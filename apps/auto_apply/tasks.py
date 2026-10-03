@@ -49,6 +49,7 @@ from .greenhouse_form.exceptions import (
 )
 from .greenhouse_form.field_mapping import FILE, schema_from_dict
 from .models import AutoApplyDraft
+from .services.confirmation import unconfirmed_fields
 from .services.drafting import draft_for
 
 # Hard kill limit for Celery (D1). Single source of truth lives in
@@ -276,6 +277,21 @@ def submit_auto_apply_draft(self, draft_id):
         return None
 
     job = draft.job
+
+    # Defence in depth: the send view already refuses this, but nothing else
+    # guarantees a SENDING draft was sent through that view.
+    unconfirmed = unconfirmed_fields(draft.answers)
+    if unconfirmed:
+        draft.status = AutoApplyDraft.Status.FAILED
+        draft.reason_code = AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS
+        draft.error_message = "Unconfirmed answers: " + "; ".join(unconfirmed)
+        draft.save(update_fields=["status", "reason_code", "error_message", "updated_at"])
+        logger.warning(
+            "submit_auto_apply_draft(draft_id=%s): refused, %d unconfirmed answer(s).",
+            draft_id,
+            len(unconfirmed),
+        )
+        return draft.pk
 
     if job.status != Job.Status.OPEN:
         draft.status = AutoApplyDraft.Status.STALE
