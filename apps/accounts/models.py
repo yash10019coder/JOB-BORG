@@ -224,6 +224,17 @@ class Profile(models.Model):
         default="USD",
     )
 
+    # Who wrote each covered field, so an importer or the learner can never
+    # silently overwrite what the user typed. Shape:
+    #   {"phone": {"source": "user", "locked": false,
+    #              "updated_at": "<iso8601>", "detail": ""}, ...}
+    # Per-key entries are used for the dict/list authorization fields, e.g.
+    # "visa_status_by_country.USA". A missing entry on a non-empty value means
+    # "user" (legacy data). Only `apps.accounts.services.profile_fields`
+    # should write this -- see FR7.10 in
+    # docs/plans/2026-10-03-2300-consolidated-requirements.md.
+    field_provenance = models.JSONField(default=dict, blank=True)
+
     remote_pref = models.CharField(
         max_length=16,
         choices=RemotePref.choices,
@@ -439,3 +450,111 @@ class EmailInboxCredential(models.Model):
 
     def __str__(self):
         return f"EmailInboxCredential<{self.user.username}>"
+
+
+class AnswerBank(models.Model):
+    """One answer to one normalized application question, with provenance.
+
+    Typed Profile facts (visa/citizenship/salary) are consulted before this
+    table; see `apps.accounts.services.answer_resolver.resolve_answer`.
+    Precedence is user-locked > user-set > learned > imported: a lower
+    writer may never overwrite a higher one (it can only propose).
+    """
+
+    class Source(models.TextChoices):
+        USER = "user", "User"
+        LEARNED = "learned", "Learned"
+        IMPORTED = "imported", "Imported"
+
+    # Values mirror `apps.accounts.tiering.Tier`.
+    class RiskTier(models.TextChoices):
+        T0_LEGAL = "t0_legal", "T0 - legal attestation"
+        T1_COMMERCIAL = "t1_commercial", "T1 - commercial"
+        T2_FACTUAL = "t2_factual", "T2 - factual"
+
+    class Category(models.TextChoices):
+        EXPERIENCE = "experience", "Experience"
+        TECHNOLOGIES = "technologies", "Technologies"
+        RELOCATION = "relocation", "Relocation"
+        PROJECTS = "projects", "Projects"
+        EDUCATION = "education", "Education"
+        AVAILABILITY = "availability", "Availability"
+        COMPLIANCE = "compliance", "Compliance"
+        OTHER = "other", "Other"
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_bank",
+    )
+    question_key = models.CharField(max_length=255)
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    category = models.CharField(
+        max_length=32, choices=Category.choices, default=Category.OTHER
+    )
+    risk_tier = models.CharField(max_length=16, choices=RiskTier.choices)
+    source = models.CharField(max_length=16, choices=Source.choices)
+    # e.g. {"origin": "resume_llm"} or {"draft_ids": [1, 2, 3]}.
+    source_detail = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    is_locked = models.BooleanField(default=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "question_key"],
+                name="uniq_answerbank_profile_question_key",
+            ),
+            # A lock is a user decision; automation must never hold one.
+            models.CheckConstraint(
+                condition=~models.Q(
+                    source__in=["learned", "imported"], is_locked=True
+                ),
+                name="chk_answerbank_locked_only_user",
+            ),
+        ]
+
+    def __str__(self):
+        return f"AnswerBank<{self.profile_id}:{self.question_key}:{self.source}>"
+
+
+class AnswerBankHistory(models.Model):
+    """Append-only record of a value an `AnswerBank` row used to hold.
+
+    Keyed by (profile, question_key) rather than a FK to the row so history
+    survives the row being deleted or replaced.
+    """
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_bank_history",
+    )
+    question_key = models.CharField(max_length=255)
+    value = models.JSONField()
+    risk_tier = models.CharField(max_length=16)
+    source = models.CharField(max_length=16)
+    source_detail = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    was_locked = models.BooleanField(default=False)
+    superseded_by_source = models.CharField(max_length=16, blank=True, default="")
+    superseded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["profile", "question_key"], name="abh_profile_question_idx"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValueError("AnswerBankHistory is append-only; it cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"AnswerBankHistory<{self.profile_id}:{self.question_key}>"
