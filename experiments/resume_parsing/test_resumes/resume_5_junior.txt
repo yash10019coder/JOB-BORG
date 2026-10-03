@@ -1,0 +1,48 @@
+PRIYA SHARMA
+priya.sharma@email.com | +91 98765 43210
+LinkedIn: https://linkedin.com/in/priyasharma
+GitHub: https://github.com/priyasharma
+Location: Pune, India
+
+SUMMARY
+Recent Computer Science graduate with strong foundation in full-stack development. Internship experience at fintech startup building payment APIs. Eager to contribute to backend systems at scale. 200+ LeetCode problems solved.
+
+SKILLS
+Languages: Java, Python, JavaScript, SQL, C++
+Frameworks: Spring Boot, FastAPI, React, Node.js
+Databases: PostgreSQL, MySQL, MongoDB, Redis
+Tools: Git, Docker, GitHub Actions, IntelliJ, VS Code
+Cloud: AWS (EC2, RDS, Lambda, S3 - learning)
+
+EXPERIENCE
+Razorpay — Backend Engineering Intern (Jan 2024 – Jun 2024)
+Bangalore, India
+• Built payment reconciliation API (Spring Boot, PostgreSQL) processing 10K+ transactions/day
+• Wrote 80+ unit/integration tests (JUnit, Mockito), 90% coverage
+• Optimized database queries, reduced p99 latency from 800ms → 120ms
+• Participated in on-call rotation, resolved 5 production incidents
+
+Hackathon Project — UPI Fraud Detection (Aug 2023)
+• Team of 4, won 2nd place at Smart India Hackathon
+• ML model (XGBoost) detecting fraudulent UPI transactions, 94% accuracy
+• FastAPI backend with real-time inference (<50ms)
+
+EDUCATION
+Indian Institute of Technology, Bombay
+B.Tech Computer Science and Engineering, CGPA: 8.9/10
+2020 – 2024
+Relevant Coursework: Distributed Systems, Database Systems, Operating Systems, ML
+
+PROJECTS
+E-Commerce Backend (Java, Spring Boot, PostgreSQL)
+https://github.com/priyasharma/ecommerce-backend
+• REST API with JWT auth, order management, payment integration
+
+Task Manager (Python, FastAPI, React, PostgreSQL)
+https://github.com/priyasharma/task-manager
+• Full-stack app with real-time updates via WebSockets
+
+ACHIEVEMENTS
+• 200+ LeetCode problems (150 Medium, 30 Hard)
+• 2nd Place Smart India Hackathon 2023
+• Google Women Techmakers Scholar 2023

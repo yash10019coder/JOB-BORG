@@ -1,0 +1,74 @@
+{
+  "name": null,
+  "contact": {
+    "email": "marcus.johnson@email.com",
+    "phone": "+44 20 7946 0123",
+    "linkedin": "https://linkedin.com/in/marcusjohnsonGitHub",
+    "github": "https://github.com/marcusjohnson",
+    "location": "London, UK"
+  },
+  "summary": null,
+  "skills": [
+    "Airflow",
+    "Aws",
+    "Bert",
+    "Bigquery",
+    "C",
+    "C++",
+    "Clickhouse",
+    "Deepspeed",
+    "Delta Lake",
+    "Docker",
+    "Emr",
+    "Feast",
+    "Flink",
+    "Gcp",
+    "Gpt",
+    "Grafana",
+    "Hugging Face",
+    "Java",
+    "Kafka",
+    "Kubeflow",
+    "Kubernetes",
+    "Lambda",
+    "Lightgbm",
+    "Lora",
+    "Mlflow",
+    "Nltk",
+    "Prometheus",
+    "Python",
+    "Pytorch",
+    "Qlora",
+    "R",
+    "Redis",
+    "Sagemaker",
+    "Scikit-Learn",
+    "Sentence-Transformers",
+    "Spacy",
+    "Spark",
+    "Sql",
+    "Tensorflow",
+    "Transformers",
+    "Vertex Ai",
+    "Xgboost"
+  ],
+  "experience": [],
+  "education": [
+    {
+      "degree": "EDUCATION University of Oxford PhD Computer Science (Natural Language",
+      "dates": "Processing) 2014 \u2013 2018 Thesis: \u201cEfficient Transformer Architectures for Low-",
+      "school": "Imperial College London MSc Machine Learning, Distinction 2013 \u2013 2014"
+    }
+  ],
+  "projects": [
+    {
+      "name": "PROJECTS LLM Fine-tuning Framework (Python, PyTorch, DeepSpeed)"
+    },
+    {
+      "url": "https://github.com/marcusjohnson/llm-finetune \u2022 LoRA/QLoRA implementa-"
+    },
+    {
+      "url": "FeatureStoreforRecSys(Python,Feast,Redis)https://github.com/marcusjohnson/recsys-"
+    }
+  ]
+}

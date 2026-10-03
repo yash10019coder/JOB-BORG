@@ -1,0 +1,74 @@
+YASH VERMA
+yashverma10019.work@gmail.com | +91 8957557113
+LinkedIn: https://linkedin.com/in/yash10019coder
+GitHub: https://github.com/yash10019coder
+Location: Bangalore, India
+
+SUMMARY
+Backend Engineer with 3+ years experience building distributed systems at scale. Expertise in Java, Go, Spring Boot, Kubernetes, and cloud infrastructure. Track record of 200x query performance gains, 5B+ CDC pipeline throughput, and zero-downtime migrations.
+
+SKILLS
+Languages: Java, Go, Kotlin, Python, JavaScript, SQL, Bash
+Backend Frameworks: Spring Boot, Gin, Express.js, REST/GraphQL APIs
+DevOps & Cloud: Docker, Kubernetes, GitHub Actions, CI/CD, GCP, AWS, Helm, Prometheus/Grafana/Loki
+Databases: MySQL, PostgreSQL, MongoDB, ClickHouse, Firebase
+Testing: JUnit, Mockito, UIAutomator
+
+EXPERIENCE
+BrowserStack — SDE Backend (Apr 2025 – Present)
+Mumbai, India
+• Shipped enterprise RBAC access-control system (roles, hierarchies, 14 check-points) for 50k+ enterprise customers
+• Delivered multi-language SDK support across 5B+ API calls via client-aware routing
+• Built CDC pipeline from MySQL to ClickHouse for 10TB database, 5B+ inserts/updates, 35 Debezium connectors across 4 regions
+• Launched Australia AWS region (GRR/GDPR), handling 360K requests/hour
+• Halved per-session auth calls (2→1), cutting 102K auth calls/day
+• 208× query speedup (9.6s → 46ms) on 524M-row table via zero-downtime schema migrations across 4 regions
+• Cut dashboard load 4min → 3s by indexing high-cardinality queries
+• Executed zero-downtime PK migrations on 3 tables of 1B+ rows (~1TB, 2.9M rows/day)
+• Offloaded heavy aggregates from MySQL to ClickHouse, stabilizing CPU from 96%
+• Remediated SQL injection across 200+ APIs, shipped Static CI security scanning (~98% traffic)
+• Resolved 2 critical vulnerabilities (RCE, SSRF bypass), enabled TLS for database connections
+
+Zus (formerly 0chain) — SDE Backend Freelance (Apr 2024 – Mar 2025)
+Cupertino, CA (Remote)
+• Spearheaded UAT test suite for enterprise storage, reducing production bugs by 90%
+• Refactored GoSDK, reducing app size by 50%
+• Benchmarked S3-compatible storage for 500M bulk files and 40TB large files, sub-100ms latency
+• Developed automated workflows for view change, boosting developer efficiency by 90%
+• Built automated alert system for missing network blocks with Slack integration
+
+Zus (formerly 0chain) — Android Engineer Freelance (Feb 2022 – Mar 2024)
+Cupertino, CA (Remote)
+• Architected two Android apps (Bolt crypto wallet, Vult decentralized storage), 20% user base increase
+• Led and mentored 2 junior developers, 40% code quality improvement, 95% on-time delivery
+• Designed release pipelines reducing manual effort 70%
+• Developed Split Key Functionality for double-signing transactions via Bluetooth
+
+Google Summer of Code — Oppia Foundation (Jun 2021 – Sept 2022)
+Remote
+• Designed CI/CD infrastructure for Android builds
+• Implemented automated build triggers for alpha/beta/test releases
+• Engineered automated logging system tracking builds/releases
+
+EDUCATION
+Indian Institute of Information Technology, Lucknow
+Bachelor of Information Technology, CGPA: 8.32/10
+Apr 2020 – Apr 2024
+
+PROJECTS
+Parking Lot Management System (Node.js, Express.js, MongoDB, Winston, Jest)
+https://github.com/yash10019coder/ParkingLotBackend
+• RESTful API for parking space management with logging and testing
+
+Airline Ticketing System (Spring Boot, Java, Docker)
+https://github.com/yash10019coder/airline-ticketing-system
+• MVC architecture for booking, querying, canceling tickets
+
+Trip Feedback System (Spring Framework, Java)
+https://github.com/yash10019coder/TravelSpringBoot
+• Secure feedback submission with user authentication
+
+ACHIEVEMENTS
+• 700+ DSA Problems Solved on LeetCode
+• Oppia Foundation Member (2 years)
+• 30 Days of Google Cloud Program Completed
