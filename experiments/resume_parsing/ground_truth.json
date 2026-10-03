@@ -1,0 +1,354 @@
+{
+  "resume_1": {
+    "name": "Yash Verma",
+    "contact": {
+      "email": "yashverma10019.work@gmail.com",
+      "phone": "+91 8957557113",
+      "linkedin": "https://linkedin.com/in/yash10019coder",
+      "github": "https://github.com/yash10019coder",
+      "location": "Bangalore, India"
+    },
+    "summary": "Backend Engineer with 3+ years experience building distributed systems at scale. Expertise in Java, Go, Spring Boot, Kubernetes, and cloud infrastructure. Track record of 200x query performance gains, 5B+ CDC pipeline throughput, and zero-downtime migrations.",
+    "skills": [
+      "Java", "Go", "Kotlin", "Python", "JavaScript", "SQL", "Bash",
+      "Spring Boot", "Gin", "Express.js", "REST/GraphQL APIs",
+      "Docker", "Kubernetes", "GitHub Actions", "CI/CD", "GCP", "AWS", "Helm", "Prometheus", "Grafana", "Loki",
+      "MySQL", "PostgreSQL", "MongoDB", "ClickHouse", "Firebase",
+      "JUnit", "Mockito", "UIAutomator"
+    ],
+    "experience": [
+      {
+        "company": "BrowserStack",
+        "role": "SDE Backend",
+        "location": "Mumbai, India",
+        "start": "Apr 2025",
+        "end": "Present",
+        "bullets_count": 12,
+        "key_skills": ["RBAC", "Access Control", "CDC", "MySQL", "ClickHouse", "AWS", "GDPR", "Auth", "Database Migration", "Performance Optimization", "Security", "SQL Injection", "TLS"]
+      },
+      {
+        "company": "Zus (formerly 0chain)",
+        "role": "SDE Backend Freelance",
+        "location": "Cupertino, CA (Remote)",
+        "start": "Apr 2024",
+        "end": "Mar 2025",
+        "bullets_count": 7,
+        "key_skills": ["Testing", "QA", "Golang", "SDK Development", "Storage Systems", "Benchmarking", "S3", "Automation", "Distributed Systems", "Python", "Slack Integration", "Concurrency", "Load Testing"]
+      },
+      {
+        "company": "Zus (formerly 0chain)",
+        "role": "Android Engineer Freelance",
+        "location": "Cupertino, CA (Remote)",
+        "start": "Feb 2022",
+        "end": "Mar 2024",
+        "bullets_count": 4,
+        "key_skills": ["Android", "Kotlin", "Architecture", "Leadership", "Mentoring", "Scrum", "CI/CD", "Release Engineering", "Bluetooth", "Security", "Blockchain"]
+      },
+      {
+        "company": "Google Summer of Code - Oppia Foundation",
+        "role": "GSOC",
+        "location": "Remote",
+        "start": "Jun 2021",
+        "end": "Sept 2022",
+        "bullets_count": 7,
+        "key_skills": ["CI/CD", "Android", "GCP", "Git", "Automation", "Android Release", "Kotlin", "Bazel"]
+      }
+    ],
+    "education": [
+      {
+        "school": "Indian Institute of Information Technology, Lucknow",
+        "degree": "Bachelor of Information Technology",
+        "location": "Lucknow, India",
+        "start": "Apr 2020",
+        "end": "Apr 2024",
+        "cgpa": "8.32/10"
+      }
+    ],
+    "projects": [
+      {
+        "name": "Parking Lot Management System",
+        "url": "https://github.com/yash10019coder/ParkingLotBackend",
+        "tech_stack": ["Node.js", "Express.js", "MongoDB", "Winston", "Jest"]
+      },
+      {
+        "name": "Airline Ticketing System",
+        "url": "https://github.com/yash10019coder/airline-ticketing-system",
+        "tech_stack": ["Spring Boot", "Java", "Docker"]
+      },
+      {
+        "name": "Trip Feedback System",
+        "url": "https://github.com/yash10019coder/TravelSpringBoot",
+        "tech_stack": ["Spring Framework", "Java"]
+      }
+    ],
+    "achievements": [
+      "700+ DSA Problems Solved on LeetCode",
+      "Oppia Foundation Member (2 years)",
+      "30 Days of Google Cloud Program Completed"
+    ]
+  },
+  "resume_2": {
+    "name": "Sarah Chen",
+    "contact": {
+      "email": "sarah.chen@email.com",
+      "phone": "+1 (555) 123-4567",
+      "linkedin": "https://linkedin.com/in/sarahchen",
+      "github": "https://github.com/sarahchen",
+      "location": "San Francisco, CA, USA"
+    },
+    "summary": "Frontend Engineer with 5 years building scalable React/TypeScript applications. Led migration from legacy jQuery to modern React architecture, reducing bundle size 40%. Passionate about performance, accessibility, and developer experience.",
+    "skills": [
+      "TypeScript", "JavaScript", "HTML/CSS", "Python", "Go",
+      "React", "Next.js", "Redux", "Tailwind CSS", "Styled Components", "Webpack", "Vite",
+      "Jest", "React Testing Library", "Cypress", "Playwright",
+      "Docker", "GitHub Actions", "Vercel", "AWS Amplify",
+      "Git", "Figma", "Storybook", "ESLint", "Prettier"
+    ],
+    "experience": [
+      {
+        "company": "Stripe",
+        "role": "Senior Frontend Engineer",
+        "location": "San Francisco, CA",
+        "start": "Jan 2022",
+        "end": "Present",
+        "bullets_count": 5,
+        "key_skills": ["Dashboard", "Component Library", "WebRTC", "Yjs", "Mentoring", "Bundle Optimization", "Code Splitting", "Tree Shaking"]
+      },
+      {
+        "company": "Airbnb",
+        "role": "Frontend Engineer",
+        "location": "San Francisco, CA",
+        "start": "Mar 2019",
+        "end": "Dec 2021",
+        "bullets_count": 4,
+        "key_skills": ["React Migration", "A/B Testing", "Accessibility", "WCAG", "Design System"]
+      }
+    ],
+    "education": [
+      {
+        "school": "Stanford University",
+        "degree": "B.S. Computer Science, Minor in Human-Computer Interaction",
+        "location": "Stanford, CA, USA",
+        "start": "2015",
+        "end": "2019"
+      }
+    ],
+    "projects": [
+      {
+        "name": "Design System CLI",
+        "url": "https://github.com/sarahchen/design-system-cli",
+        "tech_stack": ["TypeScript", "Node.js"]
+      },
+      {
+        "name": "Accessibility Auditor",
+        "url": "https://github.com/sarahchen/a11y-auditor",
+        "tech_stack": ["React", "TypeScript", "axe-core"]
+      }
+    ],
+    "achievements": [
+      "Speaker at React Conf 2023",
+      "Open source contributor to React Testing Library",
+      "200+ GitHub stars across projects"
+    ]
+  },
+  "resume_3": {
+    "name": "Dr. Marcus Johnson",
+    "contact": {
+      "email": "marcus.johnson@email.com",
+      "phone": "+44 20 7946 0123",
+      "linkedin": "https://linkedin.com/in/marcusjohnson",
+      "github": "https://github.com/marcusjohnson",
+      "location": "London, UK"
+    },
+    "summary": "Machine Learning Engineer / Data Scientist with 6 years experience in NLP, recommendation systems, and MLOps. PhD in Computer Science. Published 8 papers at top venues (NeurIPS, ICML, ACL). Built production ML systems serving 100M+ predictions/day.",
+    "skills": [
+      "Python", "SQL", "R", "Java", "C++",
+      "PyTorch", "TensorFlow", "Hugging Face", "scikit-learn", "XGBoost", "LightGBM",
+      "Transformers", "BERT", "GPT", "spaCy", "NLTK", "sentence-transformers",
+      "MLflow", "Kubeflow", "Airflow", "Docker", "Kubernetes", "Prometheus", "Grafana",
+      "Spark", "Kafka", "Redis", "PostgreSQL", "ClickHouse", "Delta Lake",
+      "AWS (SageMaker, EMR, Lambda)", "GCP (Vertex AI, BigQuery)"
+    ],
+    "experience": [
+      {
+        "company": "DeepMind",
+        "role": "Research Engineer",
+        "location": "London, UK",
+        "start": "Sep 2021",
+        "end": "Present",
+        "bullets_count": 4,
+        "key_skills": ["LLM Fine-tuning", "Distributed Training", "RLHF", "NeurIPS", "ICML", "Transformer Training"]
+      },
+      {
+        "company": "Spotify",
+        "role": "Senior ML Engineer",
+        "location": "Stockholm, Sweden (Remote from London)",
+        "start": "Jul 2018",
+        "end": "Aug 2021",
+        "bullets_count": 4,
+        "key_skills": ["Recommendation Systems", "Feature Store", "Feast", "A/B Testing", "Kafka", "Flink", "Streaming"]
+      }
+    ],
+    "education": [
+      {
+        "school": "University of Oxford",
+        "degree": "PhD Computer Science (Natural Language Processing)",
+        "location": "Oxford, UK",
+        "start": "2014",
+        "end": "2018"
+      },
+      {
+        "school": "Imperial College London",
+        "degree": "MSc Machine Learning, Distinction",
+        "location": "London, UK",
+        "start": "2013",
+        "end": "2014"
+      }
+    ],
+    "projects": [
+      {
+        "name": "LLM Fine-tuning Framework",
+        "url": "https://github.com/marcusjohnson/llm-finetune",
+        "tech_stack": ["Python", "PyTorch", "DeepSpeed"]
+      },
+      {
+        "name": "Feature Store for RecSys",
+        "url": "https://github.com/marcusjohnson/recsys-featurestore",
+        "tech_stack": ["Python", "Feast", "Redis"]
+      }
+    ],
+    "achievements": [
+      "8 papers at NeurIPS, ICML, ACL (3 first-author)",
+      "Google PhD Fellowship 2016",
+      "Kaggle Grandmaster (Top 50 globally)"
+    ]
+  },
+  "resume_4": {
+    "name": "Alex Rodriguez",
+    "contact": {
+      "email": "alex.rodriguez@email.com",
+      "phone": "+52 55 1234 5678",
+      "linkedin": "https://linkedin.com/in/alexrodriguez",
+      "github": "https://github.com/alexrodriguez",
+      "location": "Mexico City, Mexico"
+    },
+    "summary": "DevOps / Platform Engineer with 4 years building cloud-native infrastructure. Expert in Kubernetes, Terraform, GitOps, and observability. Reduced deployment time 80%, improved system reliability to 99.99%. AWS/GCP certified.",
+    "skills": [
+      "Go", "Python", "Bash", "YAML", "HCL",
+      "Terraform", "Terragrunt", "Pulumi", "Crossplane", "Helm", "Kustomize",
+      "EKS", "GKE", "AKS", "ArgoCD", "Flux", "Istio", "Linkerd", "cert-manager",
+      "GitHub Actions", "GitLab CI", "Jenkins", "Argo Workflows", "Tekton",
+      "Prometheus", "Grafana", "Loki", "Tempo", "Jaeger", "Alertmanager",
+      "AWS (EKS, RDS, S3, CloudFront, IAM)", "GCP (GKE, Cloud Run, Cloud SQL)",
+      "Vault", "OPA/Gatekeeper", "Falco", "Trivy", "cosign", "Kyverno"
+    ],
+    "experience": [
+      {
+        "company": "Datadog",
+        "role": "Platform Engineer",
+        "location": "Remote (Mexico City)",
+        "start": "Feb 2022",
+        "end": "Present",
+        "bullets_count": 5,
+        "key_skills": ["Kubernetes Platform", "ArgoCD", "GitOps", "Multi-region DR", "Backstage", "Cost Optimization"]
+      },
+      {
+        "company": "Uber",
+        "role": "DevOps Engineer",
+        "location": "San Francisco, CA",
+        "start": "Jun 2019",
+        "end": "Jan 2022",
+        "bullets_count": 4,
+        "key_skills": ["Kubernetes Migration", "Autoscaler", "Service Mesh", "Istio", "mTLS", "Traffic Management"]
+      }
+    ],
+    "education": [
+      {
+        "school": "Tecnológico de Monterrey",
+        "degree": "B.S. Computer Systems Engineering",
+        "location": "Monterrey, Mexico",
+        "start": "2015",
+        "end": "2019"
+      }
+    ],
+    "projects": [
+      {
+        "name": "GitOps Platform Starter",
+        "url": "https://github.com/alexrodriguez/gitops-starter",
+        "tech_stack": ["Go", "Terraform", "ArgoCD"]
+      },
+      {
+        "name": "Kubernetes Cost Optimizer",
+        "url": "https://github.com/alexrodriguez/k8s-cost-optimizer",
+        "tech_stack": ["Python", "Prometheus", "Kubecost"]
+      }
+    ],
+    "achievements": [
+      "CNCF Ambassador 2023",
+      "Speaker at KubeCon NA 2023",
+      "500+ GitHub stars across infrastructure projects"
+    ],
+    "certifications": [
+      "AWS Certified Solutions Architect – Professional",
+      "GCP Professional Cloud Architect",
+      "CKAD (Certified Kubernetes Application Developer)",
+      "HashiCorp Terraform Associate"
+    ]
+  },
+  "resume_5": {
+    "name": "Priya Sharma",
+    "contact": {
+      "email": "priya.sharma@email.com",
+      "phone": "+91 98765 43210",
+      "linkedin": "https://linkedin.com/in/priyasharma",
+      "github": "https://github.com/priyasharma",
+      "location": "Pune, India"
+    },
+    "summary": "Recent Computer Science graduate with strong foundation in full-stack development. Internship experience at fintech startup building payment APIs. Eager to contribute to backend systems at scale. 200+ LeetCode problems solved.",
+    "skills": [
+      "Java", "Python", "JavaScript", "SQL", "C++",
+      "Spring Boot", "FastAPI", "React", "Node.js",
+      "PostgreSQL", "MySQL", "MongoDB", "Redis",
+      "Git", "Docker", "GitHub Actions", "IntelliJ", "VS Code",
+      "AWS (EC2, RDS, Lambda, S3 - learning)"
+    ],
+    "experience": [
+      {
+        "company": "Razorpay",
+        "role": "Backend Engineering Intern",
+        "location": "Bangalore, India",
+        "start": "Jan 2024",
+        "end": "Jun 2024",
+        "bullets_count": 4,
+        "key_skills": ["Payment Reconciliation", "Spring Boot", "PostgreSQL", "JUnit", "Mockito", "Query Optimization", "On-call"]
+      }
+    ],
+    "education": [
+      {
+        "school": "Indian Institute of Technology, Bombay",
+        "degree": "B.Tech Computer Science and Engineering",
+        "location": "Mumbai, India",
+        "start": "2020",
+        "end": "2024",
+        "cgpa": "8.9/10"
+      }
+    ],
+    "projects": [
+      {
+        "name": "E-Commerce Backend",
+        "url": "https://github.com/priyasharma/ecommerce-backend",
+        "tech_stack": ["Java", "Spring Boot", "PostgreSQL"]
+      },
+      {
+        "name": "Task Manager",
+        "url": "https://github.com/priyasharma/task-manager",
+        "tech_stack": ["Python", "FastAPI", "React", "PostgreSQL"]
+      }
+    ],
+    "achievements": [
+      "200+ LeetCode problems (150 Medium, 30 Hard)",
+      "2nd Place Smart India Hackathon 2023",
+      "Google Women Techmakers Scholar 2023"
+    ]
+  }
+}

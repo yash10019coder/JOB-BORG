@@ -1,0 +1,58 @@
+ALEX RODRIGUEZ
+alex.rodriguez@email.com | +52 55 1234 5678
+LinkedIn: https://linkedin.com/in/alexrodriguez
+GitHub: https://github.com/alexrodriguez
+Location: Mexico City, Mexico
+
+SUMMARY
+DevOps / Platform Engineer with 4 years building cloud-native infrastructure. Expert in Kubernetes, Terraform, GitOps, and observability. Reduced deployment time 80%, improved system reliability to 99.99%. AWS/GCP certified.
+
+SKILLS
+Languages: Go, Python, Bash, YAML, HCL
+Infrastructure: Terraform, Terragrunt, Pulumi, Crossplane, Helm, Kustomize
+Kubernetes: EKS, GKE, AKS, ArgoCD, Flux, Istio, Linkerd, cert-manager
+CI/CD: GitHub Actions, GitLab CI, Jenkins, Argo Workflows, Tekton
+Observability: Prometheus, Grafana, Loki, Tempo, Jaeger, Alertmanager
+Cloud: AWS (EKS, RDS, S3, CloudFront, IAM), GCP (GKE, Cloud Run, Cloud SQL)
+Security: Vault, OPA/Gatekeeper, Falco, Trivy, cosign, Kyverno
+
+EXPERIENCE
+Datadog — Platform Engineer (Feb 2022 – Present)
+Remote (Mexico City)
+• Built self-service Kubernetes platform (EKS + ArgoCD) for 50+ microservice teams
+• Implemented GitOps workflow reducing deployment time from 45min → 8min
+• Designed multi-region DR strategy, RPO=0, RTO=15min
+• Created developer portal (Backstage) with 200+ service templates
+• Reduced cloud spend 25% via rightsizing and spot instances
+
+Uber — DevOps Engineer (Jun 2019 – Jan 2022)
+San Francisco, CA
+• Migrated 200+ services to Kubernetes (Mesos → EKS), zero downtime
+• Built custom autoscaler for batch workloads, 40% cost reduction
+• Implemented service mesh (Istio) for mTLS and traffic management
+• On-call rotation for platform infrastructure (99.99% availability)
+
+EDUCATION
+Tecnológico de Monterrey
+B.S. Computer Systems Engineering
+2015 – 2019
+
+CERTIFICATIONS
+• AWS Certified Solutions Architect – Professional
+• GCP Professional Cloud Architect
+• CKAD (Certified Kubernetes Application Developer)
+• HashiCorp Terraform Associate
+
+PROJECTS
+GitOps Platform Starter (Go, Terraform, ArgoCD)
+https://github.com/alexrodriguez/gitops-starter
+• Production-ready bootstrap for multi-cluster GitOps
+
+Kubernetes Cost Optimizer (Python, Prometheus, Kubecost)
+https://github.com/alexrodriguez/k8s-cost-optimizer
+• Automated rightsizing recommendations via Slack
+
+ACHIEVEMENTS
+• CNCF Ambassador 2023
+• Speaker at KubeCon NA 2023: "GitOps at Scale"
+• 500+ GitHub stars across infrastructure projects
