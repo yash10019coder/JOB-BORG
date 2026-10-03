@@ -948,3 +948,70 @@ class DraftingBoundaryTests(DraftingServiceTestCase):
         client = FakeFormClient(STANDARD_ONLY_SCHEMA)
         self.assertIsNone(draft_for(self.user, self.job, form_client=client, llm_client=FakeLLMClient()))
         self.assertEqual(client.inspect_calls, [])
+
+
+class AnswerBankDraftingTests(DraftingServiceTestCase):
+    """A drafted answer that came from the AnswerBank carries its
+    provenance; one that did not keeps exactly its pre-AnswerBank shape."""
+
+    QUESTION = "Are you legally authorized to work in the United States?"
+
+    def _schema(self):
+        return FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label=self.QUESTION,
+                    field_type=SINGLE_SELECT,
+                    required=True,
+                    options=("Yes", "No"),
+                ),
+            )
+        )
+
+    def test_unconfirmed_bank_answer_is_flagged_with_provenance_and_skips_the_llm(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        write_answer(self.profile, self.QUESTION, "Yes", "learned", options=("Yes", "No"))
+        llm_client = FakeLLMClient()
+
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=llm_client,
+        )
+
+        entry = draft.answers[self.QUESTION]
+        self.assertEqual(entry["value"], "Yes")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertEqual(entry["tier"], "t0_legal")
+        self.assertEqual(entry["provenance"]["source"], "learned")
+        self.assertEqual(llm_client.calls, [])
+
+    def test_user_bank_answer_needs_no_confirmation(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        write_answer(self.profile, self.QUESTION, "Yes", "user", options=("Yes", "No"))
+
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
+        )
+
+        entry = draft.answers[self.QUESTION]
+        self.assertFalse(entry["needs_review"])
+        self.assertFalse(entry["needs_confirmation"])
+
+    def test_answers_without_a_bank_row_keep_the_old_entry_shape(self):
+        ExplicitAnswer.objects.create(
+            user=self.user,
+            category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
+            answer_text="Yes",
+        )
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
+        )
+        entry = draft.answers[self.QUESTION]
+        for key in ("needs_confirmation", "provenance", "tier"):
+            self.assertNotIn(key, entry)

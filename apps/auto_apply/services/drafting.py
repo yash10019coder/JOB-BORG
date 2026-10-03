@@ -325,6 +325,13 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "options": form_field.options,
                 "options_complete": form_field.options_complete,
         }
+        if resolved_answer.provenance is not None:
+            # Only AnswerBank-sourced answers carry these, so drafts built
+            # from the legacy/LLM paths keep their exact prior shape.
+            entry = answers_payload[form_field.label]
+            entry["needs_confirmation"] = resolved_answer.needs_confirmation
+            entry["provenance"] = resolved_answer.provenance
+            entry["tier"] = resolved_answer.tier
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
 
