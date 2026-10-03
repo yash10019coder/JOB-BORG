@@ -25,6 +25,7 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
 )
 from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.services.confirmation import build_submit_snapshot, unconfirmed_fields
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
@@ -236,6 +237,9 @@ def job_action(request, job_id):
 _REASON_CODE_MESSAGES = {
     AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH: (
         "This application has a question we couldn't fill in automatically."
+    ),
+    AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS: (
+        "Some answers need your confirmation before this application can be sent."
     ),
     AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
         "We couldn't load this employer's application form."
@@ -618,6 +622,7 @@ def edit_auto_apply_draft(request, pk):
         # edit with no error shown.
         label = request.POST[f"label__{index}"].replace("\r\n", "\n")
         value_field = f"value__{index}"
+        confirm_field = f"confirm__{index}"
         index += 1
         if label not in answers:
             continue
@@ -638,6 +643,27 @@ def edit_auto_apply_draft(request, pk):
             invalid_labels.append(label)
             continue
         answers[label]["value"] = cleaned
+        if answers[label].get("needs_confirmation"):
+            # A learned/imported legal or commercial answer is only ever
+            # confirmed by an explicit, per-field action -- saving the form
+            # (which re-posts every value) must not count as one.
+            if confirm_field in request.POST and not _is_blank_answer_value(cleaned):
+                entry = answers[label]
+                entry["confirmed_from"] = entry.get("provenance")
+                entry["provenance"] = {
+                    "origin": "draft_review",
+                    "source": "user",
+                    "locked": False,
+                    "confidence": 1.0,
+                    "detail": {},
+                }
+                entry["needs_confirmation"] = False
+                entry["needs_review"] = False
+                entry["user_confirmed"] = True
+            else:
+                answers[label]["needs_review"] = True
+                answers[label]["user_confirmed"] = False
+            continue
         # A blank answer keeps its "needs review" hint regardless of
         # required-ness, so an optional placeholder doesn't quietly lose its
         # flag the moment the queue is re-rendered/saved.
@@ -709,6 +735,14 @@ def send_auto_apply_draft(request, pk):
         )
         return _auto_apply_queue_redirect(request)
 
+    unconfirmed = unconfirmed_fields(draft.answers)
+    if unconfirmed:
+        messages.error(
+            request,
+            "Confirm these answer(s) before sending: " + "; ".join(unconfirmed),
+        )
+        return _auto_apply_queue_redirect(request)
+
     # A blank, optional needs_review placeholder (R5's "float unanswerable
     # questions to review instead of excluding the draft") isn't actually
     # sent to the form and has nothing to confirm, so it doesn't block --
@@ -728,7 +762,11 @@ def send_auto_apply_draft(request, pk):
     updated = AutoApplyDraft.objects.filter(
         pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
         answers=draft.answers,
-    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
+    ).update(
+        status=AutoApplyDraft.Status.SENDING,
+        updated_at=timezone.now(),
+        submitted_answers_snapshot=build_submit_snapshot(draft.answers),
+    )
     if not updated:
         raise Http404("Draft not found or not sendable.")
 

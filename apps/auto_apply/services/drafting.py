@@ -325,6 +325,13 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "options": form_field.options,
                 "options_complete": form_field.options_complete,
         }
+        if resolved_answer.provenance is not None:
+            # Only AnswerBank-sourced answers carry these, so drafts built
+            # from the legacy/LLM paths keep their exact prior shape.
+            entry = answers_payload[form_field.label]
+            entry["needs_confirmation"] = resolved_answer.needs_confirmation
+            entry["provenance"] = resolved_answer.provenance
+            entry["tier"] = resolved_answer.tier
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
 
@@ -364,6 +371,20 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                     entry["value"] = label
                     entry["needs_review"] = False
                     entry["reason"] = "profile_derived_region"
+                    if "provenance" in entry:
+                        # The value now comes from the user's own profile, not
+                        # the AnswerBank row that was resolved first: drop that
+                        # row's hold and attribution so the user isn't asked to
+                        # confirm their own band and the submit snapshot
+                        # records the real source.
+                        entry["needs_confirmation"] = False
+                        entry["provenance"] = {
+                            "origin": "profile.salary_by_region",
+                            "source": "user",
+                            "locked": False,
+                            "confidence": 1.0,
+                            "detail": {"region": job_region},
+                        }
                     break
 
     if unanswerable_required:

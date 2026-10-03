@@ -3,6 +3,7 @@ from itertools import zip_longest
 from django import forms
 
 from apps.accounts.models import Profile
+from apps.accounts.services import profile_fields
 from apps.auto_apply.models import ExplicitAnswer
 from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION, alpha3_for_country
 from apps.locations.services import normalize_target_locations
@@ -107,6 +108,9 @@ class ProfileForm(forms.ModelForm):
                 choices=SALARY_BANDS_BY_REGION[region_key],
             )
             self.initial.setdefault(field_name, stored_salary.get(region_key, ""))
+        # Pre-edit values of the provenance-covered fields, taken before
+        # validation lets ModelForm assign the new ones onto the instance.
+        self._covered_before = profile_fields.snapshot(self.instance)
 
     def _clean_list(self, field):
         return _split_csv(self.cleaned_data.get(field, ""))
@@ -222,6 +226,9 @@ class ProfileForm(forms.ModelForm):
         instance.visa_status_by_country = self.cleaned_data.get("visa_status_by_country") or {}
         instance.citizenship_countries = self.cleaned_data.get("citizenship_countries") or []
         instance.salary_by_region = self.cleaned_data.get("salary_by_region") or {}
+        # Same save as the field changes: provenance rides along, no second
+        # post_save (and so no second rematch).
+        profile_fields.record_user_edits(instance, self._covered_before)
         if commit:
             instance.save()
             if resume_changed:
