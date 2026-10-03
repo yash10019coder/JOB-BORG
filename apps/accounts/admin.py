@@ -1,5 +1,6 @@
 from django.contrib import admin
 
+from .services import profile_fields
 from .models import AnswerBank, AnswerBankHistory, EmailInboxCredential, Profile
 
 
@@ -36,6 +37,11 @@ class ProfileAdmin(admin.ModelAdmin):
         divergent clear-path that bypasses `full_clean()`/the explicit-
         trigger convention `set_resume()` exists to centralize.
         """
+        # Staff edits are user-authored changes for provenance purposes.
+        profile_fields.record_user_edits(
+            obj,
+            {f: form.initial[f] for f in profile_fields.COVERED_FIELDS if f in form.initial},
+        )
         if "resume" in form.changed_data:
             # Save every other field first (this also creates the row on the
             # add view), then apply the resume change through set_resume() --
