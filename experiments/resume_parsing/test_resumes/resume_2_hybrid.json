@@ -1,0 +1,51 @@
+{
+  "name": null,
+  "contact": {
+    "email": "sarah.chen@email.com",
+    "phone": "+1 (555) 123-4567",
+    "linkedin": "https://linkedin.com/in/sarahchen",
+    "github": "https://github.com/sarahchen",
+    "location": "San Francisco, CA, USA"
+  },
+  "summary": null,
+  "skills": [
+    "Aws",
+    "Ci/Cd",
+    "Cypress",
+    "Docker",
+    "Eslint",
+    "Figma",
+    "Git",
+    "Github Actions",
+    "Go",
+    "Javascript",
+    "Jest",
+    "Next.Js",
+    "Playwright",
+    "Prettier",
+    "Python",
+    "React",
+    "React Testing Library",
+    "Redux",
+    "Storybook",
+    "Tailwind",
+    "Typescript",
+    "Vite",
+    "Webpack"
+  ],
+  "experience": [],
+  "education": [
+    {
+      "degree": "EDUCATION Stanford University B.S. Computer Science, Minor in Human-",
+      "dates": "Computer Interaction 2015 \u2013 2019"
+    }
+  ],
+  "projects": [
+    {
+      "url": "PROJECTSDesignSystemCLI(TypeScript,Node.js)https://github.com/sarahchen/design-"
+    },
+    {
+      "url": "AccessibilityAuditor(React,TypeScript,axe-core)https://github.com/sarahchen/a11y-"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "name": null,
+  "contact": {
+    "email": "yashverma10019.work@gmail.com",
+    "phone": "+91 8957557113",
+    "linkedin": "https://linkedin.com/in/yash10019coderGitHub",
+    "github": "https://github.com/yash10019coder",
+    "location": "Bangalore, India"
+  },
+  "summary": null,
+  "skills": [
+    "Aws",
+    "Bash",
+    "Ci/Cd",
+    "Clickhouse",
+    "Docker",
+    "Express",
+    "Express.Js",
+    "Firebase",
+    "Gcp",
+    "Gin",
+    "Github Actions",
+    "Go",
+    "Grafana",
+    "Helm",
+    "Java",
+    "Javascript",
+    "Jest",
+    "Junit",
+    "Kotlin",
+    "Kubernetes",
+    "Loki",
+    "Mockito",
+    "Mongodb",
+    "Mysql",
+    "Postgresql",
+    "Prometheus",
+    "Python",
+    "S3",
+    "Spring",
+    "Spring Boot",
+    "Sql",
+    "Uiautomator"
+  ],
+  "experience": [],
+  "education": [
+    {
+      "degree": "EDUCATION Indian Institute of Information Technology, Lucknow Bachelor of"
+    }
+  ],
+  "projects": [
+    {
+      "name": "PROJECTS Parking Lot Management System (Node.js, Express.js, MongoDB,"
+    },
+    {
+      "url": "Winston, Jest) https://github.com/yash10019coder/ParkingLotBackend \u2022"
+    },
+    {
+      "url": "AirlineTicketingSystem(SpringBoot,Java,Docker)https://github.com/yash10019coder/airline-"
+    },
+    {
+      "url": "TripFeedbackSystem(SpringFramework,Java)https://github.com/yash10019coder/TravelSpringBoot",
+      "bullets": [
+        "Secure feedback submission with user authentication"
+      ]
+    }
+  ]
+}
