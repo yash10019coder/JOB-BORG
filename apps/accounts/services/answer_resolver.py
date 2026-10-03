@@ -118,7 +118,11 @@ def resolve_answer(
     key = normalize_question_key(question_text, options)
     computed_tier = classify_tier(question_text)
 
-    row = AnswerBank.objects.filter(profile=profile, question_key=key).first()
+    row = (
+        AnswerBank.objects.filter(profile=profile, question_key=key).first()
+        if profile is not None
+        else None
+    )
     if row is not None and not _is_expired(row, now):
         tier = higher_tier(row.risk_tier, computed_tier)
         return ResolvedValue(
@@ -142,7 +146,7 @@ def resolve_answer(
             # Counted so Phase 5 can tell when the legacy table is unused.
             logger.info(
                 "answer_resolver.legacy_fallback_hit",
-                extra={"profile_id": profile.pk, "question_key": key},
+                extra={"profile_id": getattr(profile, "pk", None), "question_key": key},
             )
             return ResolvedValue(
                 value=legacy_value,
