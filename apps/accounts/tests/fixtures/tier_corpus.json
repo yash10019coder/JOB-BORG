@@ -1,0 +1,214 @@
+[
+ {
+  "text": "Address Line 1",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Country",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Phone",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "State",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Postal Code",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Location (City)",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "In which city are you based?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "What city do you reside in?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Which location and timezone will you be working from?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Please provide full mailing address (permanent & shipping)",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Github/Gitlab Profile URL",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "How did you find us?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "How did you hear about Appian?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "How did you hear about the opportunity?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "How did you hear about this job?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Did a current Defense Unicorn refer you to this position and, if so, who was it?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Did you meet with or see Defense Unicorns while attending an event or conference (e.g. Kubecon)?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Do you have at least 2 years of experience selling to broker-dealers and advisors?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Have you sold correspondent clearing services in the past?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Are you JLPT N1 (fluent Japanese)?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Are you a current user of, or have used in the past 12 months, the ConnectWise suite of products?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Are you authorized to work in the United States?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you legally authorized to work in the United States?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you legally authorized to work in the US?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you currently authorized to work in the city/country where this position is located?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you legally authorized to work in the United States without employer sponsorship (i.e., C2C, H1B, EAD, OPT, FI, or TN) now or in the future?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Do you now or will you in future require sponsorship for continued work authorization?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Do you now or in the future require sponsorship for employment visa status in Poland?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Will you now, or in the future, require sponsorship for employment visa status (e.g. H-1B visa status)?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Will you now or in the future require visa sponsorship? This includes F1 and OPT Student Visas",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Do you hold an ACTIVE U.S. Government issued clearance? If so, what level? **Note: this position requires U.S. Citizenship.",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Have you been employed by Appian before?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Have you been employed by a partner or customer of ConnectWise in the last 12 months?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you under any post-employment, contractual or other restrictions that would prevent you from working in the proposed position?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Do you consent to the privacy policy?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "In this question description we have provided a link to our California Consumer Privacy Act (CCPA) disclosure. Please acknowledge that you have been provided with this disclosure",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "What is your desired salary?",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "What is your desired salary? Please include currency as well.",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "Please disclose your annual salary expectations.",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "Are you based in, or open to relocate to Japan, Hong Kong, or Taiwan?",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "Do you have 5 years of experience and are you authorized to work in the US?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "I do not require sponsorship (select No to confirm)",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Please describe your experience with Kubernetes",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "What is your notice period?",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "When can you start?",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "Are you open to relocation?",
+  "tier": "t1_commercial"
+ },
+ {
+  "text": "Please state your gender identity",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you a veteran?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Do you have a disability?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Have you ever been convicted of a felony?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "I certify that the information provided is true",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Gibberish xyz",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "",
+  "tier": "t0_legal"
+ }
+]
