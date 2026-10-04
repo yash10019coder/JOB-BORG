@@ -36,7 +36,7 @@ from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
 from apps.accounts.regions import country_choices
 
-from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
+from .forms import EmailInboxCredentialForm
 
 
 RECOMMENDATIONS_PER_PAGE = 20
@@ -82,68 +82,6 @@ def signup(request):
     else:
         form = UserCreationForm()
     return render(request, "registration/signup.html", {"form": form})
-
-
-def _profile_form_context(request, form):
-    """Template context shared by the profile and explicit-answers views.
-
-    Both render `web/profile_form.html`, and the per-country authorization
-    repeater needs the country list and status vocabulary in both. Salary
-    bands no longer go through here: they are now real per-region
-    `<select>` fields on `ProfileForm`, so there is no JSON blob to hand the
-    template and no client-side state to reconcile.
-    """
-    profile_obj = request.user.profile
-    return {
-        "form": form,
-        "explicit_answers_form": ExplicitAnswersForm(user=request.user),
-        "country_choices": country_choices(),
-        "visa_status_choices": Profile.VisaStatus.choices,
-        # One [alpha3, status] pair per stored row, so the repeater can
-        # re-render what's already saved. JSON-encoded here rather than in
-        # the template to keep quoting/escaping correct.
-        "visa_rows_json": json.dumps(
-            [
-                [alpha3, status]
-                for alpha3, status in (profile_obj.visa_status_by_country or {}).items()
-            ]
-        ),
-    }
-
-
-@login_required
-def profile(request):
-    instance = request.user.profile  # always the requesting user's own profile
-    if request.method == "POST":
-        form = ProfileForm(request.POST, request.FILES, instance=instance)
-        if form.is_valid():
-            form.save()  # Profile post-save signal -> debounced rematch
-            return redirect("recommendations")
-    else:
-        form = ProfileForm(instance=instance)
-    return render(request, "web/profile_form.html", _profile_form_context(request, form))
-
-
-@login_required
-def explicit_answers(request):
-    """Self-service UI for saved ExplicitAnswer values (work auth, sponsorship, salary)."""
-    if request.method == "POST":
-        form = ExplicitAnswersForm(request.POST, user=request.user)
-        if form.is_valid():
-            form.save()
-            # `salary_by_region` and the per-country authorization rows are
-            # Profile fields now, edited by the profile form above; the
-            # explicit-answers form saves only the free-text answer rows, so
-            # it cannot clobber the Profile-owned structured values.
-            messages.info(request, "Saved answers updated.")
-            return redirect("profile")
-    else:
-        form = ExplicitAnswersForm(user=request.user)
-    return render(
-        request,
-        "web/profile_form.html",
-        _profile_form_context(request, ProfileForm(instance=request.user.profile)),
-    )
 
 
 # --- Recommendations ------------------------------------------------------

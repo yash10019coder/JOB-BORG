@@ -330,3 +330,31 @@ def _membership(profile, text, options):
     if picked is None:
         return TypedFact(MEMBERSHIP, True, None, "location_country", detail, "no_option_match", truth)
     return TypedFact(MEMBERSHIP, True, picked, "location_country", detail, "", truth)
+
+
+def legacy_conflicts(profile, legacy_rows):
+    """Per-country settings that disagree with a backfilled legacy answer.
+
+    Legacy answers are country-agnostic while the typed settings are per
+    country, so they can legitimately differ; the Answers tab lists them so
+    the user can delete the old answer if it is stale. Never blocks anything.
+    """
+    by_key = {row.question_key: row for row in legacy_rows}
+    held = set(profile.citizenship_countries or []) | set(profile.visa_status_by_country or {})
+    conflicts = []
+    for key, index, label in (
+        ("legacy:work_authorization", 0, "work authorization"),
+        ("legacy:sponsorship", 1, "sponsorship"),
+    ):
+        row = by_key.get(key)
+        boolean = (row.source_detail or {}).get("answer_bool") if row is not None else None
+        if boolean is None:
+            continue
+        for alpha3 in sorted(held):
+            pair = profile.authorization_for_country(alpha3)
+            typed = pair[index] if pair else None
+            if typed is not None and typed != boolean:
+                conflicts.append(
+                    {"key": key, "label": label, "country": label_for_country(alpha3)}
+                )
+    return conflicts

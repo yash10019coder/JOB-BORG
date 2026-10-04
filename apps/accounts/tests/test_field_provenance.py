@@ -197,11 +197,11 @@ class LocationFieldProvenanceTests(_ProfileTestCase):
 
 
 class ProfileFormProvenanceTests(_ProfileTestCase):
-    def _post(self, **overrides):
+    """The two profile pages stamp provenance for the fields each one owns."""
+
+    def _post_search(self, **overrides):
         data = {
-            "full_name": "", "headline": "", "phone": "", "linkedin_url": "",
-            "github_url": "", "portfolio_url": "", "current_employer": "",
-            "target_titles": "", "target_tags": "", "target_locations": "",
+            "headline": "", "target_titles": "", "target_tags": "", "target_locations": "",
             "excluded_employers": "", "remote_pref": "any", "is_active": "on",
             "preferred_currency": "USD",
         }
@@ -209,38 +209,49 @@ class ProfileFormProvenanceTests(_ProfileTestCase):
         self.client.force_login(self.user)
         return self.client.post(reverse("profile"), data)
 
-    def test_form_save_stamps_changed_fields_as_user(self):
-        self._post(phone="555-0100", target_tags="python, django")
+    def _post_answers(self, **overrides):
+        data = {
+            "full_name": "", "phone": "", "linkedin_url": "", "github_url": "",
+            "portfolio_url": "", "current_employer": "", "location_city": "",
+            "location_country": "", "mailing_address": "", "working_timezone": "",
+            "visa_rows_present": "1",
+        }
+        data.update(overrides)
+        self.client.force_login(self.user)
+        return self.client.post(reverse("profile_answers"), data)
+
+    def test_search_save_stamps_changed_search_fields_as_user(self):
+        self._post_search(target_tags="python, django")
         self.profile.refresh_from_db()
-        self.assertEqual(
-            set(self.profile.field_provenance), {"phone", "target_tags"}
-        )
+        self.assertEqual(set(self.profile.field_provenance), {"target_tags"})
+
+    def test_answers_save_stamps_changed_contact_fields_as_user(self):
+        self._post_answers(phone="555-0100", location_country="IND")
+        self.profile.refresh_from_db()
+        self.assertEqual(set(self.profile.field_provenance), {"phone", "location_country"})
 
     def test_untouched_resave_adds_no_new_entries_and_keeps_old_ones(self):
-        self._post(phone="555-0100")
+        self._post_answers(phone="555-0100")
         first = dict(self.profile.__class__.objects.get(pk=self.profile.pk).field_provenance)
-        self._post(phone="555-0100")
+        self._post_answers(phone="555-0100")
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.field_provenance, first)
 
     def test_visa_repeater_row_is_stamped_per_country(self):
-        self.client.force_login(self.user)
-        self.client.post(
-            reverse("profile"),
-            {
-                "remote_pref": "any", "is_active": "on", "preferred_currency": "USD",
-                "visa_country[]": ["USA"], "visa_status[]": ["h1b"],
-            },
-        )
+        self._post_answers(**{"visa_country[]": ["USA"], "visa_status[]": ["h1b"]})
         self.profile.refresh_from_db()
         self.assertIn("visa_status_by_country.USA", self.profile.field_provenance)
 
-    def test_form_save_triggers_exactly_one_rematch(self):
-        self._post(phone="555-0100")
+    def test_a_search_save_triggers_exactly_one_rematch(self):
+        self._post_search(target_tags="python")
         self.assertEqual(self.mock_schedule.call_count, 1)
 
+    def test_an_answers_save_triggers_no_rematch(self):
+        self._post_answers(phone="555-0100", **{"visa_country[]": ["USA"], "visa_status[]": ["citizen"]})
+        self.assertEqual(self.mock_schedule.call_count, 0)
+
     def test_user_edit_then_import_is_kept(self):
-        self._post(portfolio_url="https://me.dev")
+        self._post_answers(portfolio_url="https://me.dev")
         self.profile.refresh_from_db()
         self.assertFalse(
             profile_fields.apply_profile_field(

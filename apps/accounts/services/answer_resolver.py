@@ -37,6 +37,7 @@ from django.utils import timezone
 from apps.accounts import question_semantics as qs
 from apps.accounts.models import AnswerBank, AnswerBankHistory
 from apps.accounts.services import profile_fields, typed_facts
+from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.accounts.services.precedence import LOCKED_RANK, SOURCE_RANK
 from apps.accounts.tiering import QuestionCategory, Tier, classify, classify_tier, higher_tier
 
@@ -388,6 +389,7 @@ def write_answer(
     employer=None,
     min_tier=None,
     applies_everywhere=False,
+    question_key=None,
     now=None,
 ):
     """Create or replace the ``AnswerBank`` row for a question.
@@ -406,12 +408,14 @@ def write_answer(
     names the employer to strip from the key. ``min_tier`` lets the user
     raise (never lower) the question's risk tier. ``options`` is recorded as
     a hash in ``source_detail`` for audit but is not part of the key.
+    ``question_key`` addresses an existing row exactly (editing one from the
+    Answers page) instead of recomputing the key from the text.
     """
     source = AnswerBank.Source(source)
     if is_locked and source != AnswerBank.Source.USER:
         raise ValueError("only the user may lock an answer")
     now = now or timezone.now()
-    key = normalize_question_key(question_text, employer)
+    key = question_key or normalize_question_key(question_text, employer)
     tier = classify_tier(question_text)
     if min_tier is not None:
         tier = higher_tier(tier, min_tier)
@@ -441,6 +445,7 @@ def write_answer(
                         confidence=confidence,
                         is_locked=is_locked,
                     )
+                invalidate_questions_panel(profile.user_id)
                 return WriteResult(True, row)
             except IntegrityError:
                 existing = _locked_row(profile, key, scope_region)
@@ -473,4 +478,29 @@ def write_answer(
         existing.is_locked = is_locked
         existing.expires_at = None
         existing.save()
+        invalidate_questions_panel(profile.user_id)
         return WriteResult(True, existing)
+
+
+def delete_answer(row, *, deleted_by="user_delete"):
+    """Delete an ``AnswerBank`` row, keeping its value in the audit history.
+
+    The user may remove any of their own answers, locked or not; the history
+    row records who removed it so the deletion is attributable.
+    """
+    with transaction.atomic():
+        AnswerBankHistory.objects.create(
+            profile=row.profile,
+            question_key=row.question_key,
+            scope_region=row.scope_region,
+            value=row.value,
+            risk_tier=row.risk_tier,
+            source=row.source,
+            source_detail=row.source_detail,
+            confidence=row.confidence,
+            was_locked=row.is_locked,
+            superseded_by_source=deleted_by,
+        )
+        user_id = row.profile.user_id
+        row.delete()
+        invalidate_questions_panel(user_id)
