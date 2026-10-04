@@ -412,3 +412,25 @@ class CustomAnswerForm(forms.Form):
             # explicit "any location": only then is it reused everywhere.
             "applies_everywhere": bool(sensitive and not scope),
         }
+
+
+class LearningSettingsForm(forms.ModelForm):
+    """The learning on/off switch.
+
+    Saved with ``update_fields`` so the Profile post-save signal sees that no
+    matching input changed and does not schedule a rematch.
+    """
+
+    UPDATE_FIELDS = ["learning_enabled"]
+
+    class Meta:
+        model = Profile
+        fields = ["learning_enabled"]
+        labels = {"learning_enabled": "Learn from my applications"}
+
+    def save(self, commit=True):
+        profile = super().save(commit=False)
+        if commit:
+            profile.save(update_fields=self.UPDATE_FIELDS)
+            invalidate_questions_panel(profile.user_id)
+        return profile

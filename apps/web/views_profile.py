@@ -48,7 +48,12 @@ def profile(request):
 
 
 def _answer_rows(profile_obj):
-    rows = list(AnswerBank.objects.filter(profile=profile_obj).order_by("question_text"))
+    # Learned rows live on the Learning tab, where they can be promoted or forgotten.
+    rows = list(
+        AnswerBank.objects.filter(profile=profile_obj)
+        .exclude(source=AnswerBank.Source.LEARNED)
+        .order_by("question_text")
+    )
     for row in rows:
         row.value_display = (
             ", ".join(map(str, row.value)) if isinstance(row.value, (list, tuple)) else str(row.value)
@@ -72,6 +77,9 @@ def _answers_context(request, form, custom_form=None):
         "custom_form": custom_form or CustomAnswerForm(),
         "groups": groups,
         "custom_count": len(custom_rows),
+        "learned_count": AnswerBank.objects.filter(
+            profile=profile_obj, source=AnswerBank.Source.LEARNED
+        ).exclude(question_key__startswith=LEGACY_PREFIX).count(),
         "legacy_rows": legacy_rows,
         "conflicts": typed_facts.legacy_conflicts(profile_obj, legacy_rows),
         "visa_rows": form.visa_rows(),

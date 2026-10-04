@@ -136,6 +136,9 @@
 
 <section id="custom">
     <h2>Custom answers</h2>
+    {% if learned_count %}
+    <p class="notice">{{ learned_count }} answer{{ learned_count|pluralize }} learned from your applications &mdash; <a href="{% url 'profile_learning' %}">review them on the Learning tab</a>.</p>
+    {% endif %}
     <p class="muted">Answers you give once and reuse. They fill any question with the same wording. “Auto-apply will use” shows exactly what is sent.</p>
     {% for value, label, rows in groups %}
     <details{% if rows %} open{% endif %}>
