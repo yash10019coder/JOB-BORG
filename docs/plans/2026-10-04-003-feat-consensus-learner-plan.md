@@ -207,3 +207,13 @@ Not in this phase:
    - the next draft shows it prefilled with "Needs your confirmation"; Send is refused until it is confirmed; "Confirm learned answers" clears it;
    - on the Learning tab, "Use from now on" locks it, so the next draft fills it without a hold;
    - turning learning off stops the prefill.
+
+## Findings from first real use
+
+Recorded after four real sends; the same notes are on #130.
+
+- **The learner found nothing, and that was correct.** Repeated EEO questions were already answered from locked saved answers (quick-fill / "Always use this answer"), so they were never retyped. Once Phase 2's remember is in use, the remaining retyping is *reworded* questions, not repeated ones. This is the case for semantic matching (#130 / Phase 4b).
+- **Real wording clusters:** gender (4 wordings), race/ethnicity (4), sponsorship (5), "how did you hear" (3-4), plus veteran/disability worded differently per employer. Use them as the first test set for any matcher; it must group each cluster and not merge near-misses.
+- **Semantic matching must only propose.** Embeddings blur polarity ("require" vs "do not require" sponsorship), so T0/T1 matches stay held for confirmation, behind the deterministic typed settings, and are measured with the shadow metrics before they can act.
+- **Fixed on this branch because of it:** carry-forward dropped `user_edited` (the learner ignored retried self-ID answers); settings could not say "not authorized yet, will need sponsorship" (added `not_authorized_needs_sponsorship`).
+- **Operational:** the `web` container does not reliably reload after a branch switch; restart `web worker beat`.
