@@ -25,6 +25,7 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
 )
 from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.services import answer_memory
 from apps.auto_apply.services.confirmation import (
     build_submit_snapshot,
     is_blank_answer_value,
@@ -475,6 +476,7 @@ def auto_apply_queue(request):
                 continue
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
+            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job)
             field = _answer_edit_field(entry, fields.get(label, {}))
             if field is not None:
                 value = entry.get("value", "")
@@ -545,6 +547,7 @@ def edit_auto_apply_draft(request, pk):
     answers = {label: dict(entry) for label, entry in (draft.answers or {}).items()}
     fields = _snapshot_fields(draft)
     invalid_labels = []
+    edits = []
     index = 0
     while f"label__{index}" in request.POST:
         # Browsers normalize a lone "\n" in a submitted field's value to
@@ -557,6 +560,8 @@ def edit_auto_apply_draft(request, pk):
         label = request.POST[f"label__{index}"].replace("\r\n", "\n")
         value_field = f"value__{index}"
         confirm_field = f"confirm__{index}"
+        remember_field = f"remember__{index}"
+        everywhere_field = f"everywhere__{index}"
         index += 1
         if label not in answers:
             continue
@@ -576,6 +581,20 @@ def edit_auto_apply_draft(request, pk):
             # POST -- collect it and keep validating/saving the rest.
             invalid_labels.append(label)
             continue
+        edits.append(
+            answer_memory.ReviewEdit(
+                label=label,
+                value=cleaned,
+                old=dict(answers[label]),
+                remember=remember_field in request.POST,
+                everywhere=everywhere_field in request.POST,
+            )
+        )
+        if cleaned != answers[label].get("value"):
+            # The user typed or changed this value (as opposed to re-posting
+            # what drafting put there): the only reliable sign that an answer
+            # is theirs, since `user_confirmed` is set by any save.
+            answers[label]["user_edited"] = True
         answers[label]["value"] = cleaned
         if answers[label].get("needs_confirmation"):
             # A learned/imported legal or commercial answer is only ever
@@ -613,6 +632,13 @@ def edit_auto_apply_draft(request, pk):
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])
+    remembered = answer_memory.remember_reviewed_answers(draft, edits)
+    if remembered:
+        messages.info(
+            request,
+            f"Remembered {remembered} answer{'s' if remembered != 1 else ''} "
+            "for similar questions. Manage them under Profile \u2192 Auto-apply answers.",
+        )
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
     return _auto_apply_queue_redirect(request)
@@ -693,16 +719,20 @@ def send_auto_apply_draft(request, pk):
     # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
     # sweep keys off it, and a draft that sat in the queue before Send would
     # otherwise look "stuck in SENDING" the moment it is sent.
-    updated = AutoApplyDraft.objects.filter(
-        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
-        answers=draft.answers,
-    ).update(
-        status=AutoApplyDraft.Status.SENDING,
-        updated_at=timezone.now(),
-        submitted_answers_snapshot=build_submit_snapshot(draft.answers),
-    )
-    if not updated:
-        raise Http404("Draft not found or not sendable.")
+    with transaction.atomic():
+        updated = AutoApplyDraft.objects.filter(
+            pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+            answers=draft.answers,
+        ).update(
+            status=AutoApplyDraft.Status.SENDING,
+            updated_at=timezone.now(),
+            submitted_answers_snapshot=build_submit_snapshot(draft.answers),
+        )
+        if not updated:
+            raise Http404("Draft not found or not sendable.")
+        # What is being submitted, recorded in the same transaction as the
+        # transition so a lost race records nothing.
+        answer_memory.record_observations(draft)
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")
