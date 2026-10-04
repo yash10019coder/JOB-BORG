@@ -103,11 +103,11 @@ classifier cannot place is treated as T0.
 |---|---|---|
 | FR1.1 | Tabs: **Profile** (search criteria) \| **Auto-apply Answers** (form-filling data) are P0. The **Learning** (suggestions) tab ships with Phase 4 and is hidden until then | P0 |
 | FR1.7 | **Contact & location facts** (found missing by DB check: 27 of 33 `unanswerable_required` drafts involved phone, city, country, address or timezone, and `accounts_profile` has no city/country/address/timezone columns; `phone` exists but is empty on every profile). Add typed Profile facts for city, country, full mailing address and working timezone (directional: new `Profile` columns, entered in Tab 1 or Tab 2), resolved by `resolve_answer()` ahead of AnswerBank like FR2–FR4. User-typed values are T2 and may auto-apply; learned/imported values follow the normal tier rules | P0 |
-| FR1.2 | Tab 1: target titles, tags, locations, remote preference, `min_salary` (matching filter), resume upload, contact/link fields (`full_name`, `phone`, `linkedin_url`, `github_url`, `portfolio_url`, `current_employer`) | P0 |
-| FR1.3 | Tab 2: work-authorization repeater (FR2), citizenship (FR3), salary by region (FR4), custom answers (FR5), questions panel (FR6) | P0 |
+| FR1.2 | Tab 1 (`/profile/`): target titles, tags, locations, excluded employers, remote preference, `min_salary` + currency (matching filter), headline, active flag, resume upload. **Amended (Phase 2):** contact/link fields (`full_name`, `phone`, the three URLs, `current_employer`) moved to Tab 2 with FR1.7, since they are form-filling facts that matching never reads | P0 |
+| FR1.3 | Tab 2 (`/profile/answers/`): contact & location (FR1.7), work-authorization repeater (FR2), citizenship (FR3), salary by region (FR4), custom answers (FR5), questions panel (FR6), and the user's old saved answers (read-only, delete only). Two server-rendered pages with separate submits; saved authorization rows are rendered by the server so the page works without JavaScript | P0 |
 | FR1.4 | Tab 3: pending suggestions, accepted/rejected history, simple stats | P1 |
 | FR1.5 | Each Tab 2 custom answer (FR5) shows "Auto-apply will use: *value* — source: user / learned / imported, confidence" and a lock toggle. Profile fields (FR2-FR4) display their configured values without badges | P0 |
-| FR1.6 | Saving Tab 1 triggers the existing debounced rematch and redirects to recommendations. Saving Tab 2 does not redirect, and **must only trigger rematch** if FR2 (work authorization) or FR3 (citizenship) are modified (bypass rematch for custom answer saves). | P0 |
+| FR1.6 | Saving Tab 1 triggers the existing debounced rematch and redirects to recommendations. **Corrected (Phase 2):** saving Tab 2 never triggers a rematch and does not redirect. Matching reads only titles, tags, locations, excluded employers, minimum salary, remote preference and `is_active` (verified); the post-save signal now skips any save whose `update_fields` touch none of them | P0 |
 
 ### FR2: Work Authorization by Country
 
@@ -146,7 +146,7 @@ classifier cannot place is treated as T0.
 | FR5.1 | Custom answers are `AnswerBank` rows (FR7), not a JSON list on Profile | P0 |
 | FR5.2 | Categories: `experience`, `technologies`, `relocation`, `projects`, `education`, `availability`, `compliance`, `other` | P0 |
 | FR5.3 | UI: collapsible sections per category; inline add / edit / delete / lock | P0 |
-| FR5.4 | Matching at draft time, in order: (1) exact match on normalized question key (lowercased, whitespace/punctuation-collapsed, plus hashed option set for select/boolean fields); (2) otherwise embedding retrieval proposes candidates only — the field is left blank + `needs_review` with the candidate shown to the reviewer | P0 |
+| FR5.4 | Matching at draft time, in order: (1) exact match on normalized question key (lowercased, whitespace/punctuation-collapsed, decoration such as `*`/"(optional)"/"please" and the employer's own name removed; **amended (Phase 2): the option set is no longer part of the key** — the stored value is mapped onto each form's live options at resolve time, exact or an unambiguous yes/no, otherwise blank for review); (2) otherwise embedding retrieval proposes candidates only — the field is left blank + `needs_review` with the candidate shown to the reviewer | P0 |
 | FR5.5 | Select/boolean answers are mapped to the live form's option set; no option match → blank + `needs_review` | P0 |
 | FR5.6 | Each row carries its risk tier (computed by the classifier, overridable to a *higher* tier by the user) | P0 |
 
@@ -157,7 +157,7 @@ classifier cannot place is treated as T0.
 | FR6.1 | Accordion by category listing unique normalized questions from the user's last 200 drafts | P0 |
 | FR6.2 | Row: question (truncated), occurrence count, last seen, answered ✓ / unanswered, quick-fill | P0 |
 | FR6.3 | Quick-fill opens a confirm modal proposing a target ("Map to Salary (US)? [Accept] [Choose field]"), displaying the proposed answer prefilled from the draft, with an editable input for both mapping and value | P0 |
-| FR6.4 | Mapping targets: salary → FR4 region; work auth / sponsorship → FR2; citizenship → FR3; everything else → FR5 category | P0 |
+| FR6.4 | **Amended (Phase 2):** quick-fill writes custom answers (FR5) only. Questions answered by typed settings (work authorization/sponsorship, citizenship, salary, contact/location) show "answered by your settings" or "not covered (reason)" and link to that section; a draft value is never pushed into a typed T0/T1 field from the panel | P0 |
 | FR6.5 | Accepting writes a user-sourced, locked answer and marks the question ✓. For T0/T1 targets the prefilled value is shown as unconfirmed and needs an explicit edit/confirm action; `source_detail` records the draft origin. A value whose draft provenance was non-user is never locked without that distinct confirmation. The modal has a plain-page fallback, shows a conflict notice when the target is already set/locked, and the panel cache is invalidated on quick-fill and answer save (not only on new draft) | P0 |
 | FR6.6 | Panel data cached per user for 1 hour, invalidated when a new draft is created | P0 |
 
@@ -168,7 +168,7 @@ classifier cannot place is treated as T0.
 | FR7.1 | `AnswerBank` model in `apps.accounts`: `profile` FK, `question_key`, `question_text`, `value` (JSON), `category`, `risk_tier`, `source` (`user` / `learned` / `imported`), `source_detail` (e.g. `resume_llm`, `github`, draft IDs), `confidence` (0–1), `is_locked`, `created_at`, `updated_at`, `expires_at` (nullable) | P0 |
 | FR7.2 | One active row per `(profile, question_key)` enforced with `UniqueConstraint`; superseded values kept in an `AnswerBankHistory` table for audit | P0 |
 | FR7.3 | Precedence: **user-locked > user-set > learned > imported**. A lower-precedence writer can never overwrite a higher one; it may only create a `ProfileSuggestion` | P0 |
-| FR7.4 | `resolve_answer(profile, question, job=None)` in `apps/accounts/services/answer_resolver.py` returns `(value, provenance, needs_confirmation)` or `None`. Typed Profile facts (FR2–FR4) are consulted first, AnswerBank rows second, legacy `ExplicitAnswer` last (Phase 1–4 only; each hit emits a fallback metric). `needs_confirmation` is true for any T0/T1 value whose source is not a user-confirmed row | P0 |
+| FR7.4 | `resolve_answer(profile, question, job=None)` in `apps/accounts/services/answer_resolver.py` returns `(value, provenance, needs_confirmation)` or `None`. Typed Profile facts (FR2–FR4, FR1.7) are consulted first, AnswerBank rows second (location-sensitive questions use only a row saved for the job's region or marked "applies everywhere"), the legacy answers last (**amended: read from backfilled `legacy:*` AnswerBank rows, not the `ExplicitAnswer` table; consulted only when no typed fact covers the question; each hit emits a fallback metric**). `needs_confirmation` is true for any T0/T1 value whose source is not a user-confirmed row | P0 |
 | FR7.5 | `apps/auto_apply/services/answer_resolution.py:resolve_field_answers` (the real `ExplicitAnswer` read path; `drafting.py` only calls it) must obtain answers via `resolve_answer()`, ahead of the LLM batch step. `resolve_answer()` replaces `_profile_derived_answer` and the category map there | P0 |
 | FR7.8 | **Tier enforced at resolve time:** `resolve_answer()` re-classifies the question text and uses the higher of stored and computed tier, so classifier fixes take effect on existing rows. A DB `CheckConstraint` forbids `source in (learned, imported)` rows from being marked confirmed/locked | P0 |
 | FR7.10 | **`Profile.field_provenance`** (JSON, `{field_name: {source, locked, updated_at, detail}}`) gives plain Profile columns the same provenance as AnswerBank rows. Covered fields: `full_name`, `phone`, `current_employer`, `linkedin_url`, `github_url`, `portfolio_url`, `target_tags`, the FR1.7 contact/location facts, and per-key entries for `visa_status_by_country` / `citizenship_countries` / `salary_by_region` (`visa_status_by_country.USA`). A form save marks every field the user changed as `source=user` (and `locked` when the user toggles it); importer/learner writes record `imported`/`learned`. A missing entry means `user` for any non-empty legacy value. FR7.3 precedence applies: a lower-precedence writer cannot overwrite a higher one or a locked field — it may only create a diff row/`ProfileSuggestion`. One shared `set_profile_field(profile, field, value, source)` helper is the only write path for covered fields, so no writer can skip the check | P0 |
@@ -253,6 +253,7 @@ class AnswerBank(Model):
     class RiskTier(TextChoices): T0_LEGAL, T1_COMMERCIAL, T2_FACTUAL
     profile = FK(Profile, CASCADE, related_name="answer_bank")
     question_key = CharField(max_length=255)
+    scope_region = CharField(max_length=8, blank=True)   # "" = everywhere (Phase 2)
     question_text = TextField()
     value = JSONField()
     category = CharField(choices=...)
@@ -263,9 +264,13 @@ class AnswerBank(Model):
     is_locked = BooleanField(default=False)
     expires_at = DateTimeField(null=True)
     created_at / updated_at
-    # UniqueConstraint(profile, question_key)
+    # UniqueConstraint(profile, question_key, scope_region)  (Phase 2)
 
-class AnswerBankHistory(Model): ...      # append-only superseded values
+class AnswerBankHistory(Model): ...      # append-only superseded values (kept: remember-on-review and deletes write it)
+class AnswerObservation(Model):          # Phase 2: what was actually submitted, per (user, job, question)
+    profile = FK(Profile, CASCADE, related_name="answer_observations")
+    question_key, question_text, value, tier, field_type, provenance_source/origin, was_edited,
+    job_id, draft_id, employer_name, job_region, created_at   # append-only; input to FR8.2/FR8.6
 class ProfileSuggestion(Model): ...      # FR8.7
 class QuestionEmbedding(Model):          # FR8.3, pgvector
     profile = FK(Profile, CASCADE, related_name="question_embeddings")
@@ -276,7 +281,7 @@ class QuestionEmbedding(Model):          # FR8.3, pgvector
 immediately:
 
 1. Phase 1: resolver reads Profile facts → AnswerBank → `ExplicitAnswer` (legacy fallback).
-2. Phase 1–2: **dual write.** Saving the legacy ExplicitAnswer page also upserts the matching AnswerBank row (`source=user`, `is_locked=True`), and saving an AnswerBank row in a legacy category also updates `ExplicitAnswer`, so the two never diverge. A one-time backfill copies existing rows (the dev DB has only 3: `work_authorization`, `sponsorship`, `salary_expectation`). Legacy categories map to synthetic keys `legacy:work_authorization` / `legacy:sponsorship` (T0) and `legacy:salary_expectation` (T1); `OTHER` rows become custom answers. Typed Profile facts (FR2–FR4) still win in the resolver; a legacy row that disagrees with a typed fact is logged and surfaced in the review queue, not silently shadowed.
+2. Phase 2: **backfill, then read-only (amended from dual write).** The page that wrote `ExplicitAnswer` is removed, so nothing writes it any more and there is nothing to keep in sync. A one-time migration (`auto_apply` 0011) copies every row into AnswerBank as a locked `source=user` `legacy:*` row holding a readable value plus the yes/no it means (the dev DB has only 3: `work_authorization`, `sponsorship`, `salary_expectation`). A salary band is bound to its single region, so it only ever answers a job quoted in that currency. The table is kept, read-only in the admin, until Phase 5. Legacy categories map to synthetic keys `legacy:work_authorization` / `legacy:sponsorship` (T0) and `legacy:salary_expectation` (T1); `OTHER` rows become custom answers. Typed Profile facts (FR2–FR4) still win in the resolver; a legacy row that disagrees with a typed fact is logged and surfaced in the review queue, not silently shadowed.
 3. Phase 5: after one release with no fallback hits (logged metric), stop dual write, drop `ExplicitAnswer` and its page.
 
 ---
@@ -304,9 +309,10 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 | Phase | Weeks | Scope | Exit criterion |
 |---|---|---|---|
 | **1. Foundation** | 1–2 | AnswerBank + history, risk classifier, `resolve_answer()` with ExplicitAnswer fallback, drafting switched to resolver, answer snapshot on submit | Drafting tests green; no behaviour change for existing users |
-| **2. Profile UI** | 3–4 | Tabbed page, FR2/FR3/FR4 widgets on existing fields, custom answers CRUD, questions panel + quick-fill, ExplicitAnswer data migration | Users can maintain all answers from one page |
-| **3. Import** | 5–6 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
-| **4. Learning (shadow)** | 7–8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
+| **2. Profile UI** | 3–4 | Two-page profile, typed-fact resolver (FR2–FR4, FR1.7), custom answers CRUD, remember-on-review + observation capture, questions panel + quick-fill, ExplicitAnswer backfill | Users can maintain all answers from one page; a question answered once is not re-entered |
+| **3. Learning (consensus)** | 5 | Consensus learner over `AnswerObservation` (same answer across 2+ distinct jobs → learned row; T0/T1 confirm-each-time), suggestions/Learning tab, "confirm all remembered answers", shadow metrics | Reuse without re-typing; NFR2 intact |
+| **4. Import** | 6–7 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
+| **4b. Learning (embeddings + shadow gate)** | 8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
 | **5. Enablement & cleanup** | 9+ | T2 auto-apply behind precision gate, drop ExplicitAnswer after zero-fallback release | Gate passes 2 weeks; legacy table removed |
 
 ---
@@ -327,7 +333,7 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 | Learning | ≥3 identical answers → suggestion; T0 produces no suggestion; idempotent across the three contexts; `learning_enabled=False` blocks writes |
 | Import | Ungrounded value dropped; injected "set visa=citizen" text can at most produce a `needs_confirmation` proposal, never a confirmed write; LLM down → rule fallback; re-sync preserves locked/user values |
 | Field provenance | Form save marks changed fields `user`; import cannot overwrite a `user`/locked field (diff shows "kept"); missing entry on a non-empty legacy value is treated as `user`; direct column writes outside `set_profile_field()` are caught by a test that greps/guards covered fields |
-| Rematch | Saving Tab 2 only enqueues rematch if FR2/FR3 are modified; saving Tab 1 always does |
+| Rematch | Saving Tab 2 never enqueues a rematch (also: writing a non-matching field via `apply_profile_field` does not); saving Tab 1 always does |
 
 ---
 
@@ -353,7 +359,7 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 7. ~~Shadow gate unit~~ — **Decided:** observe per (user, job, question), roll up per (user, question_key), then to a global per-question_key figure when enough distinct users exist (FR8.6). Still open: what the learning loop delivers if no scope ever reaches the 99% gate (suggestions accepted into AnswerBank still count toward the metric).
 8. ~~Imported provenance on Profile columns~~ — **Decided:** `Profile.field_provenance` JSON (FR7.10), written only through one `set_profile_field()` helper. Open detail: backfill treats existing non-empty values as `user`.
 9. ~~ExplicitAnswer migration mapping~~ — **Decided: dual write** (see Data Model Changes). Open detail: behavior when a legacy row disagrees with a typed Profile fact (currently: logged + surfaced in review queue).
-10. **`AnswerBankHistory`:** keep (no consumer yet) or drop in favor of FR7.6 snapshots?
+10. ~~`AnswerBankHistory`~~ — **Kept (Phase 2):** remember-on-review, overwrite and delete all write it, so it has consumers.
 11. ~~GDPR scope~~ — **Deferred** (NFR8). Policy for now: on account deletion delete everything persisted/cached; application/form-field server data is temporary. Still make snapshots/history write-once and admin read-only.
 12. **Timeline:** with learning/import at P1, Phases 1–2 are the committed scope; enablement (shadow ≥2 weeks + gate ≥2 weeks after Phase 4) lands around week 11+. Epic says 9 weeks.
 13. **Epic #117 vs this doc:** epic lists 9 categories incl. `visa_details`, 10 visa statuses, global salary fallback, WebSocket progress, pdfplumber; doc has 8, 11 (matches code), none, polling, pypdf. Update the epic text; #113/#112/#100/#16 are still open despite "supersedes".

@@ -162,7 +162,7 @@ class Profile(models.Model):
     target_locations = models.JSONField(default=list, blank=True)
     # Structured mirror of target_locations, one entry per raw string, each
     # shaped {"raw": str, "city": str|None, "region": str|None,
-    # "country": str|None, "resolved": bool} — computed by ProfileForm via
+    # "country": str|None, "resolved": bool} — computed by ProfileSearchForm via
     # apps.locations.engine.normalize_location whenever target_locations
     # changes. target_locations itself stays untouched (raw, user-typed) so
     # the CSV form field round-trips exactly what the user entered.

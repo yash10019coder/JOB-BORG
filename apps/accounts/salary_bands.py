@@ -1,9 +1,8 @@
 """Shared salary band definitions for all regions.
 
 Single source of truth for salary expectation bands used across:
-- apps/auto_apply/services/drafting.py (draft-time resolution)
-- apps/web/forms.py (ExplicitAnswersForm choices)
-- templates/web/profile_form.html (region tabs via json_script)
+- apps/accounts/services/typed_facts.py (draft-time resolution by the job's region)
+- apps/web/forms_profile.py (one select per region on the Answers page)
 """
 
 # Salary bands per currency/region
