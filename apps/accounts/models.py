@@ -70,33 +70,33 @@ def validate_resume_file(file):
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
-# Profile.VisaStatus value -> (work_authorization option key, sponsorship option
-# key), as consumed by `Profile.authorization_for_country` and
-# `drafting.py`. The keys match `apps.web.forms.WORK_AUTH_CHOICES` /
-# `SPONSORSHIP_CHOICES`, and every one is re-validated against the live
-# Greenhouse form's actual options before it is used for a draft.
-#
-# An empty sponsorship key ("") means *deliberately unknown*, and is the
-# point of this table: a US visa status tells us the applicant is authorized
-# in the US but says nothing reliable about whether they will require
-# sponsorship (someone extending from F-1 onto a new H-1B did; a green card
-# holder did not). Inferring one from the other would be a guess, and
-# `drafting.py` leaves such a field blank + needs_review instead -- the same
-# "a confidently wrong resolution is worse than an unresolved one" rule
-# `apps.locations.engine` follows.
-_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[str, str]] = {
-    "citizen": ("yes_authorized", "no"),
-    "permanent_resident": ("yes_green_card", "no"),
-    "work_permit": ("yes_authorized", "no"),
-    "requires_sponsorship": ("no_need_sponsorship", "other"),
-    "not_authorized": ("no_sponsorship_needed", "no"),
+# Profile.VisaStatus value -> (authorized, needs_sponsorship), as consumed by
+# `Profile.authorization_for_country`. Each element is True / False, or None
+# meaning *deliberately unknown* -- which is the point of this table: a US
+# visa status tells us the applicant is authorized in the US but says nothing
+# reliable about whether they will *require sponsorship* (someone extending
+# from F-1 onto a new H-1B did; a green card holder did not). Inferring one
+# from the other would be a guess, so the answer stays unknown and the draft
+# leaves the field blank + needs_review -- the same "a confidently wrong
+# resolution is worse than an unresolved one" rule `apps.locations.engine`
+# follows. Mapping these onto a live form's option labels is the job of
+# `apps.accounts.question_semantics`, not this table.
+_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[bool | None, bool | None]] = {
+    "citizen": (True, False),
+    "permanent_resident": (True, False),
+    "work_permit": (True, False),
+    # Needs sponsorship, but authorization is unknown: H-1B transferees also
+    # choose this, and they are authorized to work for their current employer.
+    "requires_sponsorship": (None, True),
+    # Not authorized says nothing about whether sponsorship would be needed.
+    "not_authorized": (False, None),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
-    "h1b": ("yes_h1b", ""),
-    "opt": ("yes_opt", ""),
-    "o1": ("yes_o1", ""),
-    "tn": ("yes_tn", ""),
-    "e3": ("yes_e3", ""),
-    "other": ("other", ""),
+    "h1b": (True, None),
+    "opt": (True, None),
+    "o1": (True, None),
+    "tn": (True, None),
+    "e3": (True, None),
+    "other": (None, None),
 }
 
 
@@ -125,6 +125,16 @@ class Profile(models.Model):
     github_url = models.URLField(max_length=255, blank=True, default="")
     portfolio_url = models.URLField(max_length=255, blank=True, default="")
     current_employer = models.CharField(max_length=255, blank=True, default="")
+
+    # Where the applicant lives and works, for "Country" / "City" / "Address" /
+    # "Time zone" questions. These are form-filling facts, not matching
+    # criteria (`target_locations` is that), so matching never reads them.
+    # `location_country` is ISO 3166-1 alpha-3, like every other country on
+    # this model; `working_timezone` is an IANA name ("Asia/Kolkata").
+    location_city = models.CharField(max_length=255, blank=True, default="")
+    location_country = models.CharField(max_length=3, blank=True, default="")
+    mailing_address = models.TextField(blank=True, default="")
+    working_timezone = models.CharField(max_length=64, blank=True, default="")
 
     # Resume -- standard-field source for auto-apply drafting (see
     # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md U1).
@@ -248,27 +258,21 @@ class Profile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def authorization_for_country(self, country):
-        """``(work_authorization, sponsorship)`` option keys for `country`, or
-        ``None`` if this profile says nothing about it.
+        """``(authorized, needs_sponsorship)`` for `country`, or ``None`` if
+        this profile says nothing about it.
 
         `country` may be given in any form :func:`apps.accounts.regions.region_for_country`
         accepts (alpha-3, alpha-2, or the locations engine's canonical name),
         because the caller usually has the last of those off a
-        ``Job.target_locations_normalized`` entry.
+        ``Job.location_country``.
 
-        Both returned values are option keys drawn from the auto-apply form
-        vocabularies (``WORK_AUTH_CHOICES`` / ``SPONSORSHIP_CHOICES``); either
-        may be ``""`` meaning *deliberately unknown*. That is the important
-        part of the contract: a US work visa tells us the applicant is
-        authorized in the US, but says nothing reliable about whether they
-        will *require sponsorship* (an H-1B holder renewing from F-1 did, a
-        green-card holder did not), so a per-country visa status alone must
-        not produce a sponsorship answer. ``drafting.py`` leaves such a field
-        blank and needs_review rather than guessing.
+        Each element is ``True``, ``False`` or ``None`` meaning *deliberately
+        unknown* (see ``_AUTHORIZATION_BY_VISA_STATUS``): a per-country visa
+        status alone must not produce a sponsorship answer.
 
-        Returns ``None`` -- not a blank pair -- when the profile has no entry
-        for the country at all, so callers can tell "nothing known" apart from
-        "known to require sponsorship".
+        Returns ``None`` -- not ``(None, None)`` -- when the profile has no
+        entry for the country at all, so callers can tell "nothing known"
+        apart from "known, but deliberately undecided".
         """
         from apps.locations.engine import alpha3_for_country
 
@@ -278,7 +282,7 @@ class Profile(models.Model):
         if alpha3 in set(self.citizenship_countries or []):
             # Citizenship is authoritative for its own country: no
             # sponsorship is ever needed at home.
-            return ("yes_authorized", "no")
+            return (True, False)
         status = (self.visa_status_by_country or {}).get(alpha3)
         if status is None:
             return None

@@ -158,6 +158,44 @@ class ApplyProfileFieldTests(_ProfileTestCase):
         )
 
 
+class LocationFieldProvenanceTests(_ProfileTestCase):
+    def test_new_contact_fields_are_covered(self):
+        for field in ("location_city", "location_country", "mailing_address", "working_timezone"):
+            self.assertIn(field, profile_fields.COVERED_FIELDS)
+
+    def test_user_edit_stamps_the_new_fields(self):
+        before = profile_fields.snapshot(self.profile)
+        self.profile.location_country = "IND"
+        self.profile.location_city = "Pune"
+        profile_fields.record_user_edits(self.profile, before)
+        self.assertEqual(
+            sorted(self.profile.field_provenance), ["location_city", "location_country"]
+        )
+
+    def test_importer_cannot_overwrite_a_user_set_country(self):
+        before = profile_fields.snapshot(self.profile)
+        self.profile.location_country = "IND"
+        profile_fields.record_user_edits(self.profile, before)
+        self.profile.save()
+        self.assertFalse(
+            profile_fields.apply_profile_field(self.profile, "location_country", "USA", "imported")
+        )
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.location_country, "IND")
+
+    def test_importer_may_fill_an_empty_country_and_it_is_recorded_as_imported(self):
+        self.assertTrue(
+            profile_fields.apply_profile_field(self.profile, "location_country", "USA", "imported")
+        )
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.location_country, "USA")
+        self.assertEqual(self.profile.field_provenance["location_country"]["source"], "imported")
+
+    def test_writing_a_location_field_does_not_rematch(self):
+        profile_fields.apply_profile_field(self.profile, "location_city", "Pune", "imported")
+        self.assertEqual(self.mock_schedule.call_count, 0)
+
+
 class ProfileFormProvenanceTests(_ProfileTestCase):
     def _post(self, **overrides):
         data = {
