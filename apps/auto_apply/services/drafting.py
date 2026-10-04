@@ -22,6 +22,7 @@ import re
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
@@ -444,7 +445,7 @@ def _persist_draft(
     """
     try:
         with transaction.atomic():
-            return AutoApplyDraft.objects.create(
+            draft = AutoApplyDraft.objects.create(
                 user=user,
                 job=job,
                 status=status,
@@ -453,6 +454,9 @@ def _persist_draft(
                 reason_code=reason_code,
                 form_schema_snapshot=form_schema_snapshot,
             )
+            # The questions panel is built from recent drafts.
+            invalidate_questions_panel(user.pk)
+            return draft
     except IntegrityError:
         logger.info(
             "draft_for(user=%s, job=%s): an active draft already exists; "

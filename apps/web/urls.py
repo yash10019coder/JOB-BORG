@@ -11,6 +11,7 @@ urlpatterns = [
     path("accounts/signup/", views.signup, name="signup"),
     path("profile/", views_profile.profile, name="profile"),
     path("profile/answers/", views_profile.profile_answers, name="profile_answers"),
+    path("profile/answers/quick-fill/", views_profile.quick_fill, name="quick_fill"),
     path(
         "profile/answers/custom/",
         views_profile.custom_answer_create,

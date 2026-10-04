@@ -20,6 +20,7 @@ from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from apps.accounts.models import EmailInboxCredential, Profile
+from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
@@ -653,6 +654,7 @@ def discard_auto_apply_draft(request, pk):
     ).delete()
     if not deleted:
         raise Http404("Draft not found or not discardable.")
+    invalidate_questions_panel(request.user.pk)
     messages.info(request, "Draft discarded. You can draft this application again from recommendations.")
     return _auto_apply_queue_redirect(request)
 
