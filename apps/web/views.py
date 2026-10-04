@@ -28,6 +28,7 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
 from apps.auto_apply.models import AutoApplyDraft
 from apps.auto_apply.services import answer_memory
 from apps.auto_apply.services.confirmation import (
+    bank_held_labels,
     build_submit_snapshot,
     confirm_entry,
     is_blank_answer_value,
@@ -493,6 +494,7 @@ def auto_apply_queue(request):
                 needs_review_count += 1
         draft.display_answers = display_answers
         draft.needs_review_count = needs_review_count
+        draft.held_bank_count = len(bank_held_labels(draft.answers))
 
     # Group same-job repeat attempts (e.g. several FAILED retries before a
     # fix landed) under one card instead of one redundant top-level card
@@ -640,6 +642,38 @@ def edit_auto_apply_draft(request, pk):
         )
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
+    return _auto_apply_queue_redirect(request)
+
+
+@login_required
+@require_POST
+def confirm_learned_answers(request, pk):
+    """Confirm, in one action, every held answer that came from the user's
+    stored answers (learned or imported) on a `DRAFTED` draft.
+
+    LLM guesses, blank fields and typed-settings values are never touched, and
+    nothing is promoted to the user's own answers: this only clears the
+    per-field hold, through the same transition as confirming each by hand.
+    Ownership+status scoped like the other draft actions (404 otherwise).
+    """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    answers = {label: dict(entry) if isinstance(entry, dict) else entry
+               for label, entry in (draft.answers or {}).items()}
+    labels = bank_held_labels(answers)
+    for label in labels:
+        confirm_entry(answers[label], origin="draft_review_bulk")
+    if labels:
+        draft.answers = answers
+        draft.save(update_fields=["answers", "updated_at"])
+        messages.info(
+            request,
+            f"Confirmed {len(labels)} remembered answer{'s' if len(labels) != 1 else ''}. "
+            "Check them before you send.",
+        )
+    else:
+        messages.info(request, "No remembered answers to confirm on this draft.")
     return _auto_apply_queue_redirect(request)
 
 

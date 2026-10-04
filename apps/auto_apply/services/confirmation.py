@@ -42,6 +42,24 @@ def confirm_entry(entry, origin="draft_review"):
     entry["user_confirmed"] = True
 
 
+def bank_held_labels(answers):
+    """Labels of held entries that came from a stored answer (learned or
+    imported), as opposed to an LLM guess or a typed-settings value.
+
+    These are what "confirm all learned answers" may confirm in one click: each
+    is a value the user (or their own history) put there, not something a model
+    made up. Blank entries have nothing to confirm.
+    """
+    return [
+        label
+        for label, entry in (answers or {}).items()
+        if isinstance(entry, dict)
+        and entry.get("needs_confirmation")
+        and not is_blank_answer_value(entry.get("value"))
+        and (entry.get("provenance") or {}).get("origin") == "answer_bank"
+    ]
+
+
 def unconfirmed_fields(answers):
     """Labels of entries the user still has to confirm before sending.
 

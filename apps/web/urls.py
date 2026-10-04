@@ -42,6 +42,11 @@ urlpatterns = [
     path("auto-apply/drafts/<int:pk>/answers/", views.edit_auto_apply_draft, name="edit_auto_apply_draft"),
     path("auto-apply/drafts/<int:pk>/discard/", views.discard_auto_apply_draft, name="discard_auto_apply_draft"),
     path("auto-apply/drafts/<int:pk>/send/", views.send_auto_apply_draft, name="send_auto_apply_draft"),
+    path(
+        "auto-apply/drafts/<int:pk>/confirm-learned/",
+        views.confirm_learned_answers,
+        name="confirm_learned_answers",
+    ),
     path("settings/email-credential/", views.email_inbox_credential, name="email_inbox_credential"),
     path("settings/email-credential/delete/", views.delete_email_inbox_credential, name="delete_email_inbox_credential"),
 ]

@@ -94,6 +94,16 @@
             </form>
             {% endif %}
 
+            {% if draft.status == "drafted" and draft.held_bank_count %}
+            <form method="post" action="{% url 'confirm_learned_answers' draft.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="ats" value="{{ ats_filter }}">
+                <p class="muted">{{ draft.held_bank_count }} answer{{ draft.held_bank_count|pluralize }} on this draft came from your earlier applications and still need{{ draft.held_bank_count|pluralize:"s," }} your confirmation.</p>
+                <button type="submit">Confirm {{ draft.held_bank_count }} remembered answer{{ draft.held_bank_count|pluralize }}</button>
+            </form>
+            {% endif %}
+
             {% if draft.status == "drafted" %}
             <form method="post" action="{% url 'discard_auto_apply_draft' draft.id %}">
                 {% csrf_token %}
