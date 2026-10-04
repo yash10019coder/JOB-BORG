@@ -605,3 +605,24 @@ class AnswerBankResolutionTests(TestCase):
             self.user, [Question(id=text, text=text)], "", None, FakeLLMClient()
         )[0]
         self.assertEqual(resolved.answer, "No")
+
+
+class AnswerBankSingleQueryTests(TestCase):
+    """`resolve_field_answers` preloads the profile's AnswerBank rows once per
+    draft instead of querying per question."""
+
+    def test_one_answer_bank_query_regardless_of_question_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        user = User.objects.create_user(username="erin", password="pw", email="e@example.com")
+        profile = user.profile
+        profile.resume_text = "Erin."
+        profile.save()
+        questions = [
+            Question(id=f"q{i}", text=f"Tell us about project number {i}") for i in range(6)
+        ]
+        with CaptureQueriesContext(connection) as ctx:
+            resolve_field_answers(user, questions, profile.resume_text, profile, FakeLLMClient())
+        bank_queries = [q for q in ctx.captured_queries if "accounts_answerbank" in q["sql"]]
+        self.assertEqual(len(bank_queries), 1)

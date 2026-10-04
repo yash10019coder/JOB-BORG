@@ -1,6 +1,7 @@
 import ast
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
@@ -9,6 +10,7 @@ from django.utils import timezone
 from apps.accounts.models import AnswerBank, AnswerBankHistory
 from apps.accounts.services import answer_resolver
 from apps.accounts.services.answer_resolver import (
+    load_bank_rows,
     normalize_question_key,
     resolve_answer,
     write_answer,
@@ -196,3 +198,67 @@ class WriteAnswerPrecedenceTests(_Base):
         AnswerBank.objects.filter(pk=row.pk).update(risk_tier=Tier.T0_LEGAL)
         write_answer(self.profile, SPONSOR_Q, "Yes", "user")
         self.assertEqual(AnswerBank.objects.get().risk_tier, Tier.T0_LEGAL)
+
+
+    def test_expired_row_does_not_block_a_lower_precedence_writer(self):
+        write_answer(self.profile, PYTHON_Q, "stale", "learned")
+        AnswerBank.objects.update(updated_at=timezone.now() - timedelta(days=200))
+        result = write_answer(self.profile, PYTHON_Q, "fresh", "imported")
+        self.assertTrue(result.applied)
+        self.assertEqual(AnswerBank.objects.get().value, "fresh")
+        self.assertEqual(AnswerBankHistory.objects.get().value, "stale")
+
+    def test_unexpired_row_still_blocks_a_lower_precedence_writer(self):
+        write_answer(self.profile, PYTHON_Q, "kept", "learned")
+        self.assertFalse(write_answer(self.profile, PYTHON_Q, "no", "imported").applied)
+
+    def test_concurrent_first_create_falls_back_to_an_update(self):
+        write_answer(self.profile, PYTHON_Q, "winner", "learned")
+        real = answer_resolver._locked_row
+        calls = []
+
+        def racing(profile, key):
+            # The first read happens "before" the other writer committed.
+            calls.append(key)
+            return None if len(calls) == 1 else real(profile, key)
+
+        with mock.patch.object(answer_resolver, "_locked_row", side_effect=racing):
+            result = write_answer(self.profile, PYTHON_Q, "late", "user")
+        self.assertTrue(result.applied)
+        self.assertEqual(AnswerBank.objects.count(), 1)
+        self.assertEqual(AnswerBank.objects.get().value, "late")
+        self.assertEqual(AnswerBankHistory.objects.get().value, "winner")
+
+    def test_update_without_a_category_keeps_the_existing_category(self):
+        write_answer(
+            self.profile, PYTHON_Q, "a", "learned", category=AnswerBank.Category.EXPERIENCE
+        )
+        write_answer(self.profile, PYTHON_Q, "b", "user")
+        self.assertEqual(AnswerBank.objects.get().category, AnswerBank.Category.EXPERIENCE)
+        write_answer(
+            self.profile, PYTHON_Q, "c", "user", category=AnswerBank.Category.TECHNOLOGIES
+        )
+        self.assertEqual(AnswerBank.objects.get().category, AnswerBank.Category.TECHNOLOGIES)
+
+    def test_create_without_a_category_defaults_to_other(self):
+        write_answer(self.profile, PYTHON_Q, "a", "user")
+        self.assertEqual(AnswerBank.objects.get().category, AnswerBank.Category.OTHER)
+
+
+class PreloadedBankRowsTests(_Base):
+    def test_preloaded_rows_resolve_without_a_query(self):
+        write_answer(self.profile, PYTHON_Q, "5", "user")
+        rows = load_bank_rows(self.profile)
+        with self.assertNumQueries(0):
+            found = resolve_answer(self.profile, PYTHON_Q, bank_rows=rows)
+        self.assertEqual(found.value, "5")
+
+    def test_preloaded_miss_is_a_miss(self):
+        with self.assertNumQueries(0):
+            self.assertIsNone(resolve_answer(self.profile, PYTHON_Q, bank_rows={}))
+
+    def test_load_bank_rows_is_scoped_to_the_profile(self):
+        other = User.objects.create_user(username="bob", password="pw").profile
+        write_answer(other, PYTHON_Q, "x", "user")
+        self.assertEqual(load_bank_rows(self.profile), {})
+        self.assertEqual(load_bank_rows(None), {})

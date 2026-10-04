@@ -25,7 +25,11 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
 )
 from apps.auto_apply.models import AutoApplyDraft
-from apps.auto_apply.services.confirmation import build_submit_snapshot, unconfirmed_fields
+from apps.auto_apply.services.confirmation import (
+    build_submit_snapshot,
+    is_blank_answer_value,
+    unconfirmed_fields,
+)
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
@@ -239,7 +243,8 @@ _REASON_CODE_MESSAGES = {
         "This application has a question we couldn't fill in automatically."
     ),
     AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS: (
-        "Some answers need your confirmation before this application can be sent."
+        "This application was held back because some answers had not been "
+        "confirmed. Retry it to review and confirm them."
     ),
     AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
         "We couldn't load this employer's application form."
@@ -301,15 +306,6 @@ def _snapshot_fields(draft):
     }
 
 
-def _is_blank_answer_value(value) -> bool:
-    """A list/tuple value (multi-select, checkbox group) is blank when every
-    item is blank -- `str(["  "])` is a non-empty string and would otherwise
-    read as "answered"."""
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
-
-
 def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
     """Use snapshot requirements only when the answer has no explicit flag.
 
@@ -326,7 +322,7 @@ def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
         for label, entry in (answers or {}).items()
         if isinstance(entry, dict)
         and entry.get("required", fields.get(label, {}).get("required", False))
-        and _is_blank_answer_value(entry.get("value"))
+        and is_blank_answer_value(entry.get("value"))
     )
 
 
@@ -647,7 +643,7 @@ def edit_auto_apply_draft(request, pk):
             # A learned/imported legal or commercial answer is only ever
             # confirmed by an explicit, per-field action -- saving the form
             # (which re-posts every value) must not count as one.
-            if confirm_field in request.POST and not _is_blank_answer_value(cleaned):
+            if confirm_field in request.POST and not is_blank_answer_value(cleaned):
                 entry = answers[label]
                 entry["confirmed_from"] = entry.get("provenance")
                 entry["provenance"] = {
@@ -667,7 +663,7 @@ def edit_auto_apply_draft(request, pk):
         # A blank answer keeps its "needs review" hint regardless of
         # required-ness, so an optional placeholder doesn't quietly lose its
         # flag the moment the queue is re-rendered/saved.
-        answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
+        answers[label]["needs_review"] = is_blank_answer_value(cleaned)
         # Explicit provenance marker: `needs_review=False` alone doesn't
         # prove a human looked at this answer -- a confident LLM guess also
         # gets `needs_review=False` (see answer_resolution/llm/base.py) with
@@ -675,7 +671,7 @@ def edit_auto_apply_draft(request, pk):
         # actually reviewing/confirming the value, which is what
         # drafting._carry_forward_confirmed_answers() requires before
         # reusing an answer on a later retry (CodeRabbit finding on PR #99).
-        answers[label]["user_confirmed"] = not _is_blank_answer_value(cleaned)
+        answers[label]["user_confirmed"] = not is_blank_answer_value(cleaned)
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])

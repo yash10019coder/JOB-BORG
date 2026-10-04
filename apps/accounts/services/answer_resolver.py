@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.accounts.models import AnswerBank, AnswerBankHistory
+from apps.accounts.services.precedence import LOCKED_RANK, SOURCE_RANK
 from apps.accounts.tiering import Tier, classify_tier, higher_tier
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,6 @@ IMPORTED_T2_TTL = timedelta(days=365)
 
 _MAX_KEY_LEN = 255
 _NEEDS_CONFIRMATION_TIERS = {Tier.T0_LEGAL, Tier.T1_COMMERCIAL}
-
-_SOURCE_RANK = {
-    AnswerBank.Source.IMPORTED: 1,
-    AnswerBank.Source.LEARNED: 2,
-    AnswerBank.Source.USER: 3,
-}
-_LOCKED_RANK = 4
 
 
 @dataclass(frozen=True)
@@ -101,7 +95,15 @@ def _is_expired(row, now):
 
 
 def _rank(row):
-    return _LOCKED_RANK if row.is_locked else _SOURCE_RANK[row.source]
+    return LOCKED_RANK if row.is_locked else SOURCE_RANK[row.source]
+
+
+def load_bank_rows(profile):
+    """All of a profile's ``AnswerBank`` rows keyed by ``question_key``, for
+    callers that resolve many questions (one query instead of one each)."""
+    if profile is None:
+        return {}
+    return {row.question_key: row for row in AnswerBank.objects.filter(profile=profile)}
 
 
 def resolve_answer(
@@ -111,18 +113,24 @@ def resolve_answer(
     *,
     options=(),
     legacy_lookup: Callable[[str], Any] | None = None,
+    bank_rows: dict | None = None,
     now=None,
 ):
-    """Return a :class:`ResolvedValue`, or ``None`` if nothing is known."""
+    """Return a :class:`ResolvedValue`, or ``None`` if nothing is known.
+
+    ``bank_rows`` is an optional :func:`load_bank_rows` preload; when given, no
+    per-question query is made.
+    """
     now = now or timezone.now()
     key = normalize_question_key(question_text, options)
     computed_tier = classify_tier(question_text)
 
-    row = (
-        AnswerBank.objects.filter(profile=profile, question_key=key).first()
-        if profile is not None
-        else None
-    )
+    if bank_rows is not None:
+        row = bank_rows.get(key)
+    elif profile is not None:
+        row = AnswerBank.objects.filter(profile=profile, question_key=key).first()
+    else:
+        row = None
     if row is not None and not _is_expired(row, now):
         tier = higher_tier(row.risk_tier, computed_tier)
         return ResolvedValue(
@@ -163,6 +171,14 @@ def resolve_answer(
     return None
 
 
+def _locked_row(profile, key):
+    return (
+        AnswerBank.objects.select_for_update()
+        .filter(profile=profile, question_key=key)
+        .first()
+    )
+
+
 def write_answer(
     profile,
     question_text,
@@ -170,7 +186,7 @@ def write_answer(
     source,
     *,
     options=(),
-    category=AnswerBank.Category.OTHER,
+    category=None,
     source_detail=None,
     confidence=1.0,
     is_locked=False,
@@ -182,38 +198,46 @@ def write_answer(
     precedence row already holds the question -- the caller may then propose
     the value as a suggestion instead. A replaced value is kept in
     ``AnswerBankHistory`` in the same transaction.
+
+    An *expired* row no longer outranks anyone (it resolves to nothing, so it
+    must not block a writer either). ``category=None`` keeps the existing
+    row's category on update and means ``other`` on create.
     """
     source = AnswerBank.Source(source)
     if is_locked and source != AnswerBank.Source.USER:
         raise ValueError("only the user may lock an answer")
+    now = now or timezone.now()
     key = normalize_question_key(question_text, options)
     tier = classify_tier(question_text)
 
     with transaction.atomic():
-        existing = (
-            AnswerBank.objects.select_for_update()
-            .filter(profile=profile, question_key=key)
-            .first()
-        )
+        existing = _locked_row(profile, key)
         if existing is None:
-            row = AnswerBank.objects.create(
-                profile=profile,
-                question_key=key,
-                question_text=question_text or "",
-                value=value,
-                category=category,
-                risk_tier=tier,
-                source=source,
-                source_detail=source_detail or {},
-                confidence=confidence,
-                is_locked=is_locked,
-            )
-            return WriteResult(True, row)
+            try:
+                # Savepoint: a concurrent first writer can win the unique
+                # constraint between the read above and this insert.
+                with transaction.atomic():
+                    row = AnswerBank.objects.create(
+                        profile=profile,
+                        question_key=key,
+                        question_text=question_text or "",
+                        value=value,
+                        category=category or AnswerBank.Category.OTHER,
+                        risk_tier=tier,
+                        source=source,
+                        source_detail=source_detail or {},
+                        confidence=confidence,
+                        is_locked=is_locked,
+                    )
+                return WriteResult(True, row)
+            except IntegrityError:
+                existing = _locked_row(profile, key)
+                if existing is None:
+                    raise
 
-        if source != AnswerBank.Source.USER and _SOURCE_RANK[source] < _rank(existing):
-            return WriteResult(False, existing)
-        if source != AnswerBank.Source.USER and existing.is_locked:
-            return WriteResult(False, existing)
+        if source != AnswerBank.Source.USER and not _is_expired(existing, now):
+            if SOURCE_RANK[source] < _rank(existing) or existing.is_locked:
+                return WriteResult(False, existing)
 
         AnswerBankHistory.objects.create(
             profile=profile,
@@ -228,7 +252,7 @@ def write_answer(
         )
         existing.question_text = question_text or existing.question_text
         existing.value = value
-        existing.category = category
+        existing.category = category or existing.category
         existing.risk_tier = higher_tier(existing.risk_tier, tier)
         existing.source = source
         existing.source_detail = source_detail or {}

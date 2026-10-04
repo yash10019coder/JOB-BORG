@@ -26,7 +26,8 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
-    readonly_fields = ("resume_text",)
+    # field_provenance is written only by profile_fields, never by hand.
+    readonly_fields = ("resume_text", "field_provenance")
 
     def save_model(self, request, obj, form, change):
         """The admin is a write path to `Profile.resume` too (see U1), so it
@@ -73,6 +74,14 @@ class AnswerBankAdmin(admin.ModelAdmin):
     list_display = ("profile", "question_key", "source", "risk_tier", "is_locked", "updated_at")
     list_filter = ("source", "risk_tier", "is_locked")
     search_fields = ("question_key", "profile__user__username")
+    # Rows are written through write_answer() so precedence and history are
+    # enforced; the admin only inspects them (and may delete a bad row).
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(AnswerBankHistory)

@@ -25,7 +25,7 @@ from apps.auto_apply.llm.base import (
     ResolvedAnswer,
     resolve_answers,
 )
-from apps.accounts.services.answer_resolver import resolve_answer
+from apps.accounts.services.answer_resolver import load_bank_rows, resolve_answer
 from apps.auto_apply.llm.categories import QuestionCategory, classify
 from apps.auto_apply.models import ExplicitAnswer
 
@@ -151,11 +151,17 @@ def resolve_field_answers(
 
     resolved: dict[str, ResolvedAnswer] = {}
     remaining: list[Question] = []
+    # One query for the whole draft instead of one per question.
+    bank_rows = load_bank_rows(profile)
 
     for question in questions:
         category = classify(question.text)
         found = resolve_answer(
-            profile, question.text, options=question.options, legacy_lookup=legacy_lookup
+            profile,
+            question.text,
+            options=question.options,
+            legacy_lookup=legacy_lookup,
+            bank_rows=bank_rows,
         )
 
         if found is not None:

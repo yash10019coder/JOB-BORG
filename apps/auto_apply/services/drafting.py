@@ -36,6 +36,7 @@ from apps.auto_apply.models import AutoApplyDraft
 from apps.jobs.models import JobSource
 
 from . import answer_resolution
+from .confirmation import is_blank_answer_value
 from apps.web.salary_bands import (
     DEFAULT_SALARY_BANDS,
     SALARY_BANDS_BY_REGION,
@@ -414,12 +415,6 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     )
 
 
-def _is_blank(value) -> bool:
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
-
-
 def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
     """Reuse a previously user-confirmed answer for a still-blank,
     `needs_review` field from the most recent earlier draft for this
@@ -460,7 +455,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         return
 
     for label, entry in answers_payload.items():
-        if not entry.get("needs_review") or not _is_blank(entry.get("value")):
+        if not entry.get("needs_review") or not is_blank_answer_value(entry.get("value")):
             continue
         prior_entry = (previous.answers or {}).get(label)
         if not isinstance(prior_entry, dict) or not prior_entry.get("user_confirmed"):
@@ -468,7 +463,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         if prior_entry.get("field_type") != entry.get("field_type"):
             continue
         prior_value = prior_entry.get("value")
-        if _is_blank(prior_value):
+        if is_blank_answer_value(prior_value):
             continue
         # Re-validate against the *current* schema's options before
         # reusing a confirmed value. SINGLE_SELECT/MULTI_SELECT/
