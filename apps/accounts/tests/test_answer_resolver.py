@@ -12,6 +12,7 @@ from apps.accounts.services import answer_resolver
 from apps.accounts.services.answer_resolver import (
     load_bank_rows,
     normalize_question_key,
+    options_hash,
     resolve_answer,
     write_answer,
 )
@@ -31,12 +32,50 @@ class NormalizeQuestionKeyTests(SimpleTestCase):
             normalize_question_key("years of python experience"),
         )
 
-    def test_option_set_changes_the_key_but_not_its_order(self):
-        base = normalize_question_key("Pick one")
-        a = normalize_question_key("Pick one", ["Yes", "No"])
-        self.assertNotEqual(a, base)
-        self.assertEqual(a, normalize_question_key("Pick one", ["No", "Yes"]))
-        self.assertNotEqual(a, normalize_question_key("Pick one", ["Yes", "No", "Maybe"]))
+    def test_options_are_not_part_of_the_key(self):
+        self.assertEqual(
+            normalize_question_key("Pick one"), normalize_question_key("Pick one")
+        )
+        self.assertEqual(options_hash(["Yes", "No"]), options_hash(["No", "Yes"]))
+        self.assertNotEqual(options_hash(["Yes", "No"]), options_hash(["Yes", "No", "Maybe"]))
+        self.assertEqual(options_hash([]), "")
+
+    def test_decoration_does_not_change_the_key(self):
+        base = normalize_question_key("Website")
+        for decorated in ("Website *", "Website (optional)", "Website (Required)", "Website:", "WEBSITE?"):
+            self.assertEqual(normalize_question_key(decorated), base, decorated)
+        self.assertEqual(
+            normalize_question_key("Please describe your role"),
+            normalize_question_key("Describe your role"),
+        )
+
+    def test_employer_name_is_stripped_when_given(self):
+        a = normalize_question_key("Are you willing to relocate to work at Acme?", "Acme")
+        b = normalize_question_key("Are you willing to relocate to work at Beta Corp?", "Beta Corp")
+        self.assertEqual(a, b)
+        self.assertEqual(
+            normalize_question_key("What do you love about Acme's product?", "Acme"),
+            normalize_question_key("What do you love about  product?"),
+        )
+
+    def test_employer_is_kept_when_not_given(self):
+        self.assertNotEqual(
+            normalize_question_key("Why do you want to work at Acme?"),
+            normalize_question_key("Why do you want to work at Beta?"),
+        )
+
+    def test_employer_match_is_whole_word_and_case_insensitive(self):
+        self.assertEqual(
+            normalize_question_key("Why ACME?", "Acme"), normalize_question_key("Why ?")
+        )
+        # "Acme" inside another word is not the employer.
+        self.assertIn("acmeology", normalize_question_key("Do you know acmeology?", "Acme"))
+
+    def test_different_verbs_are_different_questions(self):
+        self.assertNotEqual(
+            normalize_question_key("Do you have a US passport?"),
+            normalize_question_key("Are you a US passport holder?"),
+        )
 
     def test_long_questions_fit_the_column_and_stay_distinct(self):
         one = normalize_question_key("word " * 200 + "alpha")
@@ -217,10 +256,10 @@ class WriteAnswerPrecedenceTests(_Base):
         real = answer_resolver._locked_row
         calls = []
 
-        def racing(profile, key):
+        def racing(profile, key, scope_region=""):
             # The first read happens "before" the other writer committed.
             calls.append(key)
-            return None if len(calls) == 1 else real(profile, key)
+            return None if len(calls) == 1 else real(profile, key, scope_region)
 
         with mock.patch.object(answer_resolver, "_locked_row", side_effect=racing):
             result = write_answer(self.profile, PYTHON_Q, "late", "user")
@@ -262,3 +301,157 @@ class PreloadedBankRowsTests(_Base):
         write_answer(other, PYTHON_Q, "x", "user")
         self.assertEqual(load_bank_rows(self.profile), {})
         self.assertEqual(load_bank_rows(None), {})
+
+
+class WriteAnswerScopeTests(_Base):
+    RELOCATE_Q = "Are you willing to relocate?"
+
+    def test_same_question_in_different_regions_coexists(self):
+        write_answer(self.profile, self.RELOCATE_Q, "Yes", "user", scope_region="US")
+        write_answer(self.profile, self.RELOCATE_Q, "No", "user", scope_region="IN")
+        write_answer(self.profile, self.RELOCATE_Q, "Maybe", "user")
+        rows = {r.scope_region: r.value for r in AnswerBank.objects.all()}
+        self.assertEqual(rows, {"US": "Yes", "IN": "No", "": "Maybe"})
+
+    def test_rewriting_one_region_leaves_the_others(self):
+        write_answer(self.profile, self.RELOCATE_Q, "Yes", "user", scope_region="US")
+        write_answer(self.profile, self.RELOCATE_Q, "No", "user", scope_region="IN")
+        write_answer(self.profile, self.RELOCATE_Q, "Yes!", "user", scope_region="US")
+        self.assertEqual(AnswerBank.objects.get(scope_region="IN").value, "No")
+        entry = AnswerBankHistory.objects.get()
+        self.assertEqual((entry.scope_region, entry.value), ("US", "Yes"))
+
+    def test_precedence_is_checked_per_scope(self):
+        write_answer(self.profile, self.RELOCATE_Q, "Yes", "user", scope_region="US", is_locked=True)
+        self.assertTrue(write_answer(self.profile, self.RELOCATE_Q, "x", "learned", scope_region="IN").applied)
+        self.assertFalse(write_answer(self.profile, self.RELOCATE_Q, "x", "learned", scope_region="US").applied)
+
+    def test_duplicate_profile_key_scope_is_rejected_by_the_database(self):
+        from django.db import IntegrityError, transaction
+
+        write_answer(self.profile, PYTHON_Q, "5", "user")
+        row = AnswerBank.objects.get()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            AnswerBank.objects.create(
+                profile=self.profile, question_key=row.question_key, scope_region="",
+                value="6", risk_tier=row.risk_tier, source="user",
+            )
+
+    def test_min_tier_can_raise_but_never_lower(self):
+        row = write_answer(self.profile, PYTHON_Q, "5", "user", min_tier=Tier.T1_COMMERCIAL).row
+        self.assertEqual(row.risk_tier, Tier.T1_COMMERCIAL)
+        row = write_answer(self.profile, SPONSOR_Q, "No", "user", min_tier=Tier.T2_FACTUAL).row
+        self.assertEqual(row.risk_tier, Tier.T0_LEGAL)
+
+    def test_applies_everywhere_and_options_hash_are_recorded(self):
+        row = write_answer(
+            self.profile, self.RELOCATE_Q, "Yes", "user",
+            options=["Yes", "No"], applies_everywhere=True,
+        ).row
+        self.assertEqual(row.source_detail["applies_everywhere"], True)
+        self.assertEqual(row.source_detail["options_hash"], options_hash(["Yes", "No"]))
+
+    def test_employer_is_stripped_from_the_stored_key(self):
+        write_answer(self.profile, "Relocate to work at Acme?", "Yes", "user", employer="Acme")
+        found = resolve_answer(self.profile, "Relocate to work at Beta?", options=())
+        self.assertIsNone(found)  # resolve_answer strips only via the job's employer
+        class _Job:
+            class employer:
+                name = "Beta"
+        self.assertEqual(resolve_answer(self.profile, "Relocate to work at Beta?", _Job).value, "Yes")
+
+
+class KeyMigrationTests(_Base):
+    def _run(self):
+        import importlib
+
+        from django.apps import apps
+
+        module = importlib.import_module(
+            "apps.accounts.migrations.0012_answerbank_scope_observation"
+        )
+        module.strip_options_hash_from_keys(apps, None)
+
+    def _row(self, key, **kwargs):
+        defaults = dict(
+            profile=self.profile, question_key=key, value="v", risk_tier="t2_factual",
+            source="user",
+        )
+        defaults.update(kwargs)
+        return AnswerBank.objects.create(**defaults)
+
+    def test_options_hash_suffix_is_stripped(self):
+        self._row("pick one#0123456789")
+        self._row("plain key")
+        self._run()
+        self.assertEqual(
+            sorted(AnswerBank.objects.values_list("question_key", flat=True)),
+            ["pick one", "plain key"],
+        )
+
+    def test_rows_that_collide_keep_the_highest_precedence_and_archive_the_rest(self):
+        self._row("pick one#aaaaaaaaaa", source="imported", value="imported")
+        self._row("pick one#bbbbbbbbbb", source="learned", value="learned")
+        self._row("pick one#cccccccccc", source="user", value="user", is_locked=True)
+        self._run()
+        row = AnswerBank.objects.get()
+        self.assertEqual((row.question_key, row.value), ("pick one", "user"))
+        self.assertEqual(
+            sorted(AnswerBankHistory.objects.values_list("value", flat=True)),
+            ["imported", "learned"],
+        )
+        self.assertTrue(
+            all(h.superseded_by_source == "migration" for h in AnswerBankHistory.objects.all())
+        )
+
+    def test_history_keys_are_stripped_too(self):
+        AnswerBankHistory.objects.create(
+            profile=self.profile, question_key="pick one#0123456789", value="old",
+            risk_tier="t2_factual", source="user",
+        )
+        self._run()
+        self.assertEqual(AnswerBankHistory.objects.get().question_key, "pick one")
+
+    def test_a_hash_that_is_not_ten_hex_characters_is_left_alone(self):
+        self._row("c# developer")
+        self._run()
+        self.assertEqual(AnswerBank.objects.get().question_key, "c# developer")
+
+    def test_other_profiles_are_not_merged(self):
+        other = User.objects.create_user(username="bob", password="pw").profile
+        self._row("pick one#aaaaaaaaaa")
+        self._row("pick one#bbbbbbbbbb", profile=other)
+        self._run()
+        self.assertEqual(AnswerBank.objects.count(), 2)
+
+
+class AnswerObservationTests(_Base):
+    def _make(self, **kwargs):
+        from apps.accounts.models import AnswerObservation
+
+        return AnswerObservation.objects.create(
+            profile=self.profile, question_key="how did you hear about us",
+            value="LinkedIn", tier="t2_factual", **kwargs,
+        )
+
+    def test_is_append_only(self):
+        observation = self._make()
+        observation.value = "Friend"
+        with self.assertRaises(ValueError):
+            observation.save()
+
+    def test_is_deleted_with_the_profile(self):
+        from apps.accounts.models import AnswerObservation
+
+        self._make(job_id=7, draft_id=9, employer_name="Acme", job_region="US")
+        self.profile.user.delete()
+        self.assertEqual(AnswerObservation.objects.count(), 0)
+
+    def test_admin_cannot_add_change_or_delete(self):
+        from django.contrib import admin
+        from apps.accounts.models import AnswerObservation
+
+        model_admin = admin.site._registry[AnswerObservation]
+        self.assertFalse(model_admin.has_add_permission(None))
+        self.assertFalse(model_admin.has_change_permission(None))
+        self.assertFalse(model_admin.has_delete_permission(None))

@@ -61,20 +61,40 @@ class WriteResult:
     row: AnswerBank | None
 
 
-def normalize_question_key(question_text, options=()):
-    """Stable key for a question: lowercased, punctuation and whitespace
-    collapsed. For select/boolean fields the (sorted) option set is hashed in,
-    so the same wording with different choices is a different question.
+_OPTIONAL_MARKER = re.compile(r"\((?:optional|required)\)")
+
+
+def normalize_question_key(question_text, employer=None):
+    """Stable key for a question: lowercased, with decoration removed.
+
+    Decoration only -- a trailing ``*``, "(optional)"/"(required)", a leading
+    "please", punctuation and whitespace -- plus the employer's own name when
+    given (so "relocate to work at Acme" and "...at Beta" are one question).
+    Verbs are deliberately kept ("do you have X" is not "are you X"): a false
+    merge is worse than a miss.
+
+    The option set is *not* part of the key. The stored value is mapped onto
+    each form's live options when it is resolved, so the same fact is found
+    whatever a particular ATS calls its choices.
     """
-    base = re.sub(r"[^\w]+", " ", (question_text or "").lower()).strip()
-    suffix = ""
-    if options:
-        digest = hashlib.sha1("\x1f".join(sorted(map(str, options))).encode()).hexdigest()
-        suffix = f"#{digest[:10]}"
-    if len(base) + len(suffix) > _MAX_KEY_LEN:
+    text = (question_text or "").lower()
+    name = (employer or "").strip().lower()
+    if name:
+        text = re.sub(rf"\b{re.escape(name)}(?:'s)?\b", " ", text)
+    text = _OPTIONAL_MARKER.sub(" ", text)
+    base = re.sub(r"[^\w]+", " ", text).strip()
+    base = re.sub(r"^please\s+", "", base)
+    if len(base) > _MAX_KEY_LEN:
         digest = hashlib.sha1(base.encode()).hexdigest()[:10]
-        base = f"{base[: _MAX_KEY_LEN - len(suffix) - 11]}~{digest}"
-    return base + suffix
+        base = f"{base[: _MAX_KEY_LEN - 11]}~{digest}"
+    return base
+
+
+def options_hash(options):
+    """Short digest of a form's option set, kept in ``source_detail`` for audit."""
+    if not options:
+        return ""
+    return hashlib.sha1("\x1f".join(sorted(map(str, options))).encode()).hexdigest()[:10]
 
 
 def _expires_at(row):
@@ -99,11 +119,21 @@ def _rank(row):
 
 
 def load_bank_rows(profile):
-    """All of a profile's ``AnswerBank`` rows keyed by ``question_key``, for
-    callers that resolve many questions (one query instead of one each)."""
+    """All of a profile's ``AnswerBank`` rows keyed by
+    ``(question_key, scope_region)``, for callers that resolve many questions
+    (one query instead of one each)."""
     if profile is None:
         return {}
-    return {row.question_key: row for row in AnswerBank.objects.filter(profile=profile)}
+    return {
+        (row.question_key, row.scope_region): row
+        for row in AnswerBank.objects.filter(profile=profile)
+    }
+
+
+def _employer_name(job):
+    """The job's employer name, or ``None`` (duck-typed: this module does not
+    import the jobs app)."""
+    return getattr(getattr(job, "employer", None), "name", None)
 
 
 def resolve_answer(
@@ -122,13 +152,15 @@ def resolve_answer(
     per-question query is made.
     """
     now = now or timezone.now()
-    key = normalize_question_key(question_text, options)
+    key = normalize_question_key(question_text, _employer_name(job))
     computed_tier = classify_tier(question_text)
 
     if bank_rows is not None:
-        row = bank_rows.get(key)
+        row = bank_rows.get((key, ""))
     elif profile is not None:
-        row = AnswerBank.objects.filter(profile=profile, question_key=key).first()
+        row = AnswerBank.objects.filter(
+            profile=profile, question_key=key, scope_region=""
+        ).first()
     else:
         row = None
     if row is not None and not _is_expired(row, now):
@@ -171,10 +203,10 @@ def resolve_answer(
     return None
 
 
-def _locked_row(profile, key):
+def _locked_row(profile, key, scope_region=""):
     return (
         AnswerBank.objects.select_for_update()
-        .filter(profile=profile, question_key=key)
+        .filter(profile=profile, question_key=key, scope_region=scope_region)
         .first()
     )
 
@@ -190,6 +222,10 @@ def write_answer(
     source_detail=None,
     confidence=1.0,
     is_locked=False,
+    scope_region="",
+    employer=None,
+    min_tier=None,
+    applies_everywhere=False,
     now=None,
 ):
     """Create or replace the ``AnswerBank`` row for a question.
@@ -202,16 +238,29 @@ def write_answer(
     An *expired* row no longer outranks anyone (it resolves to nothing, so it
     must not block a writer either). ``category=None`` keeps the existing
     row's category on update and means ``other`` on create.
+
+    ``scope_region`` limits the answer to one region ("" = everywhere);
+    rows for the same question in different regions coexist. ``employer``
+    names the employer to strip from the key. ``min_tier`` lets the user
+    raise (never lower) the question's risk tier. ``options`` is recorded as
+    a hash in ``source_detail`` for audit but is not part of the key.
     """
     source = AnswerBank.Source(source)
     if is_locked and source != AnswerBank.Source.USER:
         raise ValueError("only the user may lock an answer")
     now = now or timezone.now()
-    key = normalize_question_key(question_text, options)
+    key = normalize_question_key(question_text, employer)
     tier = classify_tier(question_text)
+    if min_tier is not None:
+        tier = higher_tier(tier, min_tier)
+    source_detail = dict(source_detail or {})
+    if options:
+        source_detail.setdefault("options_hash", options_hash(options))
+    if applies_everywhere:
+        source_detail["applies_everywhere"] = True
 
     with transaction.atomic():
-        existing = _locked_row(profile, key)
+        existing = _locked_row(profile, key, scope_region)
         if existing is None:
             try:
                 # Savepoint: a concurrent first writer can win the unique
@@ -220,18 +269,19 @@ def write_answer(
                     row = AnswerBank.objects.create(
                         profile=profile,
                         question_key=key,
+                        scope_region=scope_region,
                         question_text=question_text or "",
                         value=value,
                         category=category or AnswerBank.Category.OTHER,
                         risk_tier=tier,
                         source=source,
-                        source_detail=source_detail or {},
+                        source_detail=source_detail,
                         confidence=confidence,
                         is_locked=is_locked,
                     )
                 return WriteResult(True, row)
             except IntegrityError:
-                existing = _locked_row(profile, key)
+                existing = _locked_row(profile, key, scope_region)
                 if existing is None:
                     raise
 
@@ -242,6 +292,7 @@ def write_answer(
         AnswerBankHistory.objects.create(
             profile=profile,
             question_key=key,
+            scope_region=scope_region,
             value=existing.value,
             risk_tier=existing.risk_tier,
             source=existing.source,
@@ -255,7 +306,7 @@ def write_answer(
         existing.category = category or existing.category
         existing.risk_tier = higher_tier(existing.risk_tier, tier)
         existing.source = source
-        existing.source_detail = source_detail or {}
+        existing.source_detail = source_detail
         existing.confidence = confidence
         existing.is_locked = is_locked
         existing.expires_at = None

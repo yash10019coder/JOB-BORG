@@ -1,7 +1,13 @@
 from django.contrib import admin
 
 from .services import profile_fields
-from .models import AnswerBank, AnswerBankHistory, EmailInboxCredential, Profile
+from .models import (
+    AnswerBank,
+    AnswerBankHistory,
+    AnswerObservation,
+    EmailInboxCredential,
+    Profile,
+)
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -71,7 +77,9 @@ class EmailInboxCredentialAdmin(admin.ModelAdmin):
 
 @admin.register(AnswerBank)
 class AnswerBankAdmin(admin.ModelAdmin):
-    list_display = ("profile", "question_key", "source", "risk_tier", "is_locked", "updated_at")
+    list_display = (
+        "profile", "question_key", "scope_region", "source", "risk_tier", "is_locked", "updated_at",
+    )
     list_filter = ("source", "risk_tier", "is_locked")
     search_fields = ("question_key", "profile__user__username")
     # Rows are written through write_answer() so precedence and history are
@@ -89,6 +97,24 @@ class AnswerBankHistoryAdmin(admin.ModelAdmin):
     """Audit trail: browsable, never editable from the admin."""
 
     list_display = ("profile", "question_key", "source", "superseded_by_source", "superseded_at")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AnswerObservation)
+class AnswerObservationAdmin(admin.ModelAdmin):
+    """What users actually submitted: browsable, never editable."""
+
+    list_display = ("profile", "question_key", "tier", "provenance_source", "was_edited", "created_at")
+    list_filter = ("tier", "provenance_source", "was_edited")
     search_fields = ("question_key", "profile__user__username")
 
     def has_add_permission(self, request):

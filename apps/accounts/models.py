@@ -492,6 +492,11 @@ class AnswerBank(models.Model):
         related_name="answer_bank",
     )
     question_key = models.CharField(max_length=255)
+    # Region key (`apps.accounts.regions.REGION_KEYS`) this answer is limited
+    # to, or "" for "everywhere". Location-sensitive answers (relocation,
+    # on-site, a named country) are stored per region so one saved for a US
+    # job is never reused for an India job.
+    scope_region = models.CharField(max_length=8, blank=True, default="")
     question_text = models.TextField(blank=True, default="")
     value = models.JSONField()
     category = models.CharField(
@@ -510,8 +515,8 @@ class AnswerBank(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["profile", "question_key"],
-                name="uniq_answerbank_profile_question_key",
+                fields=["profile", "question_key", "scope_region"],
+                name="uniq_answerbank_profile_question_key_scope",
             ),
             # A lock is a user decision; automation must never hold one.
             models.CheckConstraint(
@@ -523,7 +528,8 @@ class AnswerBank(models.Model):
         ]
 
     def __str__(self):
-        return f"AnswerBank<{self.profile_id}:{self.question_key}:{self.source}>"
+        scope = f"@{self.scope_region}" if self.scope_region else ""
+        return f"AnswerBank<{self.profile_id}:{self.question_key}{scope}:{self.source}>"
 
 
 class AnswerBankHistory(models.Model):
@@ -539,6 +545,7 @@ class AnswerBankHistory(models.Model):
         related_name="answer_bank_history",
     )
     question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
     value = models.JSONField()
     risk_tier = models.CharField(max_length=16)
     source = models.CharField(max_length=16)
@@ -562,3 +569,52 @@ class AnswerBankHistory(models.Model):
 
     def __str__(self):
         return f"AnswerBankHistory<{self.profile_id}:{self.question_key}>"
+
+
+class AnswerObservation(models.Model):
+    """What the user actually submitted for one question on one application.
+
+    Written when a draft is sent, from the exact values in
+    ``AutoApplyDraft.submitted_answers_snapshot``. It is the ground truth the
+    learning loop counts over ("same answer across distinct jobs") and the
+    (user, job, question) unit shadow-mode precision is measured on.
+
+    ``job_id`` / ``draft_id`` are plain integers, not foreign keys: this app
+    sits below ``jobs`` and ``auto_apply`` and must not depend on them, and an
+    observation should outlive a discarded draft. Append-only.
+    """
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_observations",
+    )
+    question_key = models.CharField(max_length=255)
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    tier = models.CharField(max_length=16)
+    field_type = models.CharField(max_length=32, blank=True, default="")
+    # Where the submitted value came from (provenance of the draft entry).
+    provenance_source = models.CharField(max_length=16, blank=True, default="")
+    provenance_origin = models.CharField(max_length=64, blank=True, default="")
+    was_edited = models.BooleanField(default=False)
+    job_id = models.BigIntegerField(null=True, blank=True)
+    draft_id = models.BigIntegerField(null=True, blank=True)
+    employer_name = models.CharField(max_length=255, blank=True, default="")
+    job_region = models.CharField(max_length=8, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["profile", "question_key"], name="aobs_profile_question_idx"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValueError("AnswerObservation is append-only; it cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"AnswerObservation<{self.profile_id}:{self.question_key}>"
