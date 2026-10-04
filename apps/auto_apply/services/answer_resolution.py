@@ -16,8 +16,6 @@ its one-call-per-batch behavior for the remainder.
 """
 from __future__ import annotations
 
-import re
-
 from apps.auto_apply.llm.base import (
     AnswerInferenceClient,
     Question,
@@ -25,6 +23,7 @@ from apps.auto_apply.llm.base import (
     ResolvedAnswer,
     resolve_answers,
 )
+from apps.accounts.question_semantics import AuthKind, authorization_kind
 from apps.accounts.services.answer_resolver import load_bank_rows, resolve_answer
 from apps.auto_apply.llm.categories import QuestionCategory, classify
 from apps.auto_apply.models import ExplicitAnswer
@@ -58,18 +57,6 @@ _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
 }
 
 
-_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor", re.IGNORECASE)
-_AMBIGUOUS_AUTHORIZATION_QUESTION = re.compile(
-    r"\bh-?1b\b|\bimmigration\b|\bwork[ -]permit\b|\bcitizenship\b",
-    re.IGNORECASE,
-)
-_AUTHORIZATION_QUESTION = re.compile(
-    r"\bwork authoriz|\bauthoriz(?:ed|ation) to work\b|"
-    r"\beligib(?:le|ility) to work\b|\bright to work\b",
-    re.IGNORECASE,
-)
-
-
 def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
     """Which `ExplicitAnswer` categories may answer this question.
 
@@ -81,14 +68,10 @@ def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ..
     require human review.
     """
     if category == QuestionCategory.WORK_AUTHORIZATION:
-        text = question_text or ""
-        sponsorship = _SPONSORSHIP_QUESTION.search(text)
-        authorization = _AUTHORIZATION_QUESTION.search(text)
-        if _AMBIGUOUS_AUTHORIZATION_QUESTION.search(text) or (sponsorship and authorization):
-            return ()
-        if sponsorship:
+        kind = authorization_kind(question_text)
+        if kind == AuthKind.SPONSORSHIP:
             return (ExplicitAnswer.Category.SPONSORSHIP,)
-        if authorization:
+        if kind == AuthKind.AUTHORIZATION:
             return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
         return ()
     return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())

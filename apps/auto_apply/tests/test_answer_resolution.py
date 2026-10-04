@@ -626,3 +626,28 @@ class AnswerBankSingleQueryTests(TestCase):
             resolve_field_answers(user, questions, profile.resume_text, profile, FakeLLMClient())
         bank_queries = [q for q in ctx.captured_queries if "accounts_answerbank" in q["sql"]]
         self.assertEqual(len(bank_queries), 1)
+
+
+class NegatedSponsorshipQuestionTests(TestCase):
+    """A negated phrasing flips the meaning of yes/no, so a saved sponsorship
+    answer must not be applied to it."""
+
+    def test_saved_sponsorship_answer_is_not_used_for_a_negated_question(self):
+        user = User.objects.create_user(username="finn", password="pw", email="f@example.com")
+        ExplicitAnswer.objects.create(
+            user=user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
+        )
+        profile = user.profile
+        profile.resume_text = "Finn."
+        profile.save()
+        negated = "Can you work in the US without sponsorship?"
+        plain = "Will you now or in the future require visa sponsorship?"
+        resolved = resolve_field_answers(
+            user,
+            [Question(id=negated, text=negated), Question(id=plain, text=plain)],
+            profile.resume_text,
+            profile,
+            FakeLLMClient(),
+        )
+        self.assertNotEqual(resolved[0].reason, "explicit_answer")
+        self.assertEqual((resolved[1].answer, resolved[1].reason), ("No", "explicit_answer"))
