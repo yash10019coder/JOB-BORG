@@ -1,7 +1,7 @@
 ---
 title: "feat: AnswerBank foundation (Phase 1 of Profile Overhaul, epic #117)"
 type: feat
-status: active
+status: completed
 origin: docs/plans/2026-10-03-2300-consolidated-requirements.md
 depth: deep
 ---

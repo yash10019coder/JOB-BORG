@@ -2,7 +2,7 @@
 artifact_contract: ce-unified-plan/v1
 product_contract_source: ce-brainstorm + ce-pov
 created_at: "2026-10-03T23:00:00Z"
-updated_at: "2026-10-04T00:30:00Z"
+updated_at: "2026-10-05T00:00:00Z"
 status: active
 artifact_readiness: implementation-ready
 scope: "Complete consolidated requirements for JobBorg Profile System overhaul"
@@ -308,14 +308,29 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 
 | Phase | Weeks | Scope | Exit criterion |
 |---|---|---|---|
-| **1. Foundation** | 1–2 | AnswerBank + history, risk classifier, `resolve_answer()` with ExplicitAnswer fallback, drafting switched to resolver, answer snapshot on submit | Drafting tests green; no behaviour change for existing users |
-| **2. Profile UI** | 3–4 | Two-page profile, typed-fact resolver (FR2–FR4, FR1.7), custom answers CRUD, remember-on-review + observation capture, questions panel + quick-fill, ExplicitAnswer backfill | Users can maintain all answers from one page; a question answered once is not re-entered |
-| **3. Learning (consensus)** | 5 | Consensus learner over `AnswerObservation` (same authored answer across 2 distinct employers → learned row, held for confirmation in every tier), Learning tab, "confirm all remembered answers", shadow metrics (measure only). Built: see `2026-10-04-003-feat-consensus-learner-plan.md` | Reuse without re-typing; NFR2 intact |
-| **4. Import** | 6–7 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
-| **4b. Learning (embeddings + shadow gate)** | 8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
-| **5. Enablement & cleanup** | 9+ | T2 auto-apply behind precision gate, drop ExplicitAnswer after zero-fallback release | Gate passes 2 weeks; legacy table removed |
+| **1. Foundation** — built, PR #125 | 1–2 | AnswerBank + history, risk classifier, `resolve_answer()` with ExplicitAnswer fallback, drafting switched to resolver, answer snapshot on submit | Drafting tests green; no behaviour change for existing users |
+| **2. Profile UI** — built, PR #133 | 3–4 | Two-page profile, typed-fact resolver (FR2–FR4, FR1.7), custom answers CRUD, remember-on-review + observation capture, questions panel + quick-fill, ExplicitAnswer backfill | Users can maintain all answers from one page; a question answered once is not re-entered |
+| **3. Learning (consensus)** — built, PR #135 | 5 | Consensus learner over `AnswerObservation` (same authored answer across 2 distinct employers → learned row, held for confirmation in every tier), Learning tab, "confirm all remembered answers", shadow metrics (measure only). Built: see `2026-10-04-003-feat-consensus-learner-plan.md` | Reuse without re-typing; NFR2 intact |
+| **4. Import** — **next** | 6–7 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
+| **4b. Learning (embeddings + shadow gate)** — planned (also reworded-question matching, #130) | 8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
+| **5. Enablement & cleanup** — planned | 9+ | T2 auto-apply behind precision gate, drop ExplicitAnswer after zero-fallback release | Gate passes 2 weeks; legacy table removed |
 
 ---
+
+### Phase 4 readiness (Import)
+
+Phase 4 is next. Phases 1-3 are built in stacked PRs (#125 → #133 → #135) and must merge before it starts, in that order, then be retargeted to `profile-system-overhaul`.
+
+**What Phase 4 builds on (already in place):** `AnswerBank` + `write_answer` precedence (`imported` is the lowest rank and never overwrites user, locked or learned rows), `Profile.field_provenance` and the single `set_profile_field` write path (FR7.10), the held-for-confirmation gate (imported T0/T1 are held), `ProfileSuggestion` for proposals, the Learning tab pattern, and the shadow/observation tables. FR9.11: imported values never count as learner evidence (the learner already ignores anything the user did not author).
+
+**Decisions to settle at the start of Phase 4 planning (none are made yet):**
+1. Zero-retention provider allowlist (Open Question 3): which providers are allowed, and whether the LangChain layer can enforce it. FR9.10 fails closed, so an empty allowlist means rule-based parsing only.
+2. UI states for import (Open Question 14): progress, per-field diff, failure and empty states; where consent lives.
+3. Rate limits and CSRF coverage for the import endpoints (Open Question 15), and storage of uploaded PDFs (FR9.13: non-public, owner-checked, randomized names, size/page caps).
+4. `ImportJob` retention and the diff payload TTL (FR9.14), and the `llm_import_consent_at` + version field (FR9.10).
+5. What the importer may touch: `field_provenance` covered fields only, with locked and user-set values shown read-only as "kept" (FR9.9).
+
+**Not blocking, but related:** #129 (the LLM path gates by category, not tier, P1) matters more once an import LLM exists; #130 (reworded questions) is Phase 4b; #131/#132 are small follow-ups.
 
 ## Test Scenarios (minimum)
 
@@ -354,14 +369,14 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 ### From 2026-10-04 doc review (needs a decision)
 
 4. ~~Baseline for NFR1~~ — **Measured 2026-10-04** against the dev DB (1 user, 257 drafts): 33 are `excluded/unanswerable_required` = 12.8% of all drafts, 14.9% of non-stale drafts (the epic's ~18% is not reproduced). Of those 33: 13 include a work-auth/sponsorship question (T0), 7 salary (T1), 27 involve phone/city/country/address/timezone, 8 involve how-did-you-hear/referral/links/experience, and 17 contain no T0/T1 question at all. So T2 and contact facts are the larger addressable share; see FR1.7. Re-baseline NFR1 (target ≤12% is already nearly met on this sample) once real multi-user data exists.
-5. ~~Priority cut line~~ — **Decided:** Phases 1–2 (resolver, tiers, tabbed Profile/Answers UI, FR2–FR7, FR1.7) are P0; learning (FR8) and import (FR9) are P1; Learning tab appears with Phase 4.
-6. ~~Embeddings and import timing~~ — **Follows from 5:** both are P1 and ship after Phases 1–2 are measured. Embedding/worker-image work (FR8.3/FR8.10) stays inside Phase 4 and can be dropped if exact-match coverage is enough.
+5. ~~Priority cut line~~ — **Decided:** Phases 1–2 (resolver, tiers, tabbed Profile/Answers UI, FR2–FR7, FR1.7) are P0; learning (FR8) and import (FR9) are P1. **Amended:** the Learning tab shipped with Phase 3 (FR1.1).
+6. ~~Embeddings and import timing~~ — **Follows from 5:** both are P1 and ship after Phases 1–2 are measured. Embedding/worker-image work (FR8.3/FR8.10) is Phase 4b. **Amended (first real use):** exact-match coverage is *not* enough: the remaining retyping is reworded questions (4 wordings of gender, 4 of ethnicity, 5 of sponsorship on real sends), so semantic matching is wanted. It must only propose; see #130.
 7. ~~Shadow gate unit~~ — **Decided:** observe per (user, job, question), roll up per (user, question_key), then to a global per-question_key figure when enough distinct users exist (FR8.6). Still open: what the learning loop delivers if no scope ever reaches the 99% gate (suggestions accepted into AnswerBank still count toward the metric).
 8. ~~Imported provenance on Profile columns~~ — **Decided:** `Profile.field_provenance` JSON (FR7.10), written only through one `set_profile_field()` helper. Open detail: backfill treats existing non-empty values as `user`.
-9. ~~ExplicitAnswer migration mapping~~ — **Decided: dual write** (see Data Model Changes). Open detail: behavior when a legacy row disagrees with a typed Profile fact (currently: logged + surfaced in review queue).
+9. ~~ExplicitAnswer migration mapping~~ — **Decided (amended in Phase 2): one-time backfill, then read-only** (see Data Model Changes). Open detail: behavior when a legacy row disagrees with a typed Profile fact (currently: logged + surfaced in review queue).
 10. ~~`AnswerBankHistory`~~ — **Kept (Phase 2):** remember-on-review, overwrite and delete all write it, so it has consumers.
 11. ~~GDPR scope~~ — **Deferred** (NFR8). Policy for now: on account deletion delete everything persisted/cached; application/form-field server data is temporary. Still make snapshots/history write-once and admin read-only.
-12. **Timeline:** with learning/import at P1, Phases 1–2 are the committed scope; enablement (shadow ≥2 weeks + gate ≥2 weeks after Phase 4) lands around week 11+. Epic says 9 weeks.
+12. **Timeline:** Phases 1–3 are built (2026-10-04/05) and awaiting merge; the rest is P1 and unscheduled; enablement (shadow ≥2 weeks + gate ≥2 weeks after Phase 4) lands around week 11+. Epic says 9 weeks.
 13. **Epic #117 vs this doc:** epic lists 9 categories incl. `visa_details`, 10 visa statuses, global salary fallback, WebSocket progress, pdfplumber; doc has 8, 11 (matches code), none, polling, pypdf. Update the epic text; #113/#112/#100/#16 are still open despite "supersedes".
 14. **UI specs missing:** tab URLs/submit boundaries, import progress/diff/failure states, Learning-tab suggestion cards and empty states, provenance badge/lock semantics, accessibility/responsive NFR, FR1.6 redirect vs import flow.
 15. **Rate limits/CSRF:** per-user quotas for `/profile/import/` and `/profile/learn/`; state CSRF coverage for new POST endpoints.
