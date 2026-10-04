@@ -1,14 +1,14 @@
 ---
 title: "feat: Consensus learner, Learning tab and bulk confirm (Phase 3 of Profile Overhaul, epic #117)"
 type: feat
-status: active
+status: completed
 origin: docs/plans/2026-10-03-2300-consolidated-requirements.md
 depth: deep
 ---
 
 # Phase 3: Consensus learner (epic #117)
 
-Work goes on branch `feat/profile-learning`, already created and stacked on `feat/profile-answers-ui` (PR #133). A tracking issue is created first.
+Work goes on branch `feat/profile-learning`, already created and stacked on `feat/profile-answers-ui` (PR #133). Tracking issue: #134.
 
 ## Context
 
@@ -155,7 +155,7 @@ The user's goal is: *if a question was answered before, deduce the answer instea
   - button hidden at zero.
 
 ### U6. Learning tab
-- `apps/web/views_profile.py`, `apps/web/forms_profile.py` (`LearningSettingsForm`), `apps/web/urls.py`.
+- `apps/web/views_learning.py` (new, split from `views_profile.py`), `apps/web/forms_profile.py` (`LearningSettingsForm`), `apps/web/urls.py`.
 - New template `templates/web/profile_learning.html`. Also update `templates/web/_profile_tabs.html` (third tab) and `templates/web/profile_answers.html` (learned rows excluded, plus the count link).
 - **Page sections:**
   - **Switch:** the on/off form.
