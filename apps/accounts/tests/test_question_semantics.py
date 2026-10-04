@@ -233,9 +233,16 @@ class LocationSensitivityTests(SimpleTestCase):
             "Can you work on-site in Austin?",
             "This is a hybrid role. Does that work for you?",
             "Are you able to commute to our office?",
-            "Are you authorized to work in the United States?",
         ):
             self.assertTrue(qs.is_location_sensitive(text), text)
+
+    def test_a_named_country_does_not_make_a_question_location_sensitive(self):
+        """The country is part of the question's own key."""
+        for text in (
+            "Are you authorized to work in the United States?",
+            "Do you have experience selling in India?",
+        ):
+            self.assertFalse(qs.is_location_sensitive(text), text)
 
     def test_unrelated_questions_are_not(self):
         for text in (

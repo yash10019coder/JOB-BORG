@@ -147,6 +147,19 @@ def resolve_field_answers(
             bank_rows=bank_rows,
         )
 
+        if found is not None and found.value is None:
+            # A stored answer exists but does not fit this form's options:
+            # leave it blank for review rather than guessing a choice, and do
+            # not let the LLM answer a question the user has already addressed.
+            resolved[question.id] = ResolvedAnswer(
+                question_id=question.id,
+                category=category,
+                answer=None,
+                needs_review=True,
+                reason=ResolutionReason.INVALID_OPTION,
+            )
+            continue
+
         if found is not None:
             from_bank = found.provenance.get("origin") == "answer_bank"
             resolved[question.id] = _enforce_option_constraint(

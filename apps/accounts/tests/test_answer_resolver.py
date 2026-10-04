@@ -199,6 +199,20 @@ class LegacyFallbackTests(_Base):
         ] + [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
         self.assertFalse([m for m in modules if m.startswith("apps.auto_apply")])
 
+    def test_typed_layers_do_not_import_auto_apply_or_web(self):
+        from apps.accounts import question_semantics
+        from apps.accounts.services import typed_facts
+
+        for module in (typed_facts, question_semantics, answer_resolver):
+            tree = ast.parse(Path(module.__file__).read_text())
+            modules = [
+                node.module or ""
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+            ] + [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+            offenders = [m for m in modules if m.startswith(("apps.auto_apply", "apps.web"))]
+            self.assertEqual(offenders, [], module.__name__)
+
 
 class WriteAnswerPrecedenceTests(_Base):
     def test_lower_precedence_cannot_overwrite_higher(self):
@@ -352,13 +366,17 @@ class WriteAnswerScopeTests(_Base):
         self.assertEqual(row.source_detail["options_hash"], options_hash(["Yes", "No"]))
 
     def test_employer_is_stripped_from_the_stored_key(self):
-        write_answer(self.profile, "Relocate to work at Acme?", "Yes", "user", employer="Acme")
-        found = resolve_answer(self.profile, "Relocate to work at Beta?", options=())
-        self.assertIsNone(found)  # resolve_answer strips only via the job's employer
+        question = "What excites you about working at {}?"
+        write_answer(self.profile, question.format("Acme"), "The mission", "user", employer="Acme")
+
         class _Job:
             class employer:
                 name = "Beta"
-        self.assertEqual(resolve_answer(self.profile, "Relocate to work at Beta?", _Job).value, "Yes")
+
+        found = resolve_answer(self.profile, question.format("Beta"), _Job)
+        self.assertEqual(found.value, "The mission")
+        # Without the job's employer the names differ, so it is a different question.
+        self.assertIsNone(resolve_answer(self.profile, question.format("Beta")))
 
 
 class KeyMigrationTests(_Base):
@@ -455,3 +473,284 @@ class AnswerObservationTests(_Base):
         self.assertFalse(model_admin.has_add_permission(None))
         self.assertFalse(model_admin.has_change_permission(None))
         self.assertFalse(model_admin.has_delete_permission(None))
+
+
+def _job(country="US", employer="Acme"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(location_country=country, employer=SimpleNamespace(name=employer))
+
+
+class TypedFactsFirstTests(_Base):
+    AUTH_Q = "Are you legally authorized to work in the United States?"
+
+    def test_a_typed_fact_beats_a_user_answer_bank_row(self):
+        self.profile.visa_status_by_country = {"USA": "citizen"}
+        self.profile.save()
+        write_answer(self.profile, self.AUTH_Q, "No", "user", is_locked=True)
+        found = resolve_answer(self.profile, self.AUTH_Q, _job("US"), options=("Yes", "No"))
+        self.assertEqual(found.value, "Yes")
+        self.assertEqual(found.provenance["origin"], "profile.visa_status_by_country.USA")
+
+    def test_typed_provenance_reports_user_source_and_needs_no_confirmation(self):
+        self.profile.visa_status_by_country = {"USA": "citizen"}
+        self.profile.save()
+        found = resolve_answer(self.profile, self.AUTH_Q, _job("US"), options=("Yes", "No"))
+        self.assertEqual(found.provenance["source"], "user")
+        self.assertFalse(found.needs_confirmation)
+        self.assertEqual(found.tier, Tier.T0_LEGAL)
+
+    def test_an_imported_typed_value_in_a_t0_question_needs_confirmation(self):
+        from apps.accounts.services import profile_fields
+
+        profile_fields.apply_profile_field(
+            self.profile, "visa_status_by_country.USA", "citizen", "imported"
+        )
+        found = resolve_answer(self.profile, self.AUTH_Q, _job("US"), options=("Yes", "No"))
+        self.assertEqual(found.provenance["source"], "imported")
+        self.assertTrue(found.needs_confirmation)
+
+    def test_an_imported_typed_value_in_a_t2_question_does_not(self):
+        from apps.accounts.services import profile_fields
+
+        profile_fields.apply_profile_field(self.profile, "location_country", "IND", "imported")
+        found = resolve_answer(self.profile, "Country", _job("US"), options=("India +91",))
+        self.assertEqual(found.value, "India +91")
+        self.assertEqual(found.provenance["source"], "imported")
+        self.assertFalse(found.needs_confirmation)
+
+    def test_covered_but_unanswerable_lets_a_user_bank_row_through(self):
+        self.profile.visa_status_by_country = {"USA": "h1b"}
+        self.profile.save()
+        sponsor_q = "Will you now or in the future require visa sponsorship?"
+        write_answer(self.profile, sponsor_q, "Yes", "user")
+        found = resolve_answer(self.profile, sponsor_q, _job("US"), options=("Yes", "No"))
+        self.assertEqual((found.value, found.provenance["origin"]), ("Yes", "answer_bank"))
+
+    def test_covered_but_unanswerable_does_not_let_a_legacy_row_through(self):
+        self.profile.visa_status_by_country = {"USA": "h1b"}
+        self.profile.save()
+        sponsor_q = "Will you now or in the future require visa sponsorship?"
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        self.assertIsNone(resolve_answer(self.profile, sponsor_q, _job("US"), options=("Yes", "No")))
+
+    def test_not_covered_lets_the_legacy_row_answer(self):
+        sponsor_q = "Will you now or in the future require visa sponsorship?"
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        found = resolve_answer(self.profile, sponsor_q, _job("US"), options=("Yes", "No"))
+        self.assertEqual((found.value, found.provenance["origin"]), ("Yes", "legacy_explicit_answer"))
+
+    def test_no_profile_means_no_typed_facts(self):
+        self.assertIsNone(resolve_answer(None, self.AUTH_Q, _job("US")))
+
+
+def _legacy_row(profile, key, value, **detail):
+    detail.setdefault("origin", "legacy_explicit_answer")
+    return AnswerBank.objects.create(
+        profile=profile, question_key=key, value=value,
+        risk_tier="t1_commercial" if key.endswith("salary_expectation") else "t0_legal",
+        source="user", is_locked=True, source_detail=detail,
+    )
+
+
+class BankOptionMappingTests(_Base):
+    Q = "Are you comfortable with our hiring process?"
+
+    def test_a_stored_yes_fills_whatever_the_form_calls_yes(self):
+        write_answer(self.profile, self.Q, "Yes", "user")
+        for options, expected in [
+            (("Yes", "No"), "Yes"),
+            (("Yes, I am", "No, I am not"), "Yes, I am"),
+            ((), "Yes"),
+        ]:
+            self.assertEqual(resolve_answer(self.profile, self.Q, options=options).value, expected)
+
+    def test_a_stored_value_that_fits_no_option_comes_back_unmapped(self):
+        write_answer(self.profile, self.Q, "Probably", "user")
+        found = resolve_answer(self.profile, self.Q, options=("Yes", "No"))
+        self.assertIsNone(found.value)
+        self.assertEqual(found.provenance["unmapped_value"], "Probably")
+
+    def test_exact_match_ignores_case_and_punctuation(self):
+        write_answer(self.profile, "Pick your stack", "node.js", "user")
+        self.assertEqual(
+            resolve_answer(self.profile, "Pick your stack", options=("Go", "Node.js")).value,
+            "Node.js",
+        )
+
+    def test_ambiguous_yes_no_options_are_not_guessed(self):
+        write_answer(self.profile, self.Q, "No", "user")
+        found = resolve_answer(
+            self.profile, self.Q, options=("No, I require sponsorship", "No, but I do not")
+        )
+        self.assertIsNone(found.value)
+
+    def test_multi_select_values_map_item_by_item(self):
+        write_answer(self.profile, "Which languages do you use?", ["python", "go"], "user")
+        found = resolve_answer(
+            self.profile, "Which languages do you use?", options=("Python", "Go", "Rust")
+        )
+        self.assertEqual(found.value, ["Python", "Go"])
+        none = resolve_answer(
+            self.profile, "Which languages do you use?", options=("Python", "Rust")
+        )
+        self.assertIsNone(none.value)
+
+    def test_the_same_answer_is_found_whatever_the_option_set(self):
+        write_answer(self.profile, self.Q, "Yes", "user", options=("Yes", "No"))
+        self.assertEqual(
+            resolve_answer(self.profile, self.Q, options=("Yes", "No", "Maybe")).value, "Yes"
+        )
+
+
+class RegionScopedResolveTests(_Base):
+    Q = "Are you willing to relocate?"
+
+    def test_a_us_answer_is_used_for_a_us_job_only(self):
+        write_answer(self.profile, self.Q, "Yes", "user", scope_region="US")
+        self.assertEqual(resolve_answer(self.profile, self.Q, _job("US")).value, "Yes")
+        self.assertIsNone(resolve_answer(self.profile, self.Q, _job("India")))
+
+    def test_an_unknown_job_region_resolves_nothing_for_a_scoped_answer(self):
+        write_answer(self.profile, self.Q, "Yes", "user", scope_region="US")
+        self.assertIsNone(resolve_answer(self.profile, self.Q, _job("")))
+        self.assertIsNone(resolve_answer(self.profile, self.Q))
+
+    def test_each_region_gets_its_own_answer(self):
+        write_answer(self.profile, self.Q, "Yes", "user", scope_region="US")
+        write_answer(self.profile, self.Q, "No", "user", scope_region="IN")
+        self.assertEqual(resolve_answer(self.profile, self.Q, _job("US")).value, "Yes")
+        self.assertEqual(resolve_answer(self.profile, self.Q, _job("India")).value, "No")
+
+    def test_a_global_row_is_ignored_for_location_sensitive_questions_unless_marked(self):
+        write_answer(self.profile, self.Q, "Yes", "user")
+        self.assertIsNone(resolve_answer(self.profile, self.Q, _job("US")))
+
+    def test_applies_everywhere_row_is_used_for_any_job(self):
+        write_answer(self.profile, self.Q, "Yes", "user", applies_everywhere=True)
+        for country in ("US", "India", ""):
+            self.assertEqual(resolve_answer(self.profile, self.Q, _job(country)).value, "Yes")
+
+    def test_a_regional_row_beats_an_applies_everywhere_row(self):
+        write_answer(self.profile, self.Q, "Maybe", "user", applies_everywhere=True)
+        write_answer(self.profile, self.Q, "No", "user", scope_region="IN")
+        self.assertEqual(resolve_answer(self.profile, self.Q, _job("India")).value, "No")
+        self.assertEqual(resolve_answer(self.profile, self.Q, _job("US")).value, "Maybe")
+
+    def test_a_non_location_question_uses_the_global_row_for_every_job(self):
+        write_answer(self.profile, PYTHON_Q, "5", "user")
+        for country in ("US", "India", ""):
+            self.assertEqual(resolve_answer(self.profile, PYTHON_Q, _job(country)).value, "5")
+
+    def test_a_named_country_is_part_of_the_key_not_a_scope(self):
+        us = "Are you legally authorized to work in the United States?"
+        write_answer(self.profile, us, "Yes", "user")
+        self.assertEqual(resolve_answer(self.profile, us, _job("India")).value, "Yes")
+
+    def test_preloaded_rows_respect_scope(self):
+        write_answer(self.profile, self.Q, "Yes", "user", scope_region="US")
+        rows = load_bank_rows(self.profile)
+        with self.assertNumQueries(0):
+            self.assertEqual(
+                resolve_answer(self.profile, self.Q, _job("US"), bank_rows=rows).value, "Yes"
+            )
+            self.assertIsNone(resolve_answer(self.profile, self.Q, _job("India"), bank_rows=rows))
+
+
+class LegacyRowTests(_Base):
+    AUTH_Q = "Are you legally authorized to work in the United States?"
+    SPONSOR_Q = "Will you now or in the future require visa sponsorship?"
+    SALARY_Q = "What is your desired salary?"
+
+    def test_boolean_rows_map_onto_the_forms_yes_no(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_WORK_AUTHORIZATION, "No", answer_bool=False)
+        for options, expected in [(("Yes", "No"), "No"), (("Yes, I am", "No, I am not"), "No, I am not")]:
+            found = resolve_answer(self.profile, self.AUTH_Q, _job("US"), options=options)
+            self.assertEqual(found.value, expected)
+            self.assertEqual(found.provenance["origin"], "legacy_explicit_answer")
+            self.assertFalse(found.needs_confirmation)
+            self.assertEqual(found.tier, Tier.T0_LEGAL)
+
+    def test_authorization_and_sponsorship_rows_are_not_interchangeable(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        self.assertIsNone(resolve_answer(self.profile, self.AUTH_Q, _job("US")))
+
+    def test_ambiguous_and_negated_questions_use_no_legacy_row(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        for text in (
+            "What is your current immigration status?",
+            "Can you work in the US without sponsorship?",
+            "Are you authorized to work in the US, and will you require sponsorship?",
+        ):
+            self.assertIsNone(resolve_answer(self.profile, text, _job("US")), text)
+
+    def test_an_other_answer_never_resolves(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Other", answer_bool=None)
+        self.assertIsNone(resolve_answer(self.profile, self.SPONSOR_Q, _job("US")))
+
+    def test_free_text_rows_keep_the_phase_one_behaviour(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Not at the moment", free_text=True)
+        self.assertEqual(
+            resolve_answer(self.profile, self.SPONSOR_Q, _job("US")).value, "Not at the moment"
+        )
+        # Free text that fits none of the form's options is not guessed.
+        self.assertIsNone(
+            resolve_answer(self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No"))
+        )
+
+    def test_a_salary_row_answers_only_a_job_in_its_own_region(self):
+        _legacy_row(
+            self.profile, answer_resolver.LEGACY_SALARY, "$100,000 - $125,000", region="US"
+        )
+        self.assertEqual(
+            resolve_answer(self.profile, self.SALARY_Q, _job("US")).value, "$100,000 - $125,000"
+        )
+        self.assertIsNone(resolve_answer(self.profile, self.SALARY_Q, _job("India")))
+        self.assertIsNone(resolve_answer(self.profile, self.SALARY_Q, _job("")))
+        self.assertIsNone(resolve_answer(self.profile, self.SALARY_Q))
+
+    def test_a_salary_row_without_a_region_never_answers(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SALARY, "$100,000 - $125,000", region=None)
+        self.assertIsNone(resolve_answer(self.profile, self.SALARY_Q, _job("US")))
+
+    def test_a_hit_is_logged_and_a_miss_is_not(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        with self.assertLogs("apps.accounts.services.answer_resolver", level="INFO") as logs:
+            resolve_answer(self.profile, self.SPONSOR_Q, _job("US"))
+        self.assertTrue(any("legacy_fallback_hit" in r for r in logs.output))
+        with self.assertNoLogs("apps.accounts.services.answer_resolver", level="INFO"):
+            resolve_answer(self.profile, PYTHON_Q, _job("US"))
+
+    def test_an_expired_legacy_row_does_not_answer(self):
+        row = _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        AnswerBank.objects.filter(pk=row.pk).update(expires_at=timezone.now() - timedelta(days=1))
+        self.assertIsNone(resolve_answer(self.profile, self.SPONSOR_Q, _job("US")))
+
+    def test_a_disagreeing_typed_fact_wins_and_the_conflict_is_logged_not_blocking(self):
+        self.profile.visa_status_by_country = {"USA": "requires_sponsorship"}
+        self.profile.save()
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "No", answer_bool=False)
+        with self.assertLogs("apps.accounts.services.answer_resolver", level="INFO") as logs:
+            found = resolve_answer(
+                self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No")
+            )
+        self.assertEqual(found.value, "Yes")
+        self.assertFalse(found.needs_confirmation)
+        self.assertEqual(found.provenance["conflict"]["answer_bool"], False)
+        self.assertTrue(any("legacy_conflict" in r for r in logs.output))
+
+    def test_an_agreeing_legacy_row_is_no_conflict(self):
+        self.profile.visa_status_by_country = {"USA": "requires_sponsorship"}
+        self.profile.save()
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        found = resolve_answer(self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No"))
+        self.assertNotIn("conflict", found.provenance)
+
+    def test_the_preloaded_path_reads_legacy_rows_without_a_query(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Yes", answer_bool=True)
+        rows = load_bank_rows(self.profile)
+        with self.assertNumQueries(0):
+            found = resolve_answer(
+                self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No"), bank_rows=rows
+            )
+        self.assertEqual(found.value, "Yes")

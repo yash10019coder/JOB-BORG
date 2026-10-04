@@ -302,6 +302,14 @@ def contact_kind(text) -> ContactKind | None:
     return None
 
 
+def blocks_llm(text) -> bool:
+    """Questions the typed layer owns outright: citizenship and "are you
+    located in X". If the profile cannot answer one confidently it stays blank
+    for review -- an LLM guessing a citizenship or residence from a resume is
+    exactly the confident wrong answer to avoid."""
+    return citizenship_question(text) is not None or contact_kind(text) == ContactKind.MEMBERSHIP
+
+
 # --------------------------------------------------------------------------
 # Salary
 # --------------------------------------------------------------------------
@@ -338,14 +346,14 @@ _LOCATION_SENSITIVE = re.compile(
 
 
 def is_location_sensitive(text) -> bool:
-    """Whether the right answer can depend on *where the job is*.
+    """Whether the right answer depends on *where the job is* without saying so.
 
-    Relocation, on-site/hybrid and commuting wording, or a country named in
-    the question. An unresolved capitalised word after "in" ("experience in
-    Python") does not count -- only a country that actually resolved.
+    Relocation, on-site/hybrid and commuting wording. A country named in the
+    question does not count: "authorized to work in the United States" already
+    carries its country in its own key, so it cannot be reused for a job
+    elsewhere.
     """
-    text = text or ""
-    return bool(_LOCATION_SENSITIVE.search(text)) or bool(country_mentions(text).alpha3)
+    return bool(_LOCATION_SENSITIVE.search(text or ""))
 
 
 # --------------------------------------------------------------------------

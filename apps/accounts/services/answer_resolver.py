@@ -31,9 +31,11 @@ from typing import Any, Callable
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.accounts import question_semantics as qs
 from apps.accounts.models import AnswerBank, AnswerBankHistory
+from apps.accounts.services import profile_fields, typed_facts
 from apps.accounts.services.precedence import LOCKED_RANK, SOURCE_RANK
-from apps.accounts.tiering import Tier, classify_tier, higher_tier
+from apps.accounts.tiering import QuestionCategory, Tier, classify, classify_tier, higher_tier
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,165 @@ def _employer_name(job):
     return getattr(getattr(job, "employer", None), "name", None)
 
 
+# Rows backfilled from the old ExplicitAnswer table (Phase 2, auto_apply
+# migration 0011) live in AnswerBank under these literal keys. Only the
+# resolver reads them, routed by what the question asks.
+LEGACY_WORK_AUTHORIZATION = "legacy:work_authorization"
+LEGACY_SPONSORSHIP = "legacy:sponsorship"
+LEGACY_SALARY = "legacy:salary_expectation"
+
+
+def _get_row(profile, key, scope, bank_rows):
+    if bank_rows is not None:
+        return bank_rows.get((key, scope))
+    return AnswerBank.objects.filter(
+        profile=profile, question_key=key, scope_region=scope
+    ).first()
+
+
+def _bank_row(profile, question_text, key, job, bank_rows):
+    """The AnswerBank row that applies to this question for this job.
+
+    A location-sensitive question (relocation, on-site, a named country) is
+    answered only from a row saved for the job's own region, or one the user
+    marked "applies everywhere" -- an answer given for a US job is never
+    silently reused for an India job. Everything else uses the global row.
+    """
+    if not qs.is_location_sensitive(question_text):
+        return _get_row(profile, key, "", bank_rows)
+    region = typed_facts.job_region(job)
+    row = _get_row(profile, key, region, bank_rows) if region else None
+    if row is None:
+        row = _get_row(profile, key, "", bank_rows)
+        if row is not None and not (row.source_detail or {}).get("applies_everywhere"):
+            row = None
+    return row
+
+
+def _map_to_options(value, options):
+    """Put a stored value into a form's live options, or ``None``.
+
+    Exact (case/punctuation-insensitive) match, or a plain "Yes"/"No" mapped to
+    the single option that means it. Anything else is not guessed: a stored
+    answer that does not fit this form's choices stays blank for review.
+    """
+    if not options:
+        return value
+    if isinstance(value, (list, tuple)):
+        mapped = [qs.pick_exact(options, item) for item in value]
+        return mapped if mapped and all(m is not None for m in mapped) else None
+    exact = qs.pick_exact(options, value)
+    if exact is not None:
+        return exact
+    word = re.sub(r"[^a-z]+", "", str(value).lower())
+    if word in ("yes", "no"):
+        return qs.pick_yes_no(options, word == "yes")
+    return None
+
+
+def _bank_provenance(row):
+    return {
+        "origin": "answer_bank",
+        "source": row.source,
+        "locked": row.is_locked,
+        "confidence": row.confidence,
+        "detail": row.source_detail,
+    }
+
+
+def _typed_result(profile, fact, tier, conflict):
+    entry = profile_fields.provenance_for(profile, fact.provenance_key) or {}
+    source = entry.get("source", AnswerBank.Source.USER)
+    provenance = {
+        "origin": f"profile.{fact.provenance_key}",
+        "source": source,
+        "locked": bool(entry.get("locked")),
+        "confidence": 1.0,
+        "detail": fact.detail,
+    }
+    if conflict:
+        provenance["conflict"] = conflict
+    return ResolvedValue(
+        value=fact.value,
+        provenance=provenance,
+        needs_confirmation=(
+            tier in _NEEDS_CONFIRMATION_TIERS and source != AnswerBank.Source.USER
+        ),
+        tier=tier,
+    )
+
+
+def _legacy_key(question_text):
+    if classify(question_text) == QuestionCategory.WORK_AUTHORIZATION:
+        kind = qs.authorization_kind(question_text)
+        if kind == qs.AuthKind.AUTHORIZATION:
+            return LEGACY_WORK_AUTHORIZATION
+        if kind == qs.AuthKind.SPONSORSHIP:
+            return LEGACY_SPONSORSHIP
+        return None
+    if qs.is_salary_expectation(question_text):
+        return LEGACY_SALARY
+    return None
+
+
+def _legacy_conflict(profile, fact, bank_rows):
+    """A backfilled legacy answer that disagrees with the typed fact, if any.
+
+    Non-blocking: legacy answers are country-agnostic while typed facts are
+    per country, so they can legitimately differ, and both came from the user.
+    It is logged and carried in the provenance so the queue can say so.
+    """
+    if fact.truth is None or fact.kind not in (typed_facts.AUTHORIZATION, typed_facts.SPONSORSHIP):
+        return None
+    lkey = LEGACY_WORK_AUTHORIZATION if fact.kind == typed_facts.AUTHORIZATION else LEGACY_SPONSORSHIP
+    row = _get_row(profile, lkey, "", bank_rows)
+    boolean = ((row.source_detail or {}).get("answer_bool")) if row is not None else None
+    if boolean is None or boolean == fact.truth:
+        return None
+    logger.info(
+        "answer_resolver.legacy_conflict",
+        extra={"profile_id": profile.pk, "legacy_key": lkey, "kind": fact.kind},
+    )
+    return {"origin": lkey, "answer_bool": boolean}
+
+
+def _legacy_row(profile, question_text, job, options, bank_rows, computed_tier, now):
+    lkey = _legacy_key(question_text)
+    if lkey is None:
+        return None
+    row = _get_row(profile, lkey, "", bank_rows)
+    if row is None or _is_expired(row, now):
+        return None
+    detail = row.source_detail or {}
+    if lkey == LEGACY_SALARY:
+        # A band is quoted in one region's currency: never answer another's.
+        region = typed_facts.job_region(job)
+        if not region or detail.get("region") != region:
+            return None
+        value = _map_to_options(row.value, options)
+    elif detail.get("answer_bool") is not None:
+        value = qs.pick_yes_no(options, bool(detail["answer_bool"]))
+    elif detail.get("free_text"):
+        value = _map_to_options(row.value, options)
+    else:
+        return None  # the old answer was "other": it never answered anything
+    if value is None:
+        return None
+    # Counted so Phase 5 can tell when the legacy rows are unused.
+    logger.info(
+        "answer_resolver.legacy_fallback_hit",
+        extra={"profile_id": profile.pk, "question_key": lkey},
+    )
+    provenance = _bank_provenance(row)
+    provenance["origin"] = "legacy_explicit_answer"
+    return ResolvedValue(
+        value=value,
+        provenance=provenance,
+        needs_confirmation=False,
+        tier=higher_tier(row.risk_tier, computed_tier),
+    )
+
+
 def resolve_answer(
     profile,
     question_text,
@@ -148,39 +309,48 @@ def resolve_answer(
 ):
     """Return a :class:`ResolvedValue`, or ``None`` if nothing is known.
 
+    Order: typed Profile facts, then AnswerBank (region-aware), then the
+    backfilled legacy rows -- but legacy only when no typed fact covers the
+    question, so an H-1B holder's sponsorship stays blank rather than being
+    filled from an old saved answer. A returned ``value`` of ``None`` means a
+    stored answer exists but does not fit this form's options.
+
     ``bank_rows`` is an optional :func:`load_bank_rows` preload; when given, no
-    per-question query is made.
+    per-question query is made. ``legacy_lookup`` is the pre-backfill
+    ``ExplicitAnswer`` hook, kept until that table is retired.
     """
     now = now or timezone.now()
+    options = tuple(options or ())
     key = normalize_question_key(question_text, _employer_name(job))
     computed_tier = classify_tier(question_text)
 
-    if bank_rows is not None:
-        row = bank_rows.get((key, ""))
-    elif profile is not None:
-        row = AnswerBank.objects.filter(
-            profile=profile, question_key=key, scope_region=""
-        ).first()
-    else:
-        row = None
+    fact = typed_facts.resolve(profile, question_text, options=options, job=job)
+    if fact is not None and fact.value is not None:
+        conflict = _legacy_conflict(profile, fact, bank_rows)
+        return _typed_result(profile, fact, computed_tier, conflict)
+
+    row = _bank_row(profile, question_text, key, job, bank_rows) if profile is not None else None
     if row is not None and not _is_expired(row, now):
         tier = higher_tier(row.risk_tier, computed_tier)
+        value = _map_to_options(row.value, options)
+        provenance = _bank_provenance(row)
+        if value is None:
+            provenance["unmapped_value"] = row.value
         return ResolvedValue(
-            value=row.value,
-            provenance={
-                "origin": "answer_bank",
-                "source": row.source,
-                "locked": row.is_locked,
-                "confidence": row.confidence,
-                "detail": row.source_detail,
-            },
+            value=value,
+            provenance=provenance,
             needs_confirmation=(
                 tier in _NEEDS_CONFIRMATION_TIERS and row.source != AnswerBank.Source.USER
             ),
             tier=tier,
         )
 
-    if legacy_lookup is not None:
+    if profile is not None and not (fact and fact.covered):
+        found = _legacy_row(profile, question_text, job, options, bank_rows, computed_tier, now)
+        if found is not None:
+            return found
+
+    if legacy_lookup is not None and not (fact and fact.covered):
         legacy_value = legacy_lookup(question_text)
         if legacy_value is not None:
             # Counted so Phase 5 can tell when the legacy table is unused.
