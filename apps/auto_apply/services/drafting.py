@@ -434,6 +434,12 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         entry["value"] = prior_value
         entry["needs_review"] = False
         entry["reason"] = "carried_forward_from_previous_draft"
+        # The user typed this on the earlier attempt: keep saying so, or the
+        # consensus learner would discard exactly the self-ID answers a retry
+        # carries forward (see apps.accounts.services.learning).
+        for flag in ("user_edited", "remember_declined"):
+            if prior_entry.get(flag):
+                entry[flag] = True
 
 
 def _persist_draft(

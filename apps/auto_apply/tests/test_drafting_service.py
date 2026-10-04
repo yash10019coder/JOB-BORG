@@ -522,6 +522,42 @@ class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
         self.assertFalse(entry["needs_review"])
         self.assertEqual(entry["reason"], "carried_forward_from_previous_draft")
 
+    def test_carry_forward_keeps_the_marker_that_the_user_typed_the_answer(self):
+        schema = self._gender_schema()
+        first = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first.answers["Gender"].update(
+            {"value": "Male", "needs_review": False, "user_confirmed": True, "user_edited": True}
+        )
+        first.status = AutoApplyDraft.Status.FAILED
+        first.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
+        first.save()
+        retry = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertTrue(retry.answers["Gender"]["user_edited"])
+
+    def test_carry_forward_does_not_invent_an_edit_marker(self):
+        schema = self._gender_schema()
+        first = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first.answers["Gender"].update(
+            {"value": "Male", "needs_review": False, "user_confirmed": True}
+        )
+        first.status = AutoApplyDraft.Status.FAILED
+        first.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
+        first.save()
+        retry = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertNotIn("user_edited", retry.answers["Gender"])
+
     def test_confirmed_answer_not_reused_when_no_longer_a_valid_option(self):
         schema = self._gender_schema()
         first_draft = draft_for(
