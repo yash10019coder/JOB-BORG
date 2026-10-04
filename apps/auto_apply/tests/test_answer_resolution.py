@@ -9,6 +9,7 @@ from django.test import TestCase
 
 from apps.auto_apply.llm.base import Question, QuestionAnswer, ResolutionReason
 from apps.auto_apply.models import ExplicitAnswer
+from apps.auto_apply.tests.legacy_seed import seed_explicit_answer
 from apps.auto_apply.services.answer_resolution import (
     PROFILE_FACT_REASON, TYPED_FACT_UNANSWERED_REASON, resolve_field_answers,
 )
@@ -244,7 +245,7 @@ class ExplicitAnswerOptionConstraintTests(TestCase):
         self.profile.save()
 
     def test_explicit_answer_matching_an_option_passes_through(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
             answer_text="Yes",
@@ -265,7 +266,7 @@ class ExplicitAnswerOptionConstraintTests(TestCase):
         self.assertEqual(resolved.reason, "explicit_answer")
 
     def test_explicit_answer_not_in_options_is_treated_as_unanswerable(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
             answer_text="Yes, I am authorized to work without restriction.",
@@ -375,10 +376,10 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         )[0]
 
     def test_each_question_gets_its_own_saved_answer(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
         )
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
         )
 
@@ -386,7 +387,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         self.assertEqual(self._resolve(self.SPONSOR_Q).answer, "No")
 
     def test_saved_sponsorship_answer_is_not_used_for_the_authorization_question(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No, I do not require sponsorship.",
         )
@@ -397,7 +398,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         self.assertTrue(resolved.needs_review)
 
     def test_saved_authorization_answer_is_not_used_for_the_sponsorship_question(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
         )
 
@@ -408,7 +409,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
 
     def test_ambiguous_questions_require_review_despite_saved_answers(self):
         for category in (ExplicitAnswer.Category.WORK_AUTHORIZATION, ExplicitAnswer.Category.SPONSORSHIP):
-            ExplicitAnswer.objects.create(user=self.user, category=category, answer_text="No")
+            seed_explicit_answer(user=self.user, category=category, answer_text="No")
 
         for text in (
             "Do you currently hold H-1B status?",
@@ -505,8 +506,23 @@ class TypedFactResolutionTests(TestCase):
         self.assertIsNone(resolved.answer)
         self.assertTrue(resolved.needs_review)
 
-    def test_a_legacy_explicit_answer_still_answers_when_no_typed_fact_does(self):
-        ExplicitAnswer.objects.create(
+    def test_a_legacy_salary_answer_answers_only_a_job_in_its_own_region(self):
+        seed_explicit_answer(
+            user=self.user,
+            category=ExplicitAnswer.Category.SALARY_EXPECTATION,
+            answer_text="75-100k",
+        )
+
+        us, _ = self._resolve(job=_job("US"))
+        india, _ = self._resolve(job=_job("India"))
+
+        self.assertEqual(us.answer, "$75,000 – $100,000")
+        self.assertEqual(us.reason, "explicit_answer")
+        self.assertIsNone(india.answer)
+        self.assertTrue(india.needs_review)
+
+    def test_a_legacy_salary_answer_with_no_region_never_answers(self):
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SALARY_EXPECTATION,
             answer_text="Negotiable",
@@ -514,8 +530,8 @@ class TypedFactResolutionTests(TestCase):
 
         resolved, _ = self._resolve(job=_job("US"))
 
-        self.assertEqual(resolved.answer, "Negotiable")
-        self.assertEqual(resolved.reason, "explicit_answer")
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
 
     def test_country_picker_is_answered_from_the_profile_and_never_reaches_the_llm(self):
         self.profile.location_country = "IND"
@@ -614,7 +630,7 @@ class AnswerBankResolutionTests(TestCase):
         )[0]
 
     def test_user_answer_bank_row_beats_the_legacy_explicit_answer(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="Yes",
@@ -660,7 +676,7 @@ class AnswerBankResolutionTests(TestCase):
         self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
 
     def test_without_a_bank_row_the_legacy_path_is_unchanged(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -673,8 +689,8 @@ class AnswerBankResolutionTests(TestCase):
         self.assertFalse(resolved.needs_review)
         self.assertIsNone(resolved.provenance)
 
-    def test_a_profile_less_call_still_resolves_legacy_answers(self):
-        ExplicitAnswer.objects.create(
+    def test_a_profile_less_call_has_no_saved_answers_to_use(self):
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -683,7 +699,10 @@ class AnswerBankResolutionTests(TestCase):
         resolved = resolve_field_answers(
             self.user, [Question(id=text, text=text)], "", None, FakeLLMClient()
         )[0]
-        self.assertEqual(resolved.answer, "No")
+        # Saved answers live on the profile now; without one there is nothing
+        # to read, and a hard-excluded question is left for the user.
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
 
 
 class AnswerBankSingleQueryTests(TestCase):
@@ -713,7 +732,7 @@ class NegatedSponsorshipQuestionTests(TestCase):
 
     def test_saved_sponsorship_answer_is_not_used_for_a_negated_question(self):
         user = User.objects.create_user(username="finn", password="pw", email="f@example.com")
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
         )
         profile = user.profile

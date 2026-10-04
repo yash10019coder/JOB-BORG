@@ -2,14 +2,17 @@
 
 ``resolve_answer`` looks up the answer to one application question and says
 where it came from and whether the user still has to confirm it before it may
-be submitted. Resolution order today:
+be submitted. Resolution order:
 
-1. ``AnswerBank`` row for the normalized question key.
-2. The injected ``legacy_lookup`` (the old ``ExplicitAnswer`` table, supplied
-   by ``apps.auto_apply`` so this module never imports it).
-
-Typed Profile facts (visa / citizenship / salary by region) join the front of
-that order in Phase 2; ``job`` is accepted now so the signature is stable.
+1. Typed Profile facts (:mod:`apps.accounts.services.typed_facts`): per-country
+   work authorization and sponsorship, citizenship, salary by the job's region
+   and the contact/location facts -- the user's own settings, always first.
+2. ``AnswerBank`` row for the normalized question key. Location-sensitive
+   questions (relocation, on-site) use only a row saved for the job's region
+   or one marked "applies everywhere". Stored values are mapped onto the live
+   form's options, never guessed.
+3. The ``legacy:*`` rows backfilled from the old ``ExplicitAnswer`` table --
+   but only when no typed fact covers the question.
 
 The question's risk tier is recomputed on every call and the riskier of the
 stored and computed tier wins, so a classifier fix takes effect on rows that
@@ -26,7 +29,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -280,15 +283,19 @@ def _legacy_row(profile, question_text, job, options, bank_rows, computed_tier, 
         value = _map_to_options(row.value, options)
     else:
         return None  # the old answer was "other": it never answered anything
-    if value is None:
-        return None
-    # Counted so Phase 5 can tell when the legacy rows are unused.
-    logger.info(
-        "answer_resolver.legacy_fallback_hit",
-        extra={"profile_id": profile.pk, "question_key": lkey},
-    )
     provenance = _bank_provenance(row)
     provenance["origin"] = "legacy_explicit_answer"
+    if value is None:
+        # The user did answer this, but it does not fit this form's options:
+        # report that (blank for review) rather than letting a looser source
+        # answer a question they have already addressed.
+        provenance["unmapped_value"] = row.value
+    else:
+        # Counted so Phase 5 can tell when the legacy rows are unused.
+        logger.info(
+            "answer_resolver.legacy_fallback_hit",
+            extra={"profile_id": profile.pk, "question_key": lkey},
+        )
     return ResolvedValue(
         value=value,
         provenance=provenance,
@@ -303,7 +310,6 @@ def resolve_answer(
     job=None,
     *,
     options=(),
-    legacy_lookup: Callable[[str], Any] | None = None,
     bank_rows: dict | None = None,
     strip_employer: bool = True,
     now=None,
@@ -321,8 +327,7 @@ def resolve_answer(
     stored answer exists but does not fit this form's options.
 
     ``bank_rows`` is an optional :func:`load_bank_rows` preload; when given, no
-    per-question query is made. ``legacy_lookup`` is the pre-backfill
-    ``ExplicitAnswer`` hook, kept until that table is retired.
+    per-question query is made.
     """
     now = now or timezone.now()
     options = tuple(options or ())
@@ -357,26 +362,6 @@ def resolve_answer(
         if found is not None:
             return found
 
-    if legacy_lookup is not None and not (fact and fact.covered):
-        legacy_value = legacy_lookup(question_text)
-        if legacy_value is not None:
-            # Counted so Phase 5 can tell when the legacy table is unused.
-            logger.info(
-                "answer_resolver.legacy_fallback_hit",
-                extra={"profile_id": getattr(profile, "pk", None), "question_key": key},
-            )
-            return ResolvedValue(
-                value=legacy_value,
-                provenance={
-                    "origin": "legacy_explicit_answer",
-                    "source": AnswerBank.Source.USER,
-                    "locked": False,
-                    "confidence": 1.0,
-                    "detail": {},
-                },
-                needs_confirmation=False,
-                tier=computed_tier,
-            )
     return None
 
 

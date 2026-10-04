@@ -159,36 +159,22 @@ class ResolveAnswerTests(_Base):
 
 
 class LegacyFallbackTests(_Base):
-    def test_legacy_is_used_only_when_answer_bank_misses(self):
-        calls = []
+    """The legacy rows are the last resort; the module boundary is checked here."""
 
-        def legacy(text):
-            calls.append(text)
-            return "legacy"
-
-        resolved = resolve_answer(self.profile, SPONSOR_Q, legacy_lookup=legacy)
-        self.assertEqual(resolved.value, "legacy")
-        self.assertEqual(resolved.provenance["origin"], "legacy_explicit_answer")
-        self.assertFalse(resolved.needs_confirmation)
-
+    def test_a_bank_row_beats_a_legacy_row(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "No", answer_bool=False)
         write_answer(self.profile, SPONSOR_Q, "bank", "user")
-        calls.clear()
-        resolved = resolve_answer(self.profile, SPONSOR_Q, legacy_lookup=legacy)
-        self.assertEqual(resolved.value, "bank")
-        self.assertEqual(calls, [])
+        resolved = resolve_answer(self.profile, SPONSOR_Q, _job("US"))
+        self.assertEqual((resolved.value, resolved.provenance["origin"]), ("bank", "answer_bank"))
 
-    def test_expired_row_falls_through_to_legacy(self):
-        row = write_answer(self.profile, PYTHON_Q, "7", "user").row
+    def test_expired_bank_row_falls_through_to_the_legacy_row(self):
+        row = write_answer(self.profile, SPONSOR_Q, "bank", "user").row
         AnswerBank.objects.filter(pk=row.pk).update(expires_at=timezone.now() - timedelta(days=1))
-        resolved = resolve_answer(self.profile, PYTHON_Q, legacy_lookup=lambda t: "legacy")
-        self.assertEqual(resolved.value, "legacy")
-
-    def test_a_hit_is_logged_and_a_miss_is_not(self):
-        with self.assertLogs(answer_resolver.logger, "INFO") as logs:
-            resolve_answer(self.profile, SPONSOR_Q, legacy_lookup=lambda t: "x")
-        self.assertIn("legacy_fallback_hit", logs.output[0])
-        with self.assertNoLogs(answer_resolver.logger, "INFO"):
-            resolve_answer(self.profile, SPONSOR_Q, legacy_lookup=lambda t: None)
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "No", answer_bool=False)
+        resolved = resolve_answer(self.profile, SPONSOR_Q, _job("US"), options=("Yes", "No"))
+        self.assertEqual(
+            (resolved.value, resolved.provenance["origin"]), ("No", "legacy_explicit_answer")
+        )
 
     def test_resolver_module_does_not_import_auto_apply(self):
         tree = ast.parse(Path(answer_resolver.__file__).read_text())
@@ -693,10 +679,11 @@ class LegacyRowTests(_Base):
         self.assertEqual(
             resolve_answer(self.profile, self.SPONSOR_Q, _job("US")).value, "Not at the moment"
         )
-        # Free text that fits none of the form's options is not guessed.
-        self.assertIsNone(
-            resolve_answer(self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No"))
-        )
+        # Free text that fits none of the form's options is not guessed: the
+        # answer exists but comes back unmapped (blank for review).
+        unmapped = resolve_answer(self.profile, self.SPONSOR_Q, _job("US"), options=("Yes", "No"))
+        self.assertIsNone(unmapped.value)
+        self.assertEqual(unmapped.provenance["unmapped_value"], "Not at the moment")
 
     def test_a_salary_row_answers_only_a_job_in_its_own_region(self):
         _legacy_row(

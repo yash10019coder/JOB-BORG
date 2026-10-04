@@ -23,6 +23,8 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
 )
 from apps.auto_apply.llm.base import QuestionAnswer
 from apps.auto_apply.models import AutoApplyDraft, ExplicitAnswer
+from apps.accounts.models import AnswerBank
+from apps.auto_apply.tests.legacy_seed import seed_explicit_answer
 from apps.auto_apply.services.drafting import draft_for
 from apps.employers.models import Employer
 from apps.jobs.models import Job
@@ -234,7 +236,7 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         # question is now validated against the field's real options
         # exactly like an LLM answer (see answer_resolution's
         # _enforce_option_constraint), so the fixture must be a real option.
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -936,7 +938,8 @@ class DraftingBoundaryTests(DraftingServiceTestCase):
         for saved, question in ((ExplicitAnswer.Category.WORK_AUTHORIZATION, "Require sponsorship?"), (ExplicitAnswer.Category.SPONSORSHIP, "Authorized to work?")):
             with self.subTest(saved=saved):
                 ExplicitAnswer.objects.all().delete()
-                ExplicitAnswer.objects.create(user=self.user, category=saved, answer_text="Yes")
+                AnswerBank.objects.all().delete()  # the previous subtest's backfilled row
+                seed_explicit_answer(user=self.user, category=saved, answer_text="Yes")
                 client = FakeLLMClient()
                 answer = resolve_field_answers(self.user, [Question("q", question)], "", self.profile, client)[0]
                 self.assertIsNone(answer.answer)
@@ -1003,7 +1006,7 @@ class AnswerBankDraftingTests(DraftingServiceTestCase):
         self.assertFalse(entry["needs_confirmation"])
 
     def test_answers_without_a_bank_row_keep_the_old_entry_shape(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
             answer_text="Yes",

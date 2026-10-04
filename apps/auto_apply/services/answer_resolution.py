@@ -1,18 +1,15 @@
-"""Explicit-answer lookup layered in front of U4's LLM-based `resolve_answers`.
+"""Caller-side answer resolution layered in front of U4's LLM-based
+`resolve_answers`.
 
-`apps.auto_apply.llm.base.resolve_answers()` deliberately does not consult
-`ExplicitAnswer` -- its own docstring says as much: "this does not consult
-`ExplicitAnswer` records (owned by a separate implementation unit) --
-callers that want the explicit-answer override layered in front of LLM
-inference filter their question list accordingly before calling this."
-
-This module is that caller-side layer (U6, per R5/R9): for each rendered
-question, a saved `ExplicitAnswer` -- if the question's classified category
-maps onto one the user has -- always wins over LLM inference, and the LLM
-client is never consulted for that question. Only questions with no
-matching explicit answer are handed to `resolve_answers()`, preserving that
-function's category hard-exclusion / groundedness / confidence gating and
-its one-call-per-batch behavior for the remainder.
+`apps.auto_apply.llm.base.resolve_answers()` deliberately consults no stored
+answers: callers layer the user's own answers in front of LLM inference and
+filter their question list before calling it. This module is that layer (U6,
+per R5/R9, extended for the Profile Overhaul): every question goes through
+`apps.accounts.services.answer_resolver.resolve_answer` -- typed profile
+facts, then saved AnswerBank answers (including the backfilled legacy
+`ExplicitAnswer` rows) -- and only what that cannot answer is handed to
+`resolve_answers()`, preserving its category hard-exclusion / groundedness /
+confidence gating and its one-call-per-batch behavior for the remainder.
 """
 from __future__ import annotations
 
@@ -23,11 +20,10 @@ from apps.auto_apply.llm.base import (
     ResolvedAnswer,
     resolve_answers,
 )
-from apps.accounts.question_semantics import AuthKind, authorization_kind, blocks_llm
+from apps.accounts.question_semantics import blocks_llm
 from apps.accounts.services.answer_resolver import load_bank_rows, resolve_answer
 from apps.auto_apply.greenhouse_form.field_mapping import TEXTAREA
-from apps.auto_apply.llm.categories import QuestionCategory, classify
-from apps.auto_apply.models import ExplicitAnswer
+from apps.auto_apply.llm.categories import classify
 
 # A reason string for answers sourced from ExplicitAnswer -- not part of
 # `llm.base.ResolutionReason`, which only enumerates LLM-orchestration
@@ -42,42 +38,6 @@ PROFILE_FACT_REASON = "profile_fact"
 # guessed by the LLM.
 TYPED_FACT_UNANSWERED_REASON = "typed_fact_unanswered"
 ANSWER_BANK_REASON = "answer_bank"
-
-# Which ExplicitAnswer.Category values satisfy a question classified into a
-# given QuestionCategory (categories.py). Only categories with a real
-# analog in ExplicitAnswer.Category are mapped here -- QuestionCategory.
-# GENERIC and the hard-excluded categories with no ExplicitAnswer analog
-# (LEGAL_ATTESTATION, BACKGROUND_CHECK) simply fall through to
-# resolve_answers(), which already routes them to needs_review the same way
-# it always has (hard-exclusion for the latter two, LLM inference for the
-# former).
-_CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
-    QuestionCategory.WORK_AUTHORIZATION: (
-        ExplicitAnswer.Category.WORK_AUTHORIZATION,
-    ),
-    QuestionCategory.SALARY_EXPECTATION: (ExplicitAnswer.Category.SALARY_EXPECTATION,),
-}
-
-
-def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
-    """Which `ExplicitAnswer` categories may answer this question.
-
-    Both "Are you authorized to work?" and "Will you require visa
-    sponsorship?" classify as WORK_AUTHORIZATION, but their answers are not
-    interchangeable -- "No" to one means the opposite of "No" to the other, so
-    a saved answer for the wrong sub-category must never be used. Split them by
-    question wording; ambiguous status questions and combined questions
-    require human review.
-    """
-    if category == QuestionCategory.WORK_AUTHORIZATION:
-        kind = authorization_kind(question_text)
-        if kind == AuthKind.SPONSORSHIP:
-            return (ExplicitAnswer.Category.SPONSORSHIP,)
-        if kind == AuthKind.AUTHORIZATION:
-            return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
-        return ()
-    return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
-
 
 def resolve_field_answers(
     user,
@@ -107,19 +67,6 @@ def resolve_field_answers(
     if not questions:
         return []
 
-    explicit_by_category = {
-        answer.category: answer for answer in ExplicitAnswer.objects.filter(user=user)
-    }
-
-    def legacy_lookup(question_text):
-        """The old ExplicitAnswer table, handed to the resolver as its last
-        resort so `apps.accounts` never imports `apps.auto_apply`."""
-        category = classify(question_text)
-        for candidate_category in _explicit_categories_for(question_text, category):
-            if candidate_category in explicit_by_category:
-                return explicit_by_category[candidate_category].answer_text
-        return None
-
     resolved: dict[str, ResolvedAnswer] = {}
     remaining: list[Question] = []
     # One query for the whole draft instead of one per question.
@@ -132,7 +79,6 @@ def resolve_field_answers(
             question.text,
             job,
             options=question.options,
-            legacy_lookup=legacy_lookup,
             bank_rows=bank_rows,
             strip_employer=question.field_type != TEXTAREA,
         )
