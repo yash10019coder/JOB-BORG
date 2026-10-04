@@ -376,6 +376,21 @@ def resolve_answer(
     return None
 
 
+def would_refuse(existing, source, now=None):
+    """Whether ``write_answer`` would refuse ``source`` over ``existing``.
+
+    The user always wins; anyone else loses to an unexpired row of higher
+    precedence or a locked one. Exposed so callers (the learner's dry run) can
+    ask without writing.
+    """
+    source = AnswerBank.Source(source)
+    if existing is None or source == AnswerBank.Source.USER:
+        return False
+    if _is_expired(existing, now or timezone.now()):
+        return False
+    return SOURCE_RANK[source] < _rank(existing) or existing.is_locked
+
+
 def _locked_row(profile, key, scope_region=""):
     return (
         AnswerBank.objects.select_for_update()
@@ -462,9 +477,8 @@ def write_answer(
                 if existing is None:
                     raise
 
-        if source != AnswerBank.Source.USER and not _is_expired(existing, now):
-            if SOURCE_RANK[source] < _rank(existing) or existing.is_locked:
-                return WriteResult(False, existing)
+        if would_refuse(existing, source, now):
+            return WriteResult(False, existing)
 
         AnswerBankHistory.objects.create(
             profile=profile,
