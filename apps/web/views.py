@@ -33,6 +33,7 @@ from apps.auto_apply.services.confirmation import (
     is_blank_answer_value,
     unconfirmed_fields,
 )
+from apps.accounts.tasks import learn_for_profile_task
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
@@ -732,6 +733,10 @@ def send_auto_apply_draft(request, pk):
         # What is being submitted, recorded in the same transaction as the
         # transition so a lost race records nothing.
         answer_memory.record_observations(draft)
+        # Learn from what was just recorded, but only once it is committed:
+        # a worker must never run before the observations are visible.
+        profile_id = draft.user.profile.pk
+        transaction.on_commit(lambda: learn_for_profile_task.delay(profile_id))
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")

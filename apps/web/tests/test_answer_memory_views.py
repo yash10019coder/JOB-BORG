@@ -4,7 +4,7 @@ from unittest import mock
 
 from django.urls import reverse
 
-from apps.accounts.models import AnswerBank, AnswerObservation
+from apps.accounts.models import AnswerBank, AnswerObservation, ProfileSuggestion
 from apps.accounts.services.answer_resolver import write_answer
 from apps.auto_apply.greenhouse_form.field_mapping import (
     FILE, SINGLE_SELECT, TEXT, TEXTAREA, FormField, FormSchema,
@@ -442,3 +442,59 @@ class LearnedAnswersAreHeldTests(_MemoryBase):
         self.profile.save(update_fields=["learning_enabled"])
         draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
         self.assertNotEqual(draft.answers[HEARD]["value"], "Referral")
+
+
+class LearningTriggerTests(_MemoryBase):
+    def send(self, draft):
+        with mock.patch("apps.web.views.submit_auto_apply_draft"):
+            return self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+    def test_sending_schedules_the_learner_only_after_commit(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        with mock.patch("apps.web.views.learn_for_profile_task") as task:
+            with self.captureOnCommitCallbacks() as callbacks:
+                self.send(draft)
+            task.delay.assert_not_called()  # nothing runs before the commit hooks
+            for callback in callbacks:
+                callback()
+        task.delay.assert_called_once_with(self.profile.pk)
+
+    def test_a_refused_send_schedules_nothing(self):
+        write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        with mock.patch("apps.web.views.learn_for_profile_task") as task:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        task.delay.assert_not_called()
+
+    def test_two_employers_giving_the_same_answer_make_the_next_draft_prefilled_and_held(self):
+        """End to end through the real views and (eager) Celery."""
+        notice = "What is your notice period?"  # T1: no pre-ticked remember box
+        for n in range(2):
+            employer = Employer.objects.create(name=f"N{n}", slug=f"n{n}")
+            draft = self.draft(self.job_in(employer=employer), (notice, TEXT, ()))
+            self.review(draft, {notice: "2 weeks"})
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        row = self.row(notice)
+        self.assertEqual((row.value, row.source, row.is_locked), ("2 weeks", "learned", False))
+        self.assertEqual(ProfileSuggestion.objects.get().status, "pending")
+
+        third = Employer.objects.create(name="Gamma", slug="gamma")
+        draft = self.draft(self.job_in(employer=third), (notice, TEXT, ()))
+        entry = draft.answers[notice]
+        self.assertEqual(entry["value"], "2 weeks")
+        self.assertTrue(entry["needs_confirmation"])
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_not_called()  # learned, so held until confirmed
+
+    def test_declining_to_remember_a_t2_answer_keeps_it_out_of_learning(self):
+        for n in range(2):
+            employer = Employer.objects.create(name=f"D{n}", slug=f"d{n}")
+            draft = self.draft(self.job_in(employer=employer), (HEARD, TEXT, ()))
+            self.review(draft, {HEARD: "A friend"})  # pre-ticked box left unticked
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        self.assertEqual(AnswerBank.objects.count(), 0)

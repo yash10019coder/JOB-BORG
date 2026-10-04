@@ -15,9 +15,11 @@ structure) independent of content type.
 """
 import logging
 import os
+from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -128,3 +130,56 @@ def parse_resume(profile_id):
 
     profile.resume_text = extract_resume_text(profile.resume)
     profile.save(update_fields=["resume_text", "updated_at"])
+
+
+@shared_task(name="apps.accounts.learn_for_profile")
+def learn_for_profile_task(profile_id):
+    """Run the consensus learner for one profile (idempotent).
+
+    Enqueued from the send view once the application's observations are
+    committed, and reused by the nightly sweep.
+    """
+    from .models import Profile
+    from .services.learning import learn_for_profile
+
+    try:
+        profile = Profile.objects.get(pk=profile_id)
+    except Profile.DoesNotExist:
+        logger.warning("learn_for_profile: profile %s no longer exists", profile_id)
+        return None
+    report = learn_for_profile(profile)
+    return {
+        "written": len(report.written),
+        "withdrawn": len(report.withdrawn),
+        "suggested": len(report.suggested),
+        "expired": report.expired,
+    }
+
+
+@shared_task(name="apps.accounts.sweep_learning")
+def sweep_learning():
+    """Nightly safety net: learn for profiles with recent evidence, and expire
+    stale suggestions. A failing profile is logged and never aborts the batch."""
+    from .models import AnswerObservation, ProfileSuggestion
+    from .services.learning import learn_for_profile, suggestion_ttl
+
+    now = timezone.now()
+    recent = AnswerObservation.objects.filter(
+        user_edited=True, created_at__gte=now - timedelta(hours=25)
+    ).values_list("profile_id", flat=True)
+    stale = ProfileSuggestion.objects.filter(
+        status=ProfileSuggestion.Status.PENDING, created_at__lt=now - suggestion_ttl()
+    ).values_list("profile_id", flat=True)
+    profile_ids = sorted(set(recent) | set(stale))[: settings.LEARNING_SWEEP_BATCH_SIZE]
+
+    from .models import Profile
+
+    done = failed = 0
+    for profile in Profile.objects.filter(pk__in=profile_ids):
+        try:
+            learn_for_profile(profile)
+            done += 1
+        except Exception:  # noqa: BLE001 -- one profile must not stop the batch
+            logger.exception("sweep_learning: profile %s failed", profile.pk)
+            failed += 1
+    return {"profiles": done, "failed": failed}
