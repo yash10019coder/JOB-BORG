@@ -298,8 +298,16 @@ class PanelPageTests(QuickFillTests):
     def test_settings_backed_rows_link_to_the_setting_not_to_quick_fill(self):
         self.make(FormField(AUTH, SINGLE_SELECT, True, ("Yes", "No")))
         page = self.client.get(reverse("profile_answers"))
-        self.assertContains(page, 'href="#work-auth"')
+        self.assertContains(page, '<a href="#work-auth">Set it up</a>')
         self.assertNotContains(page, reverse("quick_fill") + "?draft=")
+
+    def test_answered_settings_rows_link_to_the_setting_to_change_it(self):
+        self.profile.visa_status_by_country = {"USA": "citizen"}
+        self.profile.save()
+        self.make(FormField(AUTH, SINGLE_SELECT, True, ("Yes", "No")))
+        page = self.client.get(reverse("profile_answers"))
+        self.assertContains(page, "answered by your settings")
+        self.assertContains(page, '<a href="#work-auth">Change</a>')
 
     def test_an_empty_panel_says_so(self):
         self.assertContains(self.client.get(reverse("profile_answers")), "Nothing yet")

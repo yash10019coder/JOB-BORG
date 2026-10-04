@@ -53,7 +53,7 @@ class ProfileAdmin(admin.ModelAdmin):
             # Save every other field first (this also creates the row on the
             # add view), then apply the resume change through set_resume() --
             # which only saves resume fields -- so nothing else edited in the
-            # same submit is silently dropped. Mirrors ProfileForm.save().
+            # same submit is silently dropped. Mirrors ProfileSearchForm.save().
             new_resume = form.cleaned_data.get("resume")
             obj.resume = form.initial.get("resume") or None
             super().save_model(request, obj, form, change)

@@ -18,8 +18,8 @@
                     <td>
                         {% if row.quick_fill %}
                         <a class="btn" href="{% url 'quick_fill' %}?draft={{ row.quick_fill.draft }}&field={{ row.quick_fill.field }}">Quick-fill</a>
-                        {% elif row.anchor and not row.answered %}
-                        <a href="#{{ row.anchor }}">Set it up</a>
+                        {% elif row.anchor %}
+                        <a href="#{{ row.anchor }}">{% if row.answered %}Change{% else %}Set it up{% endif %}</a>
                         {% endif %}
                     </td>
                 </tr>
