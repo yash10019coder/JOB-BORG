@@ -29,6 +29,7 @@ from apps.auto_apply.models import AutoApplyDraft
 from apps.auto_apply.services import answer_memory
 from apps.auto_apply.services.confirmation import (
     build_submit_snapshot,
+    confirm_entry,
     is_blank_answer_value,
     unconfirmed_fields,
 )
@@ -596,24 +597,20 @@ def edit_auto_apply_draft(request, pk):
             # what drafting put there): the only reliable sign that an answer
             # is theirs, since `user_confirmed` is set by any save.
             answers[label]["user_edited"] = True
+        offered = answer_memory.remember_ui(label, answers[label], draft.job)
+        if offered:
+            # An unticked, pre-ticked box is an explicit "do not remember this":
+            # the consensus learner must not learn it either.
+            answers[label]["remember_declined"] = bool(
+                offered["checked"] and remember_field not in request.POST
+            )
         answers[label]["value"] = cleaned
         if answers[label].get("needs_confirmation"):
             # A learned/imported legal or commercial answer is only ever
             # confirmed by an explicit, per-field action -- saving the form
             # (which re-posts every value) must not count as one.
             if confirm_field in request.POST and not is_blank_answer_value(cleaned):
-                entry = answers[label]
-                entry["confirmed_from"] = entry.get("provenance")
-                entry["provenance"] = {
-                    "origin": "draft_review",
-                    "source": "user",
-                    "locked": False,
-                    "confidence": 1.0,
-                    "detail": {},
-                }
-                entry["needs_confirmation"] = False
-                entry["needs_review"] = False
-                entry["user_confirmed"] = True
+                confirm_entry(answers[label])
             else:
                 answers[label]["needs_review"] = True
                 answers[label]["user_confirmed"] = False

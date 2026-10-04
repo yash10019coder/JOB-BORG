@@ -1,7 +1,11 @@
 from django.test import SimpleTestCase
 
 from apps.accounts.tiering import TIERING_VERSION
-from apps.auto_apply.services.confirmation import build_submit_snapshot, unconfirmed_fields
+from apps.auto_apply.services.confirmation import (
+    build_submit_snapshot,
+    confirm_entry,
+    unconfirmed_fields,
+)
 
 
 def _entry(**overrides):
@@ -57,3 +61,22 @@ class BuildSubmitSnapshotTests(SimpleTestCase):
 
     def test_skips_malformed_entries(self):
         self.assertEqual(build_submit_snapshot({"bad": 1})["answers"], {})
+
+
+class ConfirmEntryTests(SimpleTestCase):
+    def test_confirming_clears_the_hold_and_keeps_the_old_provenance(self):
+        held = {"origin": "answer_bank", "source": "learned"}
+        entry = _entry(provenance=held)
+        confirm_entry(entry)
+        self.assertFalse(entry["needs_confirmation"])
+        self.assertFalse(entry["needs_review"])
+        self.assertTrue(entry["user_confirmed"])
+        self.assertEqual(entry["confirmed_from"], held)
+        self.assertEqual(entry["provenance"]["origin"], "draft_review")
+        self.assertEqual(entry["provenance"]["source"], "user")
+        self.assertEqual(unconfirmed_fields({"Q": entry}), [])
+
+    def test_origin_distinguishes_bulk_confirmation(self):
+        entry = _entry()
+        confirm_entry(entry, origin="draft_review_bulk")
+        self.assertEqual(entry["provenance"]["origin"], "draft_review_bulk")

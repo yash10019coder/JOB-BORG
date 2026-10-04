@@ -327,6 +327,15 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             entry["needs_confirmation"] = resolved_answer.needs_confirmation
             entry["provenance"] = resolved_answer.provenance
             entry["tier"] = resolved_answer.tier
+            provenance = resolved_answer.provenance
+            if (
+                provenance.get("origin") == "answer_bank"
+                and provenance.get("source") == "learned"
+                and not invalid_option
+            ):
+                # What the learner prefilled, kept even if the user changes it:
+                # the shadow metrics compare it with what was submitted.
+                entry["learned_value"] = value
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
 

@@ -299,13 +299,68 @@ class ObservationTests(_MemoryBase):
         self.assertEqual(heard.profile, self.profile)
 
     def test_observations_carry_the_provenance_of_what_was_submitted(self):
-        write_answer(self.profile, HEARD, "Referral", "learned")
+        write_answer(self.profile, HEARD, "Referral", "imported")
         draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
         self.send(draft)
         observation = AnswerObservation.objects.get()
-        self.assertEqual(observation.provenance_source, "learned")
+        self.assertEqual(observation.provenance_source, "imported")
         self.assertEqual(observation.provenance_origin, "answer_bank")
         self.assertFalse(observation.user_confirmed)
+        self.assertFalse(observation.user_edited)
+        self.assertIsNone(observation.learned_value)
+
+    def test_a_confirmed_learned_prefill_records_what_was_prefilled_and_no_edit(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, confirm={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertEqual(observation.learned_value, "Referral")
+        self.assertEqual(observation.value, "Referral")
+        self.assertTrue(observation.user_confirmed)
+        self.assertFalse(observation.user_edited)
+
+    def test_changing_a_learned_prefill_keeps_the_prefill_and_marks_the_edit(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, confirm={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertEqual((observation.value, observation.learned_value), ("LinkedIn", "Referral"))
+        self.assertTrue(observation.user_edited)
+
+    def test_a_typed_answer_is_marked_edited(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, remember={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertTrue(observation.user_edited)
+        self.assertFalse(observation.remember_declined)
+
+    def test_unticking_the_preticked_t2_box_is_recorded_as_declined(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})  # box not posted = unticked
+        self.send(draft)
+        self.assertTrue(AnswerObservation.objects.get().remember_declined)
+
+    def test_a_legal_answer_without_the_always_box_is_not_a_decline(self):
+        """T0 offers "Always use this answer" unticked by default: leaving it
+        so is not a refusal to be remembered."""
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {AUTH: "Yes"})
+        self.send(draft)
+        observation = AnswerObservation.objects.get(question_text=AUTH)
+        self.assertTrue(observation.user_edited)
+        self.assertFalse(observation.remember_declined)
+
+    def test_an_unedited_llm_value_is_not_marked_edited(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        draft.answers[HEARD].update({"value": "A job board", "needs_review": False})
+        draft.save()
+        self.review(draft, remember={HEARD})  # re-posts the value untouched
+        self.send(draft)
+        self.assertFalse(AnswerObservation.objects.get().user_edited)
+
 
     def test_blank_standard_and_file_fields_are_not_observed(self):
         draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
@@ -350,3 +405,40 @@ class ObservationTests(_MemoryBase):
         self.review(draft, {ESSAY: "Because"})
         self.send(draft)
         self.assertIn("acme", AnswerObservation.objects.get().question_key)
+
+
+class LearnedAnswersAreHeldTests(_MemoryBase):
+    """NFR2 extended: a learned answer of ANY tier is never sent unreviewed."""
+
+    def test_a_learned_t2_answer_is_prefilled_but_blocks_sending_until_confirmed(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        entry = draft.answers[HEARD]
+        self.assertEqual(entry["value"], "Referral")
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertEqual(entry["learned_value"], "Referral")
+
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_not_called()
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+
+        self.review(draft, confirm={HEARD})
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_called_once()
+
+    def test_saving_the_form_alone_never_confirms_a_learned_answer(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft)
+        draft.refresh_from_db()
+        self.assertTrue(draft.answers[HEARD]["needs_confirmation"])
+
+    def test_turning_learning_off_stops_the_prefill(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        self.profile.learning_enabled = False
+        self.profile.save(update_fields=["learning_enabled"])
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.assertNotEqual(draft.answers[HEARD]["value"], "Referral")
