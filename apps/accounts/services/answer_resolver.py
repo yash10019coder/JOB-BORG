@@ -305,9 +305,14 @@ def resolve_answer(
     options=(),
     legacy_lookup: Callable[[str], Any] | None = None,
     bank_rows: dict | None = None,
+    strip_employer: bool = True,
     now=None,
 ):
     """Return a :class:`ResolvedValue`, or ``None`` if nothing is known.
+
+    ``strip_employer=False`` keeps the employer's name in the key: for a
+    narrative (long-text) question the answer is about *this* employer and must
+    never be matched to another's.
 
     Order: typed Profile facts, then AnswerBank (region-aware), then the
     backfilled legacy rows -- but legacy only when no typed fact covers the
@@ -321,7 +326,9 @@ def resolve_answer(
     """
     now = now or timezone.now()
     options = tuple(options or ())
-    key = normalize_question_key(question_text, _employer_name(job))
+    key = normalize_question_key(
+        question_text, _employer_name(job) if strip_employer else None
+    )
     computed_tier = classify_tier(question_text)
 
     fact = typed_facts.resolve(profile, question_text, options=options, job=job)

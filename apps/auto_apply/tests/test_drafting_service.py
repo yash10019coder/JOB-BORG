@@ -1017,55 +1017,57 @@ class AnswerBankDraftingTests(DraftingServiceTestCase):
             self.assertNotIn(key, entry)
 
 
-class SalaryRegionOverrideProvenanceTests(DraftingServiceTestCase):
-    """The profile's salary band replaces an AnswerBank salary answer, so the
-    entry must stop claiming that row's provenance and stop being held for
-    confirmation (CodeRabbit finding on PR #125)."""
+class RegionalSalaryDraftTests(DraftingServiceTestCase):
+    """The profile's salary band answers a salary question straight from the
+    resolver, using the job's own country (`Job.location_country`)."""
 
     QUESTION = "What is your desired salary?"
 
-    def _draft(self):
-        from apps.accounts.services.answer_resolver import write_answer
-
-        self.job.target_locations_normalized = [{"raw": "NYC", "country": "United States"}]
-        self.job.save()
-        self.profile.salary_by_region = {"US": "75-100k"}
-        self.profile.save()
-        write_answer(self.profile, self.QUESTION, "learned value", "learned")
-        schema = FormSchema(
+    def _schema(self):
+        return FormSchema(
             fields=STANDARD_ONLY_SCHEMA.fields
             + (FormField(label=self.QUESTION, field_type=TEXT, required=True),)
         )
+
+    def _draft(self, country="US", band_region="US", learned=True):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        self.job.location_country = country
+        self.job.save()
+        self.profile.salary_by_region = {band_region: "75-100k"} if band_region else {}
+        self.profile.save()
+        if learned:
+            write_answer(self.profile, self.QUESTION, "learned value", "learned")
         return draft_for(
             self.user, self.job,
-            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
         )
 
-    def test_profile_band_replaces_a_learned_answer_and_its_provenance(self):
+    def test_profile_band_beats_a_learned_answer_and_records_its_provenance(self):
         entry = self._draft().answers[self.QUESTION]
 
         self.assertEqual(entry["value"], "$75,000 – $100,000")
-        self.assertEqual(entry["reason"], "profile_derived_region")
+        self.assertEqual(entry["reason"], "profile_fact")
         self.assertFalse(entry["needs_review"])
         self.assertFalse(entry["needs_confirmation"])
-        self.assertEqual(entry["provenance"]["origin"], "profile.salary_by_region")
+        self.assertEqual(entry["provenance"]["origin"], "profile.salary_by_region.US")
         self.assertEqual(entry["provenance"]["source"], "user")
-        self.assertEqual(entry["provenance"]["detail"], {"region": "US"})
+        self.assertEqual(entry["provenance"]["detail"], {"region": "US", "band": "75-100k"})
 
-    def test_a_draft_without_a_bank_row_keeps_its_old_shape(self):
-        self.job.target_locations_normalized = [{"raw": "NYC", "country": "United States"}]
-        self.job.save()
-        self.profile.salary_by_region = {"US": "75-100k"}
-        self.profile.save()
-        schema = FormSchema(
-            fields=STANDARD_ONLY_SCHEMA.fields
-            + (FormField(label=self.QUESTION, field_type=TEXT, required=True),)
-        )
+    def test_a_job_with_no_country_does_not_crash_and_leaves_the_field_for_review(self):
+        entry = self._draft(country="", learned=False).answers[self.QUESTION]
 
-        entry = draft_for(
-            self.user, self.job,
-            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
-        ).answers[self.QUESTION]
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_a_job_in_a_region_without_a_band_is_not_given_another_regions_band(self):
+        entry = self._draft(country="India", learned=False).answers[self.QUESTION]
+
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_a_draft_with_no_band_and_no_bank_row_keeps_its_old_shape(self):
+        entry = self._draft(band_region=None, learned=False).answers[self.QUESTION]
 
         for key in ("needs_confirmation", "provenance", "tier"):
             self.assertNotIn(key, entry)
