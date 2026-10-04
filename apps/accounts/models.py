@@ -245,6 +245,11 @@ class Profile(models.Model):
     # docs/plans/2026-10-03-2300-consolidated-requirements.md.
     field_provenance = models.JSONField(default=dict, blank=True)
 
+    # Phase 3: when False the consensus learner writes nothing and learned
+    # answers are not used to prefill. Not a matching input, so it must be saved
+    # with ``update_fields`` (see apps.matching.signals).
+    learning_enabled = models.BooleanField(default=True)
+
     remote_pref = models.CharField(
         max_length=16,
         choices=RemotePref.choices,
@@ -597,7 +602,16 @@ class AnswerObservation(models.Model):
     # Where the submitted value came from (provenance of the draft entry).
     provenance_source = models.CharField(max_length=16, blank=True, default="")
     provenance_origin = models.CharField(max_length=64, blank=True, default="")
-    was_edited = models.BooleanField(default=False)
+    # The user saved the review form with this answer (any save sets it; it is
+    # NOT evidence the user wrote the value -- see ``user_edited``).
+    user_confirmed = models.BooleanField(default=False)
+    # The user typed or changed this value (the signal the learner counts).
+    user_edited = models.BooleanField(default=False)
+    # The remember box was offered pre-ticked and the user unticked it.
+    remember_declined = models.BooleanField(default=False)
+    # The learned answer that was prefilled for this question, if any: lets
+    # shadow metrics compare "what the learner would have filled" with ``value``.
+    learned_value = models.JSONField(null=True, blank=True)
     job_id = models.BigIntegerField(null=True, blank=True)
     draft_id = models.BigIntegerField(null=True, blank=True)
     employer_name = models.CharField(max_length=255, blank=True, default="")
@@ -618,3 +632,53 @@ class AnswerObservation(models.Model):
 
     def __str__(self):
         return f"AnswerObservation<{self.profile_id}:{self.question_key}>"
+
+
+class ProfileSuggestion(models.Model):
+    """A learned answer offered to the user for promotion to their own.
+
+    Written by the consensus learner for legal/commercial (T0/T1) answers. A
+    ``rejected`` row also records "do not propose this value again" (keyed by
+    ``value_fingerprint``), including when the user forgets a learned answer.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    value_fingerprint = models.CharField(max_length=40)
+    tier = models.CharField(max_length=16)
+    evidence = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    learner_version = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "question_key", "scope_region", "value_fingerprint"],
+                name="uniq_profilesuggestion_profile_key_scope_value",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "status"], name="psugg_profile_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"ProfileSuggestion<{self.profile_id}:{self.question_key}:{self.status}>"

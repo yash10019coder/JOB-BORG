@@ -292,7 +292,7 @@ class ObservationTests(_MemoryBase):
         self.assertEqual(set(rows), {HEARD, ESSAY})
         heard = rows[HEARD]
         self.assertEqual(
-            (heard.value, heard.tier, heard.field_type, heard.was_edited, heard.job_id,
+            (heard.value, heard.tier, heard.field_type, heard.user_confirmed, heard.job_id,
              heard.draft_id, heard.employer_name, heard.job_region),
             ("LinkedIn", "t2_factual", "text", True, job.pk, draft.pk, "Acme", "US"),
         )
@@ -305,7 +305,7 @@ class ObservationTests(_MemoryBase):
         observation = AnswerObservation.objects.get()
         self.assertEqual(observation.provenance_source, "learned")
         self.assertEqual(observation.provenance_origin, "answer_bank")
-        self.assertFalse(observation.was_edited)
+        self.assertFalse(observation.user_confirmed)
 
     def test_blank_standard_and_file_fields_are_not_observed(self):
         draft = self.draft(self.job_in(), (HEARD, TEXT, ()))

@@ -176,7 +176,7 @@ def record_observations(draft):
                 field_type=entry.get("field_type") or "",
                 provenance_source=provenance.get("source", ""),
                 provenance_origin=str(provenance.get("origin", ""))[:64],
-                was_edited=bool(entry.get("user_confirmed")),
+                user_confirmed=bool(entry.get("user_confirmed")),
                 job_id=draft.job_id,
                 draft_id=draft.pk,
                 employer_name=employer or "",

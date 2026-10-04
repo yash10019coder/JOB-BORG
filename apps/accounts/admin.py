@@ -7,6 +7,7 @@ from .models import (
     AnswerObservation,
     EmailInboxCredential,
     Profile,
+    ProfileSuggestion,
 )
 
 
@@ -113,8 +114,8 @@ class AnswerBankHistoryAdmin(admin.ModelAdmin):
 class AnswerObservationAdmin(admin.ModelAdmin):
     """What users actually submitted: browsable, never editable."""
 
-    list_display = ("profile", "question_key", "tier", "provenance_source", "was_edited", "created_at")
-    list_filter = ("tier", "provenance_source", "was_edited")
+    list_display = ("profile", "question_key", "tier", "provenance_source", "user_edited", "created_at")
+    list_filter = ("tier", "provenance_source", "user_edited")
     search_fields = ("question_key", "profile__user__username")
 
     def has_add_permission(self, request):
@@ -124,4 +125,16 @@ class AnswerObservationAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ProfileSuggestion)
+class ProfileSuggestionAdmin(admin.ModelAdmin):
+    """Learner proposals: browsable, status changes happen through the app."""
+
+    list_display = ("profile", "question_key", "tier", "status", "created_at")
+    list_filter = ("tier", "status")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
         return False
