@@ -37,13 +37,13 @@ from apps.jobs.models import JobSource
 
 from . import answer_resolution
 from .confirmation import is_blank_answer_value
-from apps.web.salary_bands import (
+from apps.accounts.salary_bands import (
     DEFAULT_SALARY_BANDS,
     SALARY_BANDS_BY_REGION,
-    _get_salary_band_label,
+    get_salary_band_label,
     validate_salary_by_region,
 )
-from apps.web.regions import region_for_country
+from apps.accounts.regions import region_for_country
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +353,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
 
         if job_region and job_region in cleaned_salary_by_region:
             band_key = cleaned_salary_by_region[job_region]
-            label = _get_salary_band_label(job_region, band_key)
+            label = get_salary_band_label(job_region, band_key)
 
             # Find the salary_expectation question in answers_payload and override
             for q_label, entry in answers_payload.items():

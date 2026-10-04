@@ -177,7 +177,7 @@ class Profile(models.Model):
     #   visa_status_by_country: {"IND": "citizen", "DEU": "requires_sponsorship"}
     #   citizenship_countries:  ["IND"]  (dual citizens list several)
     #
-    # Keys are ISO 3166-1 alpha-3 (see apps.web.regions for why alpha-3 and
+    # Keys are ISO 3166-1 alpha-3 (see apps.accounts.regions for why alpha-3 and
     # not alpha-2/the engine's canonical name).
     class VisaStatus(models.TextChoices):
         # Country-agnostic, and the only statuses a non-US applicant should
@@ -251,7 +251,7 @@ class Profile(models.Model):
         """``(work_authorization, sponsorship)`` option keys for `country`, or
         ``None`` if this profile says nothing about it.
 
-        `country` may be given in any form :func:`apps.web.regions.region_for_country`
+        `country` may be given in any form :func:`apps.accounts.regions.region_for_country`
         accepts (alpha-3, alpha-2, or the locations engine's canonical name),
         because the caller usually has the last of those off a
         ``Job.target_locations_normalized`` entry.

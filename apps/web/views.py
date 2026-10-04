@@ -34,7 +34,7 @@ from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
-from apps.web.regions import country_choices
+from apps.accounts.regions import country_choices
 
 from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
 

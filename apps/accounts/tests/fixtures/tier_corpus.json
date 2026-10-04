@@ -222,5 +222,29 @@
  {
   "text": "Describe your experience and your desired salary",
   "tier": "t1_commercial"
+ },
+ {
+  "text": "Will you now or in the future require the company to file a petition or application for employment-based status?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "What country are you located in?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Which country do you currently work in?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Where do you currently live?",
+  "tier": "t2_factual"
+ },
+ {
+  "text": "Are you currently located in Argentina, Uruguay or Chile?",
+  "tier": "t0_legal"
+ },
+ {
+  "text": "Are you willing to relocate to another country?",
+  "tier": "t1_commercial"
  }
 ]

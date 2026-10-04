@@ -84,3 +84,40 @@ class LeafModuleTests(SimpleTestCase):
             if isinstance(node, ast.ImportFrom)
         }
         self.assertEqual(imported, {"re"})
+
+
+class TierV2Tests(SimpleTestCase):
+    def test_petition_and_employment_based_status_are_work_authorization(self):
+        text = (
+            "Will you now or in the future require the company to file a petition "
+            "or application for employment-based status?"
+        )
+        self.assertEqual(classify(text), tiering.QuestionCategory.WORK_AUTHORIZATION)
+        self.assertEqual(classify_tier(text), Tier.T0_LEGAL)
+
+    def test_competition_is_not_a_petition(self):
+        self.assertNotEqual(
+            classify("Have you entered a coding competition?"),
+            tiering.QuestionCategory.WORK_AUTHORIZATION,
+        )
+
+    def test_where_the_user_lives_is_a_plain_fact(self):
+        for text in (
+            "What country are you located in?",
+            "Which country do you currently work in?",
+            "Where do you currently live?",
+        ):
+            self.assertEqual(classify_tier(text), Tier.T2_FACTUAL, text)
+
+    def test_location_membership_and_relocation_stay_above_t2(self):
+        self.assertEqual(
+            classify_tier("Are you currently located in Argentina, Uruguay or Chile?"),
+            Tier.T0_LEGAL,
+        )
+        self.assertEqual(
+            classify_tier("Are you willing to relocate to another country?"),
+            Tier.T1_COMMERCIAL,
+        )
+
+    def test_version_was_bumped_with_the_pattern_change(self):
+        self.assertEqual(tiering.TIERING_VERSION, "v2")

@@ -7,8 +7,8 @@ from apps.accounts.services import profile_fields
 from apps.auto_apply.models import ExplicitAnswer
 from apps.locations.engine import CURRENT_LOCATION_ALIAS_VERSION, alpha3_for_country
 from apps.locations.services import normalize_target_locations
-from apps.web.regions import REGION_KEYS, REGION_LABELS, country_choices
-from apps.web.salary_bands import SALARY_BANDS_BY_REGION
+from apps.accounts.regions import REGION_KEYS, REGION_LABELS, country_choices
+from apps.accounts.salary_bands import SALARY_BANDS_BY_REGION
 
 # Profile JSON list-fields edited as comma-separated text in the form.
 _LIST_FIELDS = ("target_titles", "target_tags", "target_locations", "excluded_employers")
@@ -353,7 +353,7 @@ SPONSORSHIP_CHOICES = [
     ("other", "Other"),
 ]
 
-from apps.web.salary_bands import SALARY_BANDS_BY_REGION, DEFAULT_SALARY_BANDS, get_all_band_keys
+from apps.accounts.salary_bands import SALARY_BANDS_BY_REGION, DEFAULT_SALARY_BANDS, get_all_band_keys
 
 
 class ExplicitAnswersForm(forms.Form):
