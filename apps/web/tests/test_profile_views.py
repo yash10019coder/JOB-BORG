@@ -15,7 +15,7 @@ ANSWERS_BASE = {
     "full_name": "", "phone": "", "linkedin_url": "", "github_url": "",
     "portfolio_url": "", "current_employer": "", "location_city": "",
     "location_country": "", "mailing_address": "", "working_timezone": "",
-    "visa_rows_present": "1",
+    "visa_rows_present": "1", "citizenship_rows_present": "1",
 }
 SEARCH_BASE = {
     "headline": "", "target_titles": "", "target_tags": "", "target_locations": "",
@@ -232,7 +232,7 @@ class AnswersSaveTests(_Base):
 
     def test_citizenship_and_salary_round_trip(self):
         self.answers(
-            citizenship_countries=["IND", "USA"],
+            citizenship_countries=["IND", "", "USA", "IND"],  # a blank row and a repeat are dropped
             salary_region_US="75-100k", salary_region_IN="",
         )
         profile = self.refreshed()
@@ -240,6 +240,38 @@ class AnswersSaveTests(_Base):
         self.assertEqual(profile.salary_by_region, {"US": "75-100k"})
         page = self.client.get(reverse("profile_answers"))
         self.assertContains(page, '<option value="75-100k" selected>')
+
+    def test_citizenship_is_one_labelled_row_per_passport_not_a_multi_select(self):
+        self.profile.citizenship_countries = ["IND", "USA"]
+        self.profile.save()
+        page = self.client.get(reverse("profile_answers"))
+        html = page.content.decode()
+        self.assertNotIn("multiple", html.split('id="citizenship"')[1].split('id="salary"')[0])
+        self.assertContains(page, '<option value="IND" selected>')
+        self.assertContains(page, '<option value="USA" selected>')
+        self.assertContains(page, "Add another passport")
+        self.assertContains(page, "Countries whose passports you hold")
+        # two saved rows plus one blank row to add a third without JavaScript
+        self.assertEqual(html.count('class="citizenship-row"'), 3 + 1)  # +1 is the JS template
+
+    def test_a_post_without_the_citizenship_marker_never_wipes_stored_citizenship(self):
+        self.profile.citizenship_countries = ["IND"]
+        self.profile.save()
+        data = {k: v for k, v in ANSWERS_BASE.items() if k != "citizenship_rows_present"}
+        self.client.post(reverse("profile_answers"), data)
+        self.assertEqual(self.refreshed().citizenship_countries, ["IND"])
+
+    def test_removing_every_row_with_the_marker_clears_citizenship(self):
+        self.profile.citizenship_countries = ["IND"]
+        self.profile.save()
+        self.answers(citizenship_countries=[""])
+        self.assertEqual(self.refreshed().citizenship_countries, [])
+
+    def test_an_unknown_citizenship_country_is_rejected_and_rows_are_kept(self):
+        resp = self.answers(citizenship_countries=["IND", "ZZZ"], phone="555")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.refreshed().phone, "")
+        self.assertContains(resp, '<option value="IND" selected>')
 
     def test_per_field_provenance_is_stamped(self):
         self.answers(phone="555-0100", location_country="IND", salary_region_US="75-100k")

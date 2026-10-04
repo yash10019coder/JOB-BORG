@@ -214,7 +214,7 @@ class ProfileFormProvenanceTests(_ProfileTestCase):
             "full_name": "", "phone": "", "linkedin_url": "", "github_url": "",
             "portfolio_url": "", "current_employer": "", "location_city": "",
             "location_country": "", "mailing_address": "", "working_timezone": "",
-            "visa_rows_present": "1",
+            "visa_rows_present": "1", "citizenship_rows_present": "1",
         }
         data.update(overrides)
         self.client.force_login(self.user)

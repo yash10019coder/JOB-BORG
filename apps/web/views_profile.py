@@ -75,6 +75,7 @@ def _answers_context(request, form, custom_form=None):
         "legacy_rows": legacy_rows,
         "conflicts": typed_facts.legacy_conflicts(profile_obj, legacy_rows),
         "visa_rows": form.visa_rows(),
+        "citizenship_rows": form.citizenship_rows(),
         "country_choices": country_choices(),
         "visa_status_choices": Profile.VisaStatus.choices,
         "panel": questions_panel.get_panel(request.user),

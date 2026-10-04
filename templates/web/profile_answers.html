@@ -80,12 +80,43 @@
 
     <section id="citizenship">
         <h2>Citizenship</h2>
-        <p>
-            <label for="{{ form.citizenship_countries.id_for_label }}">{{ form.citizenship_countries.label }}</label>
-            {{ form.citizenship_countries }}
-            <span class="help">{{ form.citizenship_countries.help_text }}</span>
+        <fieldset>
+            <legend>Countries whose passports you hold</legend>
+            <p class="muted">{{ form.citizenship_countries.help_text }} Leave it empty if you would rather answer those questions yourself.</p>
+            <input type="hidden" name="citizenship_rows_present" value="1">
+            <div id="citizenship-rows">
+                {% for code in citizenship_rows %}
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}
+                            <option value="{{ value }}"{% if value == code %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+                {% endfor %}
+                {# One blank row so the form is usable without any JavaScript. #}
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+            </div>
+            <button type="button" id="citizenship-add">Add another passport</button>
+            <template id="citizenship-row-template">
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+            </template>
             {{ form.citizenship_countries.errors }}
-        </p>
+        </fieldset>
     </section>
 
     <section id="salary">
@@ -188,16 +219,23 @@
 
 <script>
 (function () {
-    var rows = document.getElementById("visa-rows");
-    var template = document.getElementById("visa-row-template");
-    document.getElementById("visa-add").addEventListener("click", function () {
-        rows.appendChild(template.content.cloneNode(true));
-    });
-    rows.addEventListener("click", function (event) {
-        if (event.target.classList.contains("visa-remove")) {
-            event.target.closest(".visa-row").remove();
-        }
-    });
+    // "Add" clones the row template; "Remove" drops a row. Without JavaScript
+    // every saved row plus one blank row is already on the page.
+    function wire(rowsId, templateId, addId) {
+        var rows = document.getElementById(rowsId);
+        var template = document.getElementById(templateId);
+        document.getElementById(addId).addEventListener("click", function () {
+            rows.appendChild(template.content.cloneNode(true));
+        });
+        rows.addEventListener("click", function (event) {
+            var button = event.target;
+            if (button.classList.contains("visa-remove") || button.classList.contains("row-remove")) {
+                button.closest("p").remove();
+            }
+        });
+    }
+    wire("visa-rows", "visa-row-template", "visa-add");
+    wire("citizenship-rows", "citizenship-row-template", "citizenship-add");
 })();
 </script>
 {% endblock %}

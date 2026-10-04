@@ -159,15 +159,16 @@ class AnswersSettingsForm(forms.ModelForm):
         help_text="Full mailing address, up to 500 characters.",
     )
     working_timezone = forms.ChoiceField(required=False, label="Working time zone")
-    # Citizenship is genuinely multi-valued (dual citizens), so this is a real
-    # multi-select. Values are ISO alpha-3, see Profile.citizenship_countries.
+    # Citizenship is genuinely multi-valued (dual citizens). It is posted as one
+    # `citizenship_countries` select per passport (a repeater, like the work
+    # authorization rows), so the user sees exactly what is selected. A blank
+    # choice is accepted and dropped in clean().
     citizenship_countries = forms.MultipleChoiceField(
         required=False,
         label="Countries whose passports you hold",
-        widget=forms.SelectMultiple(attrs={"size": 8}),
         help_text=(
-            "Select every country whose passport you hold. This answers "
-            "“Are you a citizen of X?” on application forms."
+            "Add a row for each passport you hold. This answers \u201cAre you a "
+            "citizen of X?\u201d and nationality questions on application forms."
         ),
     )
 
@@ -192,7 +193,7 @@ class AnswersSettingsForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields["location_country"].choices = [("", "— Select —")] + country_choices()
         self.fields["working_timezone"].choices = timezone_choices()
-        self.fields["citizenship_countries"].choices = country_choices()
+        self.fields["citizenship_countries"].choices = [("", "— Select country —")] + country_choices()
         if self.instance and self.instance.pk:
             self.initial["citizenship_countries"] = [
                 c for c in (self.instance.citizenship_countries or []) if c
@@ -245,10 +246,34 @@ class AnswersSettingsForm(forms.ModelForm):
             ]
         return list((self.instance.visa_status_by_country or {}).items())
 
+    def citizenship_rows(self):
+        """Country codes to render as rows: what was just posted if the
+        repeater was submitted (so a validation error keeps the user's rows),
+        else what is stored."""
+        if self.is_bound and "citizenship_rows_present" in self.data:
+            posted = self.data.getlist("citizenship_countries")
+        else:
+            posted = self.instance.citizenship_countries or []
+        seen, rows = set(), []
+        for code in posted:
+            code = (code or "").strip()
+            if code and code not in seen:
+                seen.add(code)
+                rows.append(code)
+        return rows
+
     def clean_citizenship_countries(self):
+        """Posted selects, blanks and repeats dropped.
+
+        A POST without the ``citizenship_rows_present`` marker did not render
+        the repeater (an old client, a hand-built request): keep what is
+        stored rather than reading "no rows" as "clear them".
+        """
+        if "citizenship_rows_present" not in self.data:
+            return list(self.instance.citizenship_countries or [])
         seen, codes = set(), []
         for code in self.cleaned_data.get("citizenship_countries") or []:
-            if code not in seen:
+            if code and code not in seen:
                 seen.add(code)
                 codes.append(code)
         return codes
