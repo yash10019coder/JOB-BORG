@@ -144,9 +144,13 @@ class ApplyProfileFieldTests(_ProfileTestCase):
         with self.assertRaises(ValueError):
             profile_fields.apply_profile_field(self.profile, "salary_by_region", {}, "imported")
 
-    def test_one_save_means_one_rematch_trigger(self):
-        profile_fields.apply_profile_field(self.profile, "phone", "1", "imported")
+    def test_a_matching_field_write_means_one_rematch_trigger(self):
+        profile_fields.apply_profile_field(self.profile, "target_tags", ["go"], "imported")
         self.assertEqual(self.mock_schedule.call_count, 1)
+
+    def test_a_non_matching_field_write_does_not_rematch(self):
+        profile_fields.apply_profile_field(self.profile, "phone", "1", "imported")
+        self.assertEqual(self.mock_schedule.call_count, 0)
 
     def test_default_source_enum_values_are_the_answerbank_sources(self):
         self.assertEqual(
