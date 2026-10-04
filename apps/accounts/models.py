@@ -90,6 +90,8 @@ _AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[bool | None, bool | None]] = {
     "requires_sponsorship": (None, True),
     # Not authorized says nothing about whether sponsorship would be needed.
     "not_authorized": (False, None),
+    # Both are known: not authorized now, and sponsorship would be needed.
+    "not_authorized_needs_sponsorship": (False, True),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
     "h1b": (True, None),
     "opt": (True, None),
@@ -195,8 +197,17 @@ class Profile(models.Model):
         CITIZEN = "citizen", "Citizen"
         PERMANENT_RESIDENT = "permanent_resident", "Permanent resident / Green card"
         WORK_PERMIT = "work_permit", "Work permit held (no sponsorship needed)"
-        REQUIRES_SPONSORSHIP = "requires_sponsorship", "Will require visa sponsorship"
-        NOT_AUTHORIZED = "not_authorized", "Not authorized to work"
+        REQUIRES_SPONSORSHIP = (
+            "requires_sponsorship",
+            "Will require visa sponsorship (current authorization not stated)",
+        )
+        NOT_AUTHORIZED = "not_authorized", "Not authorized to work (sponsorship not stated)"
+        # The common case for someone outside the country applying to its jobs:
+        # not authorized there today, and would need the employer to sponsor.
+        NOT_AUTHORIZED_NEEDS_SPONSORSHIP = (
+            "not_authorized_needs_sponsorship",
+            "Not authorized to work yet, will require sponsorship",
+        )
         # US-specific, with the country named in the label so the value is
         # never ambiguous about where it applies.
         H1B = "h1b", "H-1B (US)"

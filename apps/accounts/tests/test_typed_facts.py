@@ -84,6 +84,20 @@ class AuthorizationTests(_Base):
             typed_facts.resolve(self.profile, SPONSOR_Q, options=YES_NO, job=job("US")).value
         )
 
+    def test_not_authorized_and_needing_sponsorship_answers_both_questions(self):
+        self.set(visa_status_by_country={"USA": "not_authorized_needs_sponsorship"})
+        auth = typed_facts.resolve(self.profile, AUTH_US_Q, options=YES_NO)
+        sponsor = typed_facts.resolve(self.profile, SPONSOR_Q, options=YES_NO, job=job("US"))
+        self.assertEqual((auth.value, sponsor.value), ("No", "Yes"))
+
+    def test_the_status_is_per_country(self):
+        self.set(
+            visa_status_by_country={"USA": "not_authorized_needs_sponsorship", "IND": "citizen"}
+        )
+        us = typed_facts.resolve(self.profile, SPONSOR_Q, options=YES_NO, job=job("US"))
+        india = typed_facts.resolve(self.profile, SPONSOR_Q, options=YES_NO, job=job("India"))
+        self.assertEqual((us.value, india.value), ("Yes", "No"))
+
     def test_no_entry_for_the_country_is_not_covered(self):
         self.set(visa_status_by_country={"USA": "citizen"})
         fact = typed_facts.resolve(self.profile, AUTH_Q, options=YES_NO, job=job("Canada"))

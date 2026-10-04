@@ -21,6 +21,7 @@ class AuthorizationForCountryTests(TestCase):
             "work_permit": (True, False),
             "requires_sponsorship": (None, True),
             "not_authorized": (False, None),
+            "not_authorized_needs_sponsorship": (False, True),
             "h1b": (True, None),
             "opt": (True, None),
             "o1": (True, None),
@@ -40,6 +41,9 @@ class AuthorizationForCountryTests(TestCase):
         authorized, needs_sponsorship = self._with("not_authorized")
         self.assertFalse(authorized)
         self.assertIsNone(needs_sponsorship)
+
+    def test_not_authorized_and_needing_sponsorship_states_both(self):
+        self.assertEqual(self._with("not_authorized_needs_sponsorship"), (False, True))
 
     def test_no_entry_for_the_country_is_none_not_a_pair(self):
         self.profile.visa_status_by_country = {"USA": "citizen"}
