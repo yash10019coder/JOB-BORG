@@ -56,6 +56,11 @@ _GITHUB = re.compile(
     re.I,
 )
 _BARE_DOMAIN = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24}(?:/\S*)?$", re.I)
+# Degree and title abbreviations that look like a domain ("B.Tech", "M.Sc", "Ph.D").
+_DEGREE_ABBREVIATIONS = frozenset(
+    "b.tech m.tech b.sc m.sc b.e m.e b.a m.a b.s m.s b.com m.com b.ed m.ed ph.d b.arch m.arch "
+    "b.des m.des b.pharm m.pharm b.ca m.ca e.g i.e u.s u.k a.i".split()
+)
 _FILE_EXTENSIONS = frozenset(
     "pdf doc docx png jpg jpeg gif txt py js ts java html css json xml zip md csv rtf cpp rb go rs".split()
 )
@@ -251,8 +256,14 @@ def extract_portfolio(doc):
             explicit = token.lower().startswith("https://")
             if not explicit and not _BARE_DOMAIN.match(token):
                 continue
-            if not explicit and token.rsplit("/", 1)[0].rsplit(".", 1)[-1].lower() in _FILE_EXTENSIONS:
-                continue
+            if not explicit:
+                host = token.split("/")[0].lower()
+                if (
+                    host.rsplit(".", 1)[-1] in _FILE_EXTENSIONS
+                    or host in _DEGREE_ABBREVIATIONS
+                    or len(host.split(".")[0]) < 3  # "b.tech", "m.sc": real domains rarely start so short
+                ):
+                    continue
             if not _portfolio_ok(token):
                 continue
             try:

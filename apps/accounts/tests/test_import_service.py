@@ -150,7 +150,7 @@ class RunTests(_Base):
         self.assertEqual(payload["entries"][0]["start"], "2021-01")
         self.assertTrue(payload["entries"][0]["is_current"])
         self.assertIn("python", payload["fields"]["target_tags"]["value"])
-        self.assertEqual(set(payload["meta"]), {"truncated", "skills_lexicon", "title_lexicon"})
+        self.assertEqual(set(payload["meta"]), {"truncated", "linkedin_layout", "skills_lexicon", "title_lexicon"})
         self.assertGreater(job.expires_at, timezone.now() + timedelta(hours=23))
 
     def test_a_pdf_upload_works_too(self):

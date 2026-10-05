@@ -424,14 +424,26 @@ def _frags_for(doc, anchor, anchors_by_line):
     return frags
 
 
+# Where to look for the employer, given where the title was found (EX7): the
+# employer sits on the *other* side of a header title (above it), and right next
+# to a title that sits on a line of its own. A line below the anchor is usually a
+# location or a description, so it is the last resort unless the title is below.
+_ORG_PREFERENCE = {"H": ("P", "N", "H"), "P": ("P", "H", "N"), "N": ("H", "P", "N")}
+
+
+def _employer_for(title, orgs):
+    order = {source: rank for rank, source in enumerate(_ORG_PREFERENCE[title.source])}
+    ranked = sorted(orgs, key=lambda frag: order.get(frag.source, 9))  # stable: nearest first
+    return ranked[0] if ranked else None
+
+
 def _pick(frags):
     """``(status, title_frag, org_frag, layout)`` per rule EX7."""
     titles = [f for f in frags if f.kind == TITLE and f.source != "T"]
     orgs = [f for f in frags if f.kind == ORG]
     if len(titles) == 1:
         title = titles[0]
-        different = [f for f in orgs if f.source != title.source]
-        org = (different or orgs or [None])[0]
+        org = _employer_for(title, orgs)
         layout = {"H": "title_in_header", "P": "title_in_previous", "N": "title_in_next"}[title.source]
         return ("resolved" if org else "title_only"), title, org, layout
     return "ambiguous", None, None, ""
@@ -454,8 +466,7 @@ def _apply_layout(frags, layout):
         return None
     title = here[0]
     others = [f for f in usable if f is not title and f.kind == ORG]
-    different = [f for f in others if f.source != source]
-    return title, (different or others or [None])[0]
+    return title, _employer_for(title, others)
 
 
 # --------------------------------------------------------------------------

@@ -271,6 +271,13 @@ class LinkTests(SimpleTestCase):
         text = "Jane Doe\nNode.js | Next.js | resume.pdf | ASP.NET | Socket.io\n" + "x " * 150
         self.assertNotIn("portfolio_url", fields(text))
 
+    def test_FU3_degree_abbreviations_and_one_letter_labels_are_not_domains(self):
+        """Found by a short test document: "B.Tech Computer Science" was proposed as the portfolio https://b.tech."""
+        for token in ("B.Tech", "M.Tech", "B.Sc", "M.Sc", "Ph.D", "B.E", "e.g", "x.io", "ab.in"):
+            with self.subTest(token=token):
+                self.assertNotIn("portfolio_url", fields(f"Jane Doe\n{token} Computer Science 2013 - 2017\n" + "x " * 150))
+        self.assertEqual(fields("Jane Doe\nabc.dev\n" + "x " * 150)["portfolio_url"], "https://abc.dev")
+
     def test_FU3_an_email_domain_is_never_a_portfolio(self):
         self.assertNotIn("portfolio_url", fields("Jane Doe\njane@janedoe.dev\n" + "x " * 150))
 

@@ -134,6 +134,16 @@ class LayoutTests(SimpleTestCase):
         self.assertEqual([(e.title, e.organization, e.layout) for e in entries],
                          [("Backend Developer", "Initech", "title_in_next")])
 
+    def test_EX7_a_location_line_below_the_anchor_is_not_taken_as_the_employer(self):
+        """Found by the LinkedIn-style layout: Org / Title / dates / City. The city below must not beat the employer above."""
+        entries = exp(resume("Initech\nBackend Developer\nMar 2019 - Nov 2022\nPune"))
+        self.assertEqual([(e.title, e.organization) for e in entries], [("Backend Developer", "Initech")])
+
+    def test_EX7_the_employer_preference_depends_on_where_the_title_was_found(self):
+        self.assertEqual(ent._ORG_PREFERENCE["H"][0], "P")  # title in the header: employer is above
+        self.assertEqual(ent._ORG_PREFERENCE["P"][0], "P")  # title on its own line: employer next to it
+        self.assertEqual(ent._ORG_PREFERENCE["N"][0], "H")  # title below: employer in the header
+
     def test_EX7_title_at_org_on_one_line(self):
         for line in ("Backend Developer at Initech  Mar 2019 - Nov 2022", "Backend Developer @ Initech  Mar 2019 - Nov 2022",
                      "Backend Developer | Initech  Mar 2019 - Nov 2022", "Backend Developer - Initech  Mar 2019 - Nov 2022"):

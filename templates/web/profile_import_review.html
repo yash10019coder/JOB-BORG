@@ -8,6 +8,7 @@
     have already set is shown as <em>Kept</em> and is never overwritten. Nothing
     is saved until you press Save.
 </p>
+{% if linkedin_note %}<p class="notice">This does not look like a LinkedIn export, so it was read like an ordinary resume. Check each value.</p>{% endif %}
 {% if review.truncated %}<p class="notice">The document was very long, so only the first part was read.</p>{% endif %}
 
 <form method="post" action="{% url 'import_apply' job.public_id %}">

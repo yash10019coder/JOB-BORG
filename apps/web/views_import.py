@@ -119,6 +119,9 @@ def _review_context(request, job, review, errors=None):
         "errors": errors or {},
         "has_fields": bool(review.fields),
         "has_entries": bool(review.entries),
+        # D9: they said LinkedIn but it does not look like an export: say so, don't fail.
+        "linkedin_note": job.source_kind == ImportJob.SourceKind.LINKEDIN_PDF
+        and not (job.payload.get("meta") or {}).get("linkedin_layout", True),
     }
 
 

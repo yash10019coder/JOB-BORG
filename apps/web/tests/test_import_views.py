@@ -47,10 +47,12 @@ class _Base(TestCase):
         self.schedule.reset_mock()
 
     def ready_job(self, profile=None, text=fx.BULLET_ORG_RESUME, **extra):
-        return ImportJob.objects.create(
+        values = dict(
             profile=profile or self.profile, kind="document", source_kind="resume",
-            status=ImportJob.Status.READY, payload=ready_payload(text), **extra,
+            status=ImportJob.Status.READY, payload=ready_payload(text),
         )
+        values.update(extra)
+        return ImportJob.objects.create(**values)
 
     def accept_all(self, job, **overrides):
         """POST every proposal as 'accept', the way a user pressing Save would."""
@@ -189,6 +191,31 @@ class StartTests(_Base):
                 {"source": "resume", "file": SimpleUploadedFile("r.docx", build_docx())}, follow=True,
             )
         self.assertContains(response, "Try again in an hour")
+
+
+class LinkedInNoteTests(_Base):
+    EXPORT = (
+        "Contact\nwww.linkedin.com/in/jane-doe-12345 (LinkedIn)\nTop Skills\nPython\nLanguages\nEnglish\n"
+        "Jane Doe\nStaff Software Engineer at Acme\nPune, Maharashtra, India\nSummary\nBuilds services.\n"
+        "Experience\nAcme\nStaff Software Engineer\nJanuary 2020 - Present (6 years 9 months)\nPune\n" + "x " * 100
+    )
+
+    def page(self, text, kind):
+        job = self.ready_job(text=text, source_kind=kind)
+        return self.client.get(reverse("import_review", args=[job.public_id])).content.decode()
+
+    def test_D9_a_linkedin_upload_that_is_not_an_export_gets_a_note_not_an_error(self):
+        html = self.page(fx.BULLET_ORG_RESUME, ImportJob.SourceKind.LINKEDIN_PDF)
+        self.assertIn("does not look like a LinkedIn export", html)
+        self.assertIn("Jane Doe", html)  # it was still read, as an ordinary resume
+
+    def test_D9_a_real_export_or_an_ordinary_resume_upload_gets_no_note(self):
+        self.assertNotIn("does not look like a LinkedIn export", self.page(self.EXPORT, ImportJob.SourceKind.LINKEDIN_PDF))
+        self.assertNotIn("does not look like a LinkedIn export", self.page(fx.BULLET_ORG_RESUME, ImportJob.SourceKind.RESUME))
+
+    def test_D9_the_payload_records_whether_the_layout_was_detected(self):
+        self.assertFalse(ready_payload(fx.BULLET_ORG_RESUME)["meta"]["linkedin_layout"])
+        self.assertTrue(ready_payload(self.EXPORT)["meta"]["linkedin_layout"])
 
 
 class StatusTests(_Base):

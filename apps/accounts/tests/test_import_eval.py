@@ -71,7 +71,7 @@ class ImportEvalTests(SimpleTestCase):
         self.assertIn("Gate D-rules", text)
         self.assertIn("FAIL", text)
 
-    def test_the_gate_passes_when_only_ordinary_files_are_present(self):
+    def test_E2_the_gate_passes_when_only_ordinary_files_are_present(self):
         with _Dir() as d:
             write(d, "a_resume.pdf", build_pdf(catalog_extra=b"/OpenAction [5 0 R /Fit]"))
             write(d, "b_resume.docx", build_docx())

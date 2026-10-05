@@ -19,7 +19,7 @@ from django.core.files.base import ContentFile
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.accounts.importing import github, skills_lexicon
+from apps.accounts.importing import github, rules, skills_lexicon
 from apps.accounts.importing import titles as title_lexicon
 from apps.accounts.importing.documents import (
     ALLOWED_EXTENSIONS,
@@ -184,6 +184,7 @@ def build_payload(extraction, normalized):
         "entries": entries,
         "meta": {
             "truncated": normalized.truncated,
+            "linkedin_layout": rules.is_linkedin_export(rules.prepare(normalized)),
             "skills_lexicon": skills_lexicon.SKILLS_LEXICON_VERSION,
             "title_lexicon": title_lexicon.TITLE_LEXICON_VERSION,
         },
