@@ -244,6 +244,9 @@ REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
 LEARNING_MIN_DISTINCT_EMPLOYERS = env.int("LEARNING_MIN_DISTINCT_EMPLOYERS", default=2)
 LEARNING_SWEEP_BATCH_SIZE = env.int("LEARNING_SWEEP_BATCH_SIZE", default=200)
 LEARNING_SUGGESTION_TTL_DAYS = env.int("LEARNING_SUGGESTION_TTL_DAYS", default=90)
+# Profile import (Phase 4): how long a finished-but-unreviewed import keeps its
+# proposals before the sweep clears them.
+PROFILE_IMPORT_TTL_HOURS = env.int("PROFILE_IMPORT_TTL_HOURS", default=24)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

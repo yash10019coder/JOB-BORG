@@ -140,7 +140,7 @@ class ApplyProfileFieldTests(_ProfileTestCase):
         with self.assertRaises(ValueError):
             profile_fields.apply_profile_field(self.profile, "phone", "1", "user")
         with self.assertRaises(ValueError):
-            profile_fields.apply_profile_field(self.profile, "headline", "x", "imported")
+            profile_fields.apply_profile_field(self.profile, "remote_pref", "onsite_only", "imported")
         with self.assertRaises(ValueError):
             profile_fields.apply_profile_field(self.profile, "salary_by_region", {}, "imported")
 

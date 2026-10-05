@@ -25,6 +25,7 @@ from apps.accounts.services.precedence import LOCKED_RANK, SOURCE_RANK, is_blank
 # Whole-field keys: a single provenance entry covers the entire value.
 SIMPLE_FIELDS = (
     "full_name",
+    "headline",
     "phone",
     "current_employer",
     "location_city",
@@ -34,6 +35,7 @@ SIMPLE_FIELDS = (
     "linkedin_url",
     "github_url",
     "portfolio_url",
+    "target_titles",
     "target_tags",
     "citizenship_countries",
 )
