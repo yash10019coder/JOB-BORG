@@ -146,10 +146,12 @@ class EntryRuleTests(SimpleTestCase):
 class RuleCoverageTests(SimpleTestCase):
     def cited_text(self):
         tests = Path(settings.BASE_DIR) / "apps"
-        files = list((tests / "accounts/tests").glob("*import*.py")) + [
-            tests / "accounts/tests/test_resume_facts.py",
-            tests / "web/tests/test_import_views.py",
-        ]
+        files = (
+            list((tests / "accounts/tests").glob("*import*.py"))
+            + list((tests / "accounts/tests").glob("*github*.py"))
+            + list((tests / "web/tests").glob("test_import_views*.py"))
+            + [tests / "accounts/tests/test_resume_facts.py", tests / "accounts/tests/test_profile_skills.py"]
+        )
         return "\n".join(path.read_text() for path in files)
 
     def test_every_rule_in_the_contract_is_cited_by_a_test(self):

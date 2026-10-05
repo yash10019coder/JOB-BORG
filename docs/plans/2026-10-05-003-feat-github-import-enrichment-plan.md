@@ -1,7 +1,7 @@
 ---
 title: "feat: GitHub import enrichment - projects and skills with evidence (follow-up to Phase 4, epic #117)"
 type: feat
-status: active
+status: completed
 origin: docs/brainstorms/2026-10-05-github-import-enrichment-requirements.md
 depth: standard
 ---
@@ -39,7 +39,7 @@ All calls keep the existing safety: no redirects, timeouts, coded errors, whitel
 - **Size caps:** 256 KB for single-object calls, 600 KB for repo-list calls, 64 KB for manifest bodies. Exceeding a cap on the first two calls is `github_error`; on an enrichment call it is "no data" (below).
 - **Full mode (token set), shortlist only (top 8 repos):**
   - `/repos/<u>/<r>/languages`: keep languages with at least 10% of the repo's bytes.
-  - `/repos/<u>/<r>/contents/`: root listing, then fetch (raw `Accept`, 64 KB cap) only known manifests present: `package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `Gemfile`, `Cargo.toml`, `composer.json`, `pom.xml`, `build.gradle(.kts)`, `Dockerfile`.
+  - `/repos/<u>/<r>/contents/`: root listing, then fetch (raw `Accept`, 64 KB cap) only known manifests present: `package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle(.kts)`, `Dockerfile`.
   - Pinned repos through one GraphQL call. Pinned repos are filtered by the same own / non-fork / non-archived rules and must also appear in the fetched repo set; a pinned repo outside it is ignored.
 - **Failure semantics.** After the first two calls succeed, any error on a per-repo call (404, 3xx, non-200, oversize, parse failure, GraphQL error) means "no data from this repo or source": the import continues. Only a rate limit, the 80-call cap or the 45-second budget stops enrichment, setting `meta.mode = "partial"`. A failure of the first two calls fails the import as today.
 - **Budget:** at most **80 calls** and **45 seconds** per import (under the 90 s task soft limit); the budget is checked between calls. Worst case per shortlisted repo is about 7 calls, hence 8 repos.
@@ -55,7 +55,7 @@ The importing user's profile must have a saved `github_url`; the requested login
 - Evidence per repo: primary language, languages at least 10% (shortlist), topics, manifest packages (shortlist).
 - Names are canonicalised through `skills_lexicon.canonical_skill()`. Linguist language names outside the lexicon are kept only if in a small `LANGUAGE_ALLOW` set; noise (Makefile, Batchfile, Procfile, incidental Shell) is dropped; "Jupyter Notebook" maps to Python. Topics count with the same weight as languages but only when they map through the lexicon.
 - Manifest dependencies map **only** through a new versioned `PACKAGE_SKILLS` table in `skills_lexicon.py` (for example react, next, express, django, flask, fastapi, gin, rails, spring-boot, tokio, laravel); `SKILLS_LEXICON_VERSION` is bumped. An unknown package proposes nothing. A `Dockerfile` proposes Docker.
-- **Manifest parsing is hostile-input-safe.** Text only, never executed. Each parser runs inside a catch-all (including `RecursionError`), rejects any file with a line over 2,000 characters or nesting deeper than 20, and uses linear-time patterns (no nested quantifiers): `json.loads` (package.json, composer.json), `tomllib` (pyproject, Cargo), line scans (requirements, go.mod, Gemfile), `artifactId` scan (pom.xml), dependency-line scan (gradle). A failure yields nothing for that file.
+- **Manifest parsing is hostile-input-safe.** Text only, never executed. Each parser runs inside a catch-all (including `RecursionError`), rejects any file with a line over 2,000 characters or nesting deeper than 20, and uses linear-time patterns (no nested quantifiers): `json.loads` (package.json, composer.json), `tomllib` (pyproject), line scans (requirements, go.mod, Gemfile), `artifactId` scan (pom.xml), dependency-line scan (gradle). A failure yields nothing for that file.
 - **Evidence schema (fixed, validated again on apply):** `repo_count` (int), `scope` (`"recent"` for language/topic evidence over the scanned recent repos, `"top"` for manifest/percentage evidence over the shortlist), `scope_size` (int), `first_seen` and `last_seen` (`YYYY-MM`), `repos` (at most 5 names matching the repo-name pattern), `sources` (subset of `language`, `topic`, `package`). Anything else is dropped.
 - **Proof line** states its scope and shows the dates separately: "Python · 14 of 90 recent repos · first 2019 · last 2026"; "Django · 3 of your top 8 repos · first 2021 · last 2026". Default tick when `repo_count >= 2`. At most 40 skills, ranked by repo count then recency.
 - Skills that are job-matching tags still produce today's `target_tags` field proposal.
