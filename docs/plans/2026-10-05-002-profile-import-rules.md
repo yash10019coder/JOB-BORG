@@ -135,7 +135,7 @@ Conventions. **Z** = "never import" (non-goal). **Default** = the review page's 
 
 ## V. Validation (before preview, again on apply)
 - **V1** Strings: NFKC, trimmed, no control characters or newlines, no `<` or `>`, length within the model limit (full_name 255, headline 255, phone 32, current_employer 255, location_city 255, location_country 3, URLs 255).
-- **V2** URLs per FU1-FU6; `location_country` ∈ the region list; tags match `[a-z0-9_+#.-]{1,40}`; lists ≤ 50 items, items ≤ 60 chars.
+- **V2** URLs per FU1-FU6; `location_country` ∈ the region list; tags match `[a-z0-9_+#.-]{1,40}`; titles 3-80 chars and not sentences; lists ≤ 50 items.
 - **V3** Entries: dates per EX4; title/organization/skills per EX8/EX12; skills normalized and deduped; unknown or extra keys in posted data are ignored.
 - **V4** Apply **re-validates everything server-side**; only decisions and edits for payload keys are honoured; a value that fails validation re-renders the review page with an inline error and writes nothing.
 
