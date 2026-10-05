@@ -225,6 +225,10 @@ def _read_docx(data):
 # Normalization (N rules)
 # --------------------------------------------------------------------------
 _CID = re.compile(r"\(cid:\d+\)")
+# N8: kerning in some PDFs separates a first capital from its word ("F oundation",
+# "T echnologies"). Joined only for a capital other than A/I that follows a
+# Capitalized word (or starts a line) and precedes a lowercase word of 4+ letters.
+_SPLIT_CAPITAL = re.compile(r"(?:(?<=^)|(?<=\s))([B-HJ-Z]) ([a-z]{4,})\b", re.MULTILINE)
 _INVISIBLE = re.compile(r"[​-‏⁠﻿­-]")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
@@ -257,6 +261,16 @@ def strip_bullet(line):
     return stripped
 
 
+def _repair_split_capitals(line):
+    def join(match):
+        before = line[: match.start()].rstrip().split(" ")[-1] if line[: match.start()].strip() else ""
+        if before and not before[:1].isupper():
+            return match.group(0)  # not part of a Capitalized name: leave it
+        return match.group(1) + match.group(2)
+
+    return _SPLIT_CAPITAL.sub(join, line)
+
+
 def normalize_text(text):
     """NFKC, strip invisible/control junk, tidy whitespace, cap the length and
     mark repeated page headers/footers (N1-N7). Never re-flows lines (N3)."""
@@ -266,6 +280,7 @@ def normalize_text(text):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CONTROL.sub("", text)
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]  # N2
+    lines = [_repair_split_capitals(line) for line in lines]  # N8
     collapsed, blanks = [], 0
     for line in lines:
         blanks = blanks + 1 if not line else 0

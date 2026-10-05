@@ -19,7 +19,7 @@ TITLE_WORDS = (
     "mentor", "freelancer", "freelance", "volunteer", "member", "representative", "sde", "swe",
     "sre", "devops", "qa", "vp", "cto", "ceo", "cfo", "coo", "president", "principal", "staff",
     "technician", "strategist", "editor", "writer", "advisor", "adviser", "owner", "supervisor",
-    "apprentice", "instructor", "teacher", "professor", "lecturer", "recruiter", "accountant",
+    "apprentice", "student", "scholar", "instructor", "teacher", "professor", "lecturer", "recruiter", "accountant",
     "auditor", "operator", "scrum master", "product owner", "evangelist", "ambassador",
 )
 

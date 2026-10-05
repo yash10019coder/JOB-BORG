@@ -222,7 +222,7 @@ AMBIGUOUS = frozenset(
         "Go", "R", "C", "Swift", "Rust", "Ruby", "Spark", "Scala", "Dart", "Julia",
         "Flask", "Express", "Spring", "Chef", "Puppet", "Rails", "Lambda", "Pandas",
         "Hive", "Vault", "Helm", "Cypress", "Mocha", "Jest", "Unity", "Oracle",
-        "Kafka", "Agile", "Scrum", "Kanban", "Excel", "Android", "Git", "Bash", "Sh",
+        "Agile", "Scrum", "Kanban", "Excel", "Android", "Git", "Bash", "Sh",
         "S3", "Transformers", "ML", "Torch", "Assembly", "Visual Basic", "Vite",
     )
 )

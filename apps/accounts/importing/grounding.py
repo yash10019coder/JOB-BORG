@@ -17,6 +17,7 @@ from apps.accounts.importing.validators import (
     ImportValueError,
     clean_phone,
     clean_text,
+    clean_titles,
     clean_url,
 )
 
@@ -154,6 +155,8 @@ DERIVERS = {
     "location_country": lambda raws: derive_location(raws[0])[1],
     "target_tags": _derive_tags,
     "headline": lambda raws: clean_text(raws[0], max_len=255, min_len=3),
+    "current_employer": lambda raws: clean_text(raws[0], max_len=255, min_len=2),
+    "target_titles": lambda raws: clean_titles(raws),
 }
 
 

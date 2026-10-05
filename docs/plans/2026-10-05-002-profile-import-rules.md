@@ -27,9 +27,10 @@ Conventions. **Z** = "never import" (non-goal). **Default** = the review page's 
 - **N2** NBSP and narrow NBSP → space; runs of spaces/tabs → one space; trim line ends; ≥ 3 newlines → 2.
 - **N3** **Do not re-flow** wrapped lines and do not de-hyphenate: line structure is a signal.
 - **N4** Bullet glyphs `• ● ▪ ■ ◦ ○ ∙ · ‣ ⁃ ▸ ►` (and a leading `- ` or `* `) are recognized as bullet markers; rules strip them when testing line content but remember the glyph (used only as a weak hint).
-- **N5** Cap at 40,000 chars, cut at a line boundary; set `truncated` (shown to the user).
+- **N5** Cap at 40,000 chars, cut at a line boundary; set `truncated` (shown to the user). 
 - **N6** Lines > 300 chars (6 of 81 real resumes, mostly Experience paragraphs) stay in the text and in entry **blocks** (skills inside them still attach, grounding still works); only the heading, anchor, contact and name rules skip them.
 - **N7** A line of ≥ 6 chars repeated ≥ 3 times in the document (page headers/footers, "Page 1 of 3", the name on every page) is **noise**: excluded from all rules after its first occurrence.
+- **N8** Kerning in some PDFs separates a first capital from its word (`F oundation`, `T echnologies`). Such a capital (not `A`/`I`) that follows a Capitalized word or starts a line, and precedes a lowercase word of 4+ letters, is joined. Spans stay valid because this runs during normalization.
 
 ## S. Sectioning
 - **S1** A heading is a line of ≤ 40 chars and ≤ 5 tokens, no digits, not ending in `.`/`,`, not starting with a bullet glyph, and **either** matches an S2 synonym (any case) **or** is ALL CAPS (≥ 2 letters) **or** ends in `:`. A lone Title-Case line that is not an S2 synonym is **not** a heading: real resumes put one skill or project name per line ("Python", "React", "Android", "Kotlin" showed up as false headings in the corpus).
@@ -101,7 +102,7 @@ Conventions. **Z** = "never import" (non-goal). **Default** = the review page's 
 - **EX4** Plausibility: 1970 ≤ year ≤ current year; start ≤ end; no future end unless current; span ≤ 50 years. A failure **drops the dates** and keeps the entry flagged `needs_check`, default reject.
 - **EX5** **Never trust durations in text** ("(2 yrs 3 mos)", "3 years") — computed from dates only.
 - **EX6** Header text = the anchor line minus the date range, minus trailing separators.
-- **EX7** Assigning **title/organization** by **fragment classification**, not by fixed position (measured: the role and the employer are split across the anchor line and the 1-2 previous lines in 4 different ways; a single separator on the anchor line is the minority).
+- **EX7** Assigning **title/organization** by **fragment classification**, not by fixed position (measured: the role and the employer are split across the anchor line and the 1-2 previous lines in 4 different ways; a single separator on the anchor line is the minority). *Refinements after hand-checking real entries:* (1) the previous/next lines are split on separators just like the anchor line; separators include a bare `|` and a dash with no space after it (`Title| Tech, Tech`, `GSOC -Kotlin`). (2) A fragment is DETAIL if it starts with an action verb (`Built`, `Perform`...), has two or more lowercase non-connector words, or is a technology list (two commas, or a comma with a known skill). (3) A fragment is LOC only for a `City, Region` or an exact region/country (never a bare city: the engine resolves company names such as "Google" to cities). (4) A trailing `Remote`, resolved `City, Region`, or multi-word region is peeled from titles and employers with confidence; a trailing bare city or country name is also peeled (`BrowserStack Mumbai`) but marks the entry `needs_check`, and org-suffix words (`Enterprise`, `Solutions`, `Labs`...) are never peeled.
   - Fragments = the anchor header split on ` - `, ` – `, ` — `, ` | `, ` @ `, ` at `; the previous 1-2 non-empty lines (bullet stripped, within the section, stopping at a heading); and the text after the range. A fragment is **DETAIL** (ignored) if it is > 90 chars, > 12 tokens or ends with `.`; **LOC** if it matches a location pattern (`City, Region`, `Remote|Hybrid|On-site`, or resolves via `normalize_location`); **TITLE** if it contains a word from the versioned **title lexicon** (`TITLE_LEXICON_VERSION`: engineer, developer, intern, analyst, manager, lead, architect, consultant, designer, scientist, associate, director, head, specialist, administrator, researcher, contributor, founder, trainee, officer, executive, programmer, tester, coordinator, assistant, fellow, mentor, freelancer, volunteer, member, representative, sde, swe, sre, devops, qa, vp, cto, ceo...); otherwise **ORG**.
   - **Resolved** when exactly one TITLE and at least one ORG fragment exist outside the tail; organization = the ORG fragment nearest the anchor; title = the TITLE fragment.
   - **Title only** (one TITLE, no ORG): proposed with blank organization, `needs_check`.
@@ -118,7 +119,7 @@ Conventions. **Z** = "never import" (non-goal). **Default** = the review page's 
 - **EX13** Education-like anchors never become experience: anything under the EDUCATION heading, or a header containing b.tech, b.e., m.tech, m.e., bsc, msc, b.s., m.s., mba, bachelor, master, phd, diploma, cgpa, gpa.
 - **EX14** Concurrent roles are allowed (years use interval union). Intern/contract/part-time words stay in the title; no classification.
 - **EX15** **Projects:** anchor = a short title line (≤ 10 tokens, no bullet, ≤ 100 chars) in the PROJECTS section followed by bullets/description, optionally with dates, and optionally with a `Name | Tech, Tech` header whose tech list counts as in-block text. A project is proposed only with ≥ 1 grounded skill **or** a date range. Sub-projects inside an experience block are not extracted in v1; project URLs are ignored.
-- **EX16** **Default decision:** accept only when the entry has a date range **and** both title and organization (experience) / title and ≥ 1 skill (project); `needs_check`, `rule_fallback`, `precision=year`-only entries default to reject.
+- **EX16** **Default decision:** accept only when the entry has a date range **and** both title and organization (experience) / title and ≥ 1 skill (project); `needs_check`, `rule_fallback`, `precision=year`-only entries default to reject. *Quality gate:* an entry is never a default when its title or employer has more than 6 words, link text (`link`, `github`, `http`, `repo`), brackets/colons/pipes, a digit-only token, an unrepaired kerning artifact, or relied on a flagged location guess.
 
 ## EA. Attaching skills to an entry
 - **EA1** Candidates = declared skills ∪ lexicon names and aliases. A skill attaches only if it appears **inside that entry's block** (header + its lines); mentions in SUMMARY/SKILLS or another entry's block never attach.
@@ -191,7 +192,22 @@ Conventions. **Z** = "never import" (non-goal). **Default** = the review page's 
 ## E. Evaluation on real resumes (local only)
 - **E1** A management command `manage.py import_eval --dir PATH` runs the whole rule pipeline over a directory of PDFs/DOCX **read-only** and prints **aggregate counts only** (found/total per field, entry resolution classes, rejections by error code, timing). It never copies, stores or logs resume content; the corpus is never committed (PII); it is not part of CI.
 - **E2** Acceptance gates for U3/U4/U4b, measured on the user's sample folder (81 PDFs): zero false rejections by the D-rules; ≥ 95% of experience date ranges parse and pass EX4; name found ≥ 85%; phone found in every document that has one in the first 15 lines; **zero Education anchors become entries**; fully-resolved experience entries ≥ 55% with the rest flagged `needs_check` (default reject); every default-accepted entry in a hand check of 20 random entries is correct, otherwise the default is tightened.
-- **E3** The numbers in this appendix come from that folder and are optimistic (it is dominated by variants of one person's resume, has no LinkedIn exports, no scanned or encrypted files, max 3 pages). The evaluation is re-run when new samples are added; synthetic unit-test fixtures reproduce each layout class but never contain real PII.
+- **E3** The numbers in this appendix come from that folder and are optimistic (it is dominated by variants of one person's resume, has no LinkedIn exports, no scanned or encrypted files, max 3 pages). The evaluation is re-run when new samples are added; synthetic unit-test fixtures reproduce each layout class but never contain real PII. 
+
+**Measured 2026-10-05 on the 81 resume PDFs (aggregate only; optimistic, see E3):**
+
+| Gate | Result |
+|---|---|
+| Safety rules refuse an ordinary resume | 0 of 81 (29 carry a harmless `/OpenAction`) |
+| Experience date ranges that parse and are plausible | 255 of 256 (99.6%) |
+| Education anchors that became entries | 0 |
+| Name found | 77 of 81 (95%) |
+| Phone found | 61 of 81 (about 58 of the 60 that carry an obvious phone pattern) |
+| Fully resolved experience entries (title and employer) | 171 of 206 (83%); 88% with the layout vote; 11 ambiguous; 13 title only |
+| Hand check of 24 random default-accepted entries | about 20 correct; the rest keep a glued, misspelled city in the employer name |
+| Time per file (p95 / max) | 1.1 s / 2.1 s, nearly all of it PDF text extraction |
+
+The remaining defects are why every entry is reviewed and why defaults require a tidy name: a misspelled city glued to an employer cannot be recognised by any rule.
 
 ## Rule coverage plan
 Tests are written per rule group in the matching unit: D/N → U3; E → U4a; F/SK/S → U4; EX/EA → U4b; Y/V (writes) → U2; G/R/A/P/Z → U5-U6; L → U8; GH → U9. Each test's name or docstring cites its rule ID (for example `test_FU3_bare_domain_requires_contact_zone`); U10 greps the rules doc against the test suite and fails if any ID is uncited.

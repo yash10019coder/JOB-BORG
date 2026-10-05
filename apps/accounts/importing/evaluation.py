@@ -40,10 +40,11 @@ def register_probe(name, probe):
 
 def load_default_probes():
     """Register the probes the rule modules provide (idempotent)."""
-    from apps.accounts.importing import rules
+    from apps.accounts.importing import entries, rules
 
-    for name, probe in rules.PROBES.items():
-        register_probe(name, probe)
+    for module in (rules, entries):
+        for name, probe in module.PROBES.items():
+            register_probe(name, probe)
 
 
 @dataclass
@@ -112,7 +113,13 @@ def summarize(results):
     probes = {}
     for name in PROBES:
         values = [r.probes.get(name) for r in read]
-        if any(isinstance(v, str) for v in values):
+        if any(isinstance(v, dict) for v in values):
+            tally = Counter()
+            for v in values:
+                if isinstance(v, dict):
+                    tally.update(v)
+            probes[name] = dict(tally)
+        elif any(isinstance(v, str) for v in values):
             probes[name] = dict(Counter(v for v in values if v))
         else:
             probes[name] = sum(1 for v in values if v)
