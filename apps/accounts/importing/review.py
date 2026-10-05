@@ -15,10 +15,17 @@ from dataclasses import dataclass, field
 from django.db import transaction
 from django.utils import timezone
 
-from apps.accounts.models import ImportJob, ResumeEntry
-from apps.accounts.services import profile_fields
+from apps.accounts.models import ImportJob, ProfileSkill, ResumeEntry
+from apps.accounts.services import profile_fields, profile_skills
 from apps.accounts.services.profile_fields import ImportApplyError, ImportState
-from apps.accounts.services.resume_facts import EntryValueError, apply_entries, natural_key, parse_month
+from apps.accounts.services.profile_skills import SkillValueError
+from apps.accounts.services.resume_facts import (
+    EntryValueError,
+    apply_entries,
+    find_existing,
+    natural_key,
+    parse_month,
+)
 
 FIELD_ORDER = (
     "full_name", "headline", "phone", "location_city", "location_country", "current_employer",
@@ -45,10 +52,11 @@ class ReviewUnavailable(Exception):
 class ReviewError(Exception):
     """Posted values failed validation; nothing was written."""
 
-    def __init__(self, field_errors=None, entry_errors=None):
+    def __init__(self, field_errors=None, entry_errors=None, skill_errors=None):
         super().__init__("invalid review")
         self.field_errors = field_errors or {}
         self.entry_errors = entry_errors or {}
+        self.skill_errors = skill_errors or {}
 
 
 @dataclass
@@ -90,6 +98,19 @@ class EntryRow:
     accept: bool
     original: dict = field(default_factory=dict)
     error: str = ""
+    description: str = ""
+    url: str = ""
+
+
+@dataclass
+class SkillRow:
+    index: int
+    name: str
+    proof: str
+    existing: str  # new | update | unchanged | removed
+    accept: bool
+    original: dict = field(default_factory=dict)
+    error: str = ""
 
 
 @dataclass
@@ -97,6 +118,8 @@ class Review:
     fields: list
     entries: list
     truncated: bool = False
+    skills: list = field(default_factory=list)
+    mode: str = ""  # GitHub imports: full | light | partial
 
 
 @dataclass
@@ -107,6 +130,8 @@ class Outcome:
     entries_created: int = 0
     entries_updated: int = 0
     entries_kept: int = 0
+    skills_created: int = 0
+    skills_updated: int = 0
 
 
 def _to_input(key, value):
@@ -150,13 +175,14 @@ def _existing_state(profile, data):
     except EntryValueError:
         start = None
     key = natural_key(data["kind"], data.get("organization", ""), data.get("title", ""), start)
-    stored = ResumeEntry.objects.filter(profile=profile, kind=data["kind"], natural_key=key).first()
+    stored = find_existing(profile, {"kind": data["kind"], "url": data.get("url") or ""}, key)
     if stored is None:
         return "new"
     if stored.source == ResumeEntry.Source.USER:
         return "kept"
     same = (
         stored.title == data.get("title") and stored.organization == data.get("organization", "")
+        and stored.description == (data.get("description") or "") and stored.url == (data.get("url") or "")
         and stored.start_date == start and stored.is_current == bool(data.get("is_current"))
         and (stored.end_date.strftime("%Y-%m") if stored.end_date else None) == data.get("end")
         and list(stored.skills or []) == list(data.get("skills", []))
@@ -201,7 +227,7 @@ def build_review(job, posted=None):
             snippet=data.get("snippet", ""), needs_check=bool(data.get("needs_check")),
             layout_inferred=bool(data.get("layout_inferred")), rule_fallback=bool(data.get("rule_fallback")),
             existing=existing, accept=bool(data.get("default_accept")) and existing in ("new", "update"),
-            original=data,
+            original=data, description=data.get("description") or "", url=data.get("url") or "",
         )
         if posted is not None:
             row.accept = posted.get(f"entry_decision__{index}") == "accept"
@@ -212,7 +238,36 @@ def build_review(job, posted=None):
             row.is_current = f"entry_current__{index}" in posted
             row.skills = posted.get(f"entry_skills__{index}", row.skills)
         entries.append(row)
-    return Review(fields=rows, entries=entries, truncated=bool((payload.get("meta") or {}).get("truncated")))
+    meta = payload.get("meta") or {}
+    return Review(
+        fields=rows, entries=entries, truncated=bool(meta.get("truncated")),
+        skills=_skill_rows(profile, payload, posted), mode=meta.get("mode", ""),
+    )
+
+
+def _skill_rows(profile, payload, posted):
+    """GHX6-GHX8: the proposed skills against what is stored. A skill the user
+    removed is shown as such and never starts ticked."""
+    stored = {row.key: row for row in ProfileSkill.objects.filter(profile=profile)}
+    rows = []
+    for index, data in enumerate(payload.get("skills") or []):
+        row = stored.get(str(data.get("name", "")).casefold())
+        if row is None:
+            existing = "new"
+        elif row.dismissed:
+            existing = "removed"
+        elif row.evidence == data.get("evidence") and row.name == data.get("name"):
+            existing = "unchanged"
+        else:
+            existing = "update"
+        accept = bool(data.get("default_accept")) and existing in ("new", "update")
+        if posted is not None:
+            accept = posted.get(f"skill_decision__{index}") == "accept"
+        rows.append(SkillRow(
+            index=index, name=data.get("name", ""), proof=data.get("proof", ""),
+            existing=existing, accept=accept, original=data,
+        ))
+    return rows
 
 
 def _entry_data(row):
@@ -239,6 +294,8 @@ def _entry_data(row):
         "is_current": row.is_current,
         "precision": "month" if dates_edited else original.get("precision", "month"),
         "skills": skills,
+        "description": original.get("description") or "",
+        "url": original.get("url") or "",
         "edited": edited,
     }
 
@@ -293,6 +350,21 @@ def apply_review(job, post):
         outcome.entries_created = len(entries_result.created)
         outcome.entries_updated = len(entries_result.updated)
         outcome.entries_kept = len(entries_result.kept)
+
+        accepted_skills = [row for row in review.skills if row.accept and row.existing != "unchanged"]
+        try:
+            skills_result = profile_skills.apply_skills(
+                job.profile_id,
+                [{"name": r.original.get("name"), "origin": r.original.get("origin", "github"),
+                  "evidence": r.original.get("evidence")} for r in accepted_skills],
+                mode=review.mode or profile_skills.FULL,
+            )
+        except SkillValueError as exc:
+            position, _, code = exc.code.partition(":")
+            index = accepted_skills[int(position)].index if position.isdigit() and int(position) < len(accepted_skills) else 0
+            raise ReviewError(skill_errors={index: code or exc.code}) from None
+        outcome.skills_created = len(skills_result.created)
+        outcome.skills_updated = len(skills_result.updated)
 
         job.status = ImportJob.Status.APPLIED
         job.applied_at = timezone.now()
