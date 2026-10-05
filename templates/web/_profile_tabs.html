@@ -2,6 +2,7 @@
     <a href="{% url 'profile' %}"{% if active_tab == "profile" %} aria-current="page"{% endif %}>Profile</a>
     <a href="{% url 'profile_answers' %}"{% if active_tab == "answers" %} aria-current="page"{% endif %}>Auto-apply answers</a>
     <a href="{% url 'profile_learning' %}"{% if active_tab == "learning" %} aria-current="page"{% endif %}>Learning</a>
+    <a href="{% url 'profile_import' %}"{% if active_tab == "import" %} aria-current="page"{% endif %}>Import</a>
 </div>
 {% if messages %}
 <ul class="messages">

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Import — JobBorg{% endblock %}
+{% block content %}
+<h1>Import</h1>
+{% include "web/_profile_tabs.html" %}
+<p class="muted">
+    Fill in your profile from a resume instead of typing it. You review every
+    value first: nothing is saved until you accept it, and anything you have
+    already set yourself is never overwritten.
+</p>
+
+<section id="start">
+    <h2>Import from a document</h2>
+    <form method="post" action="{% url 'import_start' %}" enctype="multipart/form-data">
+        {% csrf_token %}
+        <fieldset>
+            <legend>What are you importing?</legend>
+            <p><label><input type="radio" name="source" value="resume" checked> A resume (PDF, DOCX or TXT)</label></p>
+            <p><label><input type="radio" name="source" value="linkedin_pdf"> A LinkedIn profile saved as PDF</label>
+                <span class="help">On LinkedIn: your profile &rarr; More &rarr; Save to PDF.</span></p>
+            <p><label><input type="radio" name="source" value="current_resume"{% if not has_saved_resume %} disabled{% endif %}> The resume already saved on my profile</label>
+                {% if not has_saved_resume %}<span class="help">Upload a resume on the Profile tab first.</span>{% endif %}</p>
+        </fieldset>
+        <p>
+            <label for="import-file">File</label>
+            <input type="file" id="import-file" name="file" accept=".pdf,.docx,.txt">
+            <span class="help">Up to 5 MB and 10 pages. Scanned images are not supported. The file is deleted as soon as it has been read.</span>
+        </p>
+        <button type="submit">Import</button>
+    </form>
+</section>
+
+<section id="recent">
+    <h2>Recent imports</h2>
+    {% for job in jobs %}
+    <p>
+        <span class="tag">{{ job.get_status_display }}</span>
+        {{ job.get_source_kind_display }} &middot; {{ job.created_at|date:"j M Y, H:i" }}
+        {% if job.status == "ready" or job.status == "pending" or job.status == "running" or job.status == "failed" %}
+        &middot; <a href="{% url 'import_status' job.public_id %}">{% if job.status == "ready" %}Review{% else %}View{% endif %}</a>
+        {% endif %}
+    </p>
+    {% empty %}
+    <p class="muted">No imports yet.</p>
+    {% endfor %}
+</section>
+
+<section id="saved">
+    <h2>Your experience and projects</h2>
+    <p class="muted">Saved from your imports. Years per skill are worked out from the dates, with overlapping jobs counted once.</p>
+    {% if years %}
+    <p><strong>Years by skill:</strong>
+        {% for item in years %}<span class="tag">{{ item.name }} {{ item.text }}{% if item.approximate %}*{% endif %}</span>{% endfor %}
+    </p>
+    <p class="help">* Based on years only, so approximate.</p>
+    {% endif %}
+    {% if experience %}
+    <h3>Experience</h3>
+    {% for entry in experience %}
+    <div class="card">
+        <strong>{{ entry.title }}</strong>{% if entry.organization %} &middot; {{ entry.organization }}{% endif %}
+        <span class="muted">
+            {% if entry.start_date %}{{ entry.start_date|date:"M Y" }} &ndash; {% if entry.is_current %}present{% elif entry.end_date %}{{ entry.end_date|date:"M Y" }}{% endif %}{% endif %}
+        </span>
+        {% if entry.source == "user" %}<span class="tag">edited by you</span>{% endif %}
+        <p>{% for skill in entry.skills %}<span class="tag">{{ skill }}</span>{% empty %}<span class="muted">No skills listed.</span>{% endfor %}</p>
+        <form method="post" action="{% url 'import_entry_delete' entry.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Delete</button>
+        </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if projects %}
+    <h3>Projects</h3>
+    {% for entry in projects %}
+    <div class="card">
+        <strong>{{ entry.title }}</strong>
+        <p>{% for skill in entry.skills %}<span class="tag">{{ skill }}</span>{% empty %}<span class="muted">No skills listed.</span>{% endfor %}</p>
+        <form method="post" action="{% url 'import_entry_delete' entry.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Delete</button>
+        </form>
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if not experience and not projects %}
+    <p class="muted">Nothing saved yet. Import a resume and accept the entries you want to keep.</p>
+    {% endif %}
+</section>
+{% endblock %}
