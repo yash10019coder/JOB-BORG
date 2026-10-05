@@ -471,3 +471,75 @@ class SavedEntriesTests(_Base):
         self.assertIn('value="current_resume" disabled', html)
         Profile.objects.filter(pk=self.profile.pk).update(resume_text=fx.BULLET_ORG_RESUME)
         self.assertNotIn('value="current_resume" disabled', self.client.get(reverse("profile_import")).content.decode())
+
+
+AI_ENABLED = dict(
+    PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS=["openai"],
+    PROFILE_IMPORT_LLM_PROVIDER="openai",
+    OPENAI_API_KEY="sk-test",
+    PROFILE_IMPORT_CONSENT_VERSION="v1",
+)
+
+
+class ConsentTests(_Base):
+    def page(self):
+        return self.client.get(reverse("profile_import")).content.decode()
+
+    def test_L2_the_control_is_not_shown_unless_an_operator_enabled_a_provider(self):
+        self.assertNotIn("AI-assisted import", self.page())
+
+    @override_settings(**AI_ENABLED)
+    def test_L2_when_enabled_it_is_shown_unticked_and_names_what_is_sent(self):
+        html = self.page()
+        self.assertIn("AI-assisted import", html)
+        self.assertIn('name="consent"', html)
+        self.assertNotIn('name="consent" checked', html)
+        self.assertIn("openai", html)
+        self.assertIn("nothing else from your account", html)
+
+    def test_L2_posting_while_no_provider_is_enabled_changes_nothing(self):
+        response = self.client.post(reverse("import_consent"), {"consent": "on"}, follow=True)
+        self.assertContains(response, "not available")
+        self.assertIsNone(self.reload().llm_import_consent_at)
+
+    @override_settings(**AI_ENABLED)
+    def test_L2_ticking_records_the_time_and_the_current_version(self):
+        self.client.post(reverse("import_consent"), {"consent": "on"})
+        profile = self.reload()
+        self.assertIsNotNone(profile.llm_import_consent_at)
+        self.assertEqual(profile.llm_import_consent_version, "v1")
+        self.assertIn('name="consent" checked', self.page())
+
+    @override_settings(**AI_ENABLED)
+    def test_L2_unticking_withdraws_consent(self):
+        self.client.post(reverse("import_consent"), {"consent": "on"})
+        self.client.post(reverse("import_consent"), {})
+        profile = self.reload()
+        self.assertEqual((profile.llm_import_consent_at, profile.llm_import_consent_version), (None, ""))
+
+    @override_settings(**AI_ENABLED)
+    def test_L2_a_version_bump_asks_again_and_does_not_count_as_consent(self):
+        self.client.post(reverse("import_consent"), {"consent": "on"})
+        with self.settings(PROFILE_IMPORT_CONSENT_VERSION="v2"):
+            html = self.page()
+        self.assertIn("The terms changed", html)
+        self.assertNotIn('name="consent" checked', html)
+
+    @override_settings(**AI_ENABLED)
+    def test_saving_consent_never_triggers_a_rematch(self):
+        self.client.post(reverse("import_consent"), {"consent": "on"})
+        self.client.post(reverse("import_consent"), {})
+        self.schedule.assert_not_called()
+
+    def test_consent_needs_login_and_a_csrf_token(self):
+        self.assertEqual(Client().post(reverse("import_consent")).status_code, 302)
+        strict = Client(enforce_csrf_checks=True)
+        strict.force_login(self.user)
+        self.assertEqual(strict.post(reverse("import_consent"), {}).status_code, 403)
+        self.assertEqual(self.client.get(reverse("import_consent")).status_code, 405)
+
+    @override_settings(**AI_ENABLED)
+    def test_one_users_consent_never_affects_another(self):
+        self.client.post(reverse("import_consent"), {"consent": "on"})
+        self.other.refresh_from_db()
+        self.assertIsNone(self.other.llm_import_consent_at)

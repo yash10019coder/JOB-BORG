@@ -5,6 +5,7 @@ Every job is looked up by its public id *through the requesting user's profile*
 nothing here writes to the profile except ``review.apply_review``, which only
 writes what the user accepted. A ``next`` parameter is never honoured.
 """
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import Http404
@@ -13,7 +14,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from apps.accounts.importing import review as review_logic
-from apps.accounts.importing import service
+from apps.accounts.importing import llm_gate, service
 from apps.accounts.importing.documents import DocumentError
 from apps.accounts.models import ImportJob, ResumeEntry
 from apps.accounts.services.resume_facts import delete_entry, format_years, years_by_skill
@@ -30,6 +31,13 @@ SOURCE_CHOICES = {
 
 def _own_job(request, public_id):
     return get_object_or_404(ImportJob, public_id=public_id, profile=request.user.profile)
+
+
+def _consent_current(profile):
+    return bool(
+        profile.llm_import_consent_at
+        and profile.llm_import_consent_version == settings.PROFILE_IMPORT_CONSENT_VERSION
+    )
 
 
 @login_required
@@ -51,6 +59,11 @@ def profile_import(request):
             "projects": [e for e in entries if e.kind == ResumeEntry.Kind.PROJECT],
             "years": years,
             "has_saved_resume": bool((profile.resume_text or "").strip()),
+            # AI-assisted import is offered only when an operator has enabled a provider.
+            "llm_available": llm_gate.provider_available(),
+            "llm_provider": settings.PROFILE_IMPORT_LLM_PROVIDER,
+            "llm_consented": _consent_current(profile),
+            "llm_consent_outdated": bool(profile.llm_import_consent_at) and not _consent_current(profile),
         },
     )
 
@@ -177,4 +190,26 @@ def import_entry_delete(request, pk):
     if not delete_entry(request.user.profile, pk):
         raise Http404("No such entry.")
     messages.info(request, "Entry deleted.")
+    return redirect("profile_import")
+
+
+@login_required
+@require_POST
+def import_consent(request):
+    """Opt in to (or out of) AI-assisted import. Off by default; only offered when
+    an operator has enabled a provider. Saved with ``update_fields`` so it never
+    triggers a rematch."""
+    profile = request.user.profile
+    if not llm_gate.provider_available():
+        messages.error(request, "AI-assisted import is not available.")
+        return redirect("profile_import")
+    if request.POST.get("consent"):
+        profile.llm_import_consent_at = timezone.now()
+        profile.llm_import_consent_version = settings.PROFILE_IMPORT_CONSENT_VERSION
+        messages.success(request, "AI-assisted import is on for your future imports.")
+    else:
+        profile.llm_import_consent_at = None
+        profile.llm_import_consent_version = ""
+        messages.info(request, "AI-assisted import is off. Imports use rules only.")
+    profile.save(update_fields=["llm_import_consent_at", "llm_import_consent_version"])
     return redirect("profile_import")

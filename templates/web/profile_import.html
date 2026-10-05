@@ -30,6 +30,27 @@
     </form>
 </section>
 
+{% if llm_available %}
+<section id="ai">
+    <h2>AI-assisted import</h2>
+    <form method="post" action="{% url 'import_consent' %}">
+        {% csrf_token %}
+        <p>
+            <label><input type="checkbox" name="consent"{% if llm_consented %} checked{% endif %}>
+            Let an AI model help read my documents</label>
+            <span class="help">
+                Off unless you tick this. When on, the text of the document you import
+                (nothing else from your account) is sent to {{ llm_provider }}, a provider
+                your administrator has approved. Every value it suggests is still checked
+                against your document and reviewed by you before anything is saved.
+            </span>
+        </p>
+        {% if llm_consent_outdated %}<p class="notice">The terms changed since you agreed. Tick the box and save to agree again.</p>{% endif %}
+        <button type="submit">Save</button>
+    </form>
+</section>
+{% endif %}
+
 <section id="recent">
     <h2>Recent imports</h2>
     {% for job in jobs %}

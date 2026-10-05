@@ -27,3 +27,31 @@ def run_rules(normalized, today=None):
             extracted.append(proposal)
             taken.add(proposal.field)
     return Extraction(fields=extracted, entries=found_entries)
+
+
+# Fields where a grounded LLM result is preferred over the rules (rule L6). Rules
+# keep phone, links and location: they are exact patterns the model gains nothing on.
+LLM_PREFERRED = frozenset({"full_name", "headline", "current_employer"})
+_FROM_ENTRIES = frozenset({"current_employer", "target_titles"})
+
+
+def merge(rule_extraction, llm_extraction, text):
+    """Combine the rule result with a grounded LLM result (rule L6).
+
+    The LLM's entries replace the rules' entries when it found any (rules are weak
+    at entries); fields derived from entries are then recomputed from them. For
+    plain fields the LLM wins only for :data:`LLM_PREFERRED`; otherwise the rule
+    proposal stands and the LLM only fills a gap.
+    """
+    fields = {proposal.field: proposal for proposal in rule_extraction.fields}
+    entries = rule_extraction.entries
+    if llm_extraction.entries:
+        entries = llm_extraction.entries
+        for name in _FROM_ENTRIES:
+            fields.pop(name, None)
+        for proposal in entry_rules.derived_fields(text, entries):
+            fields.setdefault(proposal.field, proposal)
+    for proposal in llm_extraction.fields:
+        if proposal.field in LLM_PREFERRED or proposal.field not in fields:
+            fields[proposal.field] = proposal
+    return Extraction(fields=list(fields.values()), entries=list(entries))

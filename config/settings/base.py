@@ -264,6 +264,17 @@ PROFILE_IMPORT_STUCK_MINUTES = env.int("PROFILE_IMPORT_STUCK_MINUTES", default=3
 PROFILE_IMPORT_ROW_RETENTION_DAYS = env.int("PROFILE_IMPORT_ROW_RETENTION_DAYS", default=30)
 PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS", default=120)
 PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS", default=90)
+# AI-assisted import (rules L1-L9). OFF unless an operator lists a provider they
+# trust not to retain resume text: an empty allowlist means rules only, and the
+# consent control is not even shown. The provider must also be one of
+# apps/accounts/llm_providers.PROVIDER_CONFIGS and have its API key set.
+PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS = env.list("PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS", default=[])
+PROFILE_IMPORT_LLM_PROVIDER = env("PROFILE_IMPORT_LLM_PROVIDER", default="")
+# Bump to require every user to consent again (e.g. the provider or what is sent changes).
+PROFILE_IMPORT_CONSENT_VERSION = env("PROFILE_IMPORT_CONSENT_VERSION", default="2026-10")
+PROFILE_IMPORT_LLM_MAX_CHARS = env.int("PROFILE_IMPORT_LLM_MAX_CHARS", default=12_000)
+PROFILE_IMPORT_LLM_DAILY_CAP = env.int("PROFILE_IMPORT_LLM_DAILY_CAP", default=5)
+PROFILE_IMPORT_LLM_TIMEOUT_SECONDS = env.int("PROFILE_IMPORT_LLM_TIMEOUT_SECONDS", default=30)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

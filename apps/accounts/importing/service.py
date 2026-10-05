@@ -27,7 +27,8 @@ from apps.accounts.importing.documents import (
     normalize_text,
     read_document,
 )
-from apps.accounts.importing.pipeline import run_rules
+from apps.accounts.importing.llm_extract import extract_with_llm
+from apps.accounts.importing.pipeline import merge, run_rules
 from apps.accounts.models import ImportJob
 
 logger = logging.getLogger(__name__)
@@ -206,10 +207,21 @@ def run_job(public_id):
     try:
         normalized = normalize_text(_source_text(job))
         extraction = run_rules(normalized)
+        extractor = ImportJob.Extractor.RULE
+        # AI-assisted pass (rules L1-L9): the gate re-reads the user's consent right
+        # before the call, so consent withdrawn while this job waited is honoured.
+        # Any refusal or failure leaves the rule-based result untouched.
+        job.profile.refresh_from_db(fields=["llm_import_consent_at", "llm_import_consent_version"])
+        located, _reason = extract_with_llm(normalized, job.profile)
+        if located is not None:
+            extraction = merge(extraction, located, normalized.text)
+            extractor = ImportJob.Extractor.LLM
         if not extraction.fields and not extraction.entries:
             _finish(job, ImportJob.Status.FAILED, error_code="nothing_found")
         else:
-            _finish(job, ImportJob.Status.READY, payload=build_payload(extraction, normalized))
+            _finish(
+                job, ImportJob.Status.READY, payload=build_payload(extraction, normalized), extractor=extractor
+            )
     except DocumentError as exc:
         _finish(job, ImportJob.Status.FAILED, error_code=exc.code)
     except Exception as exc:  # noqa: BLE001 -- coded, class name only (D11)

@@ -13,6 +13,7 @@ urlpatterns = [
     path("profile/answers/", views_profile.profile_answers, name="profile_answers"),
     path("profile/import/", views_import.profile_import, name="profile_import"),
     path("profile/import/start/", views_import.import_start, name="import_start"),
+    path("profile/import/consent/", views_import.import_consent, name="import_consent"),
     path("profile/import/entries/<int:pk>/delete/", views_import.import_entry_delete, name="import_entry_delete"),
     path("profile/import/<uuid:public_id>/", views_import.import_status, name="import_status"),
     path("profile/import/<uuid:public_id>/review/", views_import.import_review, name="import_review"),
