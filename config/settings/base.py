@@ -247,6 +247,11 @@ LEARNING_SUGGESTION_TTL_DAYS = env.int("LEARNING_SUGGESTION_TTL_DAYS", default=9
 # Profile import (Phase 4): how long a finished-but-unreviewed import keeps its
 # proposals before the sweep clears them.
 PROFILE_IMPORT_TTL_HOURS = env.int("PROFILE_IMPORT_TTL_HOURS", default=24)
+# Import limits (rules D2/D3/N5): a smaller file cap than the 10 MB resume
+# upload, a page cap, and a cap on the text the rules (and later the LLM) see.
+PROFILE_IMPORT_MAX_PDF_BYTES = env.int("PROFILE_IMPORT_MAX_PDF_BYTES", default=5 * 1024 * 1024)
+PROFILE_IMPORT_MAX_PAGES = env.int("PROFILE_IMPORT_MAX_PAGES", default=10)
+PROFILE_IMPORT_MAX_TEXT_CHARS = env.int("PROFILE_IMPORT_MAX_TEXT_CHARS", default=40_000)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).
