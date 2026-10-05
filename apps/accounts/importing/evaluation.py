@@ -38,6 +38,14 @@ def register_probe(name, probe):
     PROBES[name] = probe
 
 
+def load_default_probes():
+    """Register the probes the rule modules provide (idempotent)."""
+    from apps.accounts.importing import rules
+
+    for name, probe in rules.PROBES.items():
+        register_probe(name, probe)
+
+
 @dataclass
 class DocResult:
     kind: str

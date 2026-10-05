@@ -27,6 +27,7 @@ class Command(BaseCommand):
         directory = options["dir"]
         if not os.path.isdir(directory):
             raise CommandError("--dir is not a directory")
+        evaluation.load_default_probes()
         files = evaluation.iter_files(directory, options["name_regex"], options["exclude_regex"])
         if not files:
             raise CommandError("no matching files")
