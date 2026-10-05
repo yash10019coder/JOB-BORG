@@ -150,6 +150,23 @@ def run_document_import(public_id):
     return job.status if job is not None else None
 
 
+@shared_task(
+    name="apps.accounts.run_github_import",
+    time_limit=settings.PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS,
+    soft_time_limit=settings.PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS,
+)
+def run_github_import(public_id, username):
+    """Fetch a public GitHub profile and keep the proposals for review.
+
+    The username was validated before this job existed and is validated again
+    by the client's URL building; the job id is the only handle on the job.
+    """
+    from .importing.service import run_github_job
+
+    job = run_github_job(public_id, username)
+    return job.status if job is not None else None
+
+
 @shared_task(name="apps.accounts.sweep_import_jobs")
 def sweep_import_jobs():
     """Expire unreviewed proposals, fail stuck jobs, delete old rows."""

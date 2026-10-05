@@ -19,7 +19,7 @@ from django.core.files.base import ContentFile
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.accounts.importing import skills_lexicon
+from apps.accounts.importing import github, skills_lexicon
 from apps.accounts.importing import titles as title_lexicon
 from apps.accounts.importing.documents import (
     ALLOWED_EXTENSIONS,
@@ -55,6 +55,11 @@ ERROR_MESSAGES = {
     "no_text_found": "No text was found. If it is a scan, export a text-based PDF instead.",
     "no_resume_text": "Your saved resume has no readable text yet. Upload a file instead.",
     "nothing_found": "We could not find anything we are confident about in that document.",
+    "github_bad_username": "That is not a valid GitHub username.",
+    "github_not_found": "No GitHub user with that name was found.",
+    "github_rate_limited": "GitHub is limiting requests right now. Try again later.",
+    "github_error": "GitHub returned something unexpected.",
+    "github_unavailable": "Could not reach GitHub. Try again later.",
     "timeout": "That import took too long and was stopped.",
     "unexpected": "Something went wrong reading that document.",
 }
@@ -125,6 +130,24 @@ def start_document_import(profile, source_kind, *, upload=None):
     if upload is not None:
         job.source_file.save(f"import{extension}", ContentFile(upload.read()), save=True)
     transaction.on_commit(lambda: run_document_import.delay(str(job.public_id)))
+    return job
+
+
+def start_github_import(profile, raw_username):
+    """Create a pending GitHub job. The username is validated first (GH1): a bad
+    one raises ``GitHubError`` before anything is created, counted or fetched."""
+    from apps.accounts.tasks import run_github_import
+
+    username = github.normalize_username(raw_username)
+    check_rate_limit(profile.user_id, "github")
+    try:
+        with transaction.atomic():
+            job = ImportJob.objects.create(
+                profile=profile, kind=ImportJob.Kind.GITHUB, source_kind=ImportJob.SourceKind.GITHUB
+            )
+    except IntegrityError:
+        raise ImportInProgress() from None
+    transaction.on_commit(lambda: run_github_import.delay(str(job.public_id), username))
     return job
 
 
@@ -233,6 +256,34 @@ def run_job(public_id):
         job.public_id, job.status, job.extractor,
         len(job.payload.get("fields", {})), len(job.payload.get("entries", [])), job.error_code,
     )
+    return job
+
+
+def run_github_job(public_id, username, client=None):
+    """Fetch a public GitHub profile and keep the proposals for review. Idempotent
+    like :func:`run_job`; only whitelisted API fields are ever read."""
+    claimed = ImportJob.objects.filter(public_id=public_id, status=ImportJob.Status.PENDING).update(
+        status=ImportJob.Status.RUNNING, updated_at=timezone.now()
+    )
+    if not claimed:
+        return None
+    job = ImportJob.objects.get(public_id=public_id)
+    try:
+        proposals = github.propose((client or github.GitHubClient()).fetch(username))
+        if proposals:
+            _finish(
+                job, ImportJob.Status.READY,
+                payload={"v": PAYLOAD_VERSION, "fields": proposals, "entries": [], "meta": {"source": "github"}},
+            )
+        else:
+            _finish(job, ImportJob.Status.FAILED, error_code="nothing_found")
+    except github.GitHubError as exc:
+        _finish(job, ImportJob.Status.FAILED, error_code=exc.code)
+    except Exception as exc:  # noqa: BLE001 -- coded, class name only
+        logger.error("import job %s failed: %s", job.public_id, type(exc).__name__)
+        _finish(job, ImportJob.Status.FAILED, error_code="unexpected")
+    logger.info("import job %s %s fields=%d code=%s", job.public_id, job.status,
+                len(job.payload.get("fields", {})), job.error_code)
     return job
 
 

@@ -543,3 +543,66 @@ class ConsentTests(_Base):
         self.client.post(reverse("import_consent"), {"consent": "on"})
         self.other.refresh_from_db()
         self.assertIsNone(self.other.llm_import_consent_at)
+
+
+class GitHubViewTests(_Base):
+    def fake_github(self, fail_with=None):
+        from apps.accounts.importing import github as gh
+        from apps.accounts.tests.test_import_github import FakeResponse, FakeSession, jr, repo
+
+        user = {"login": "octocat", "html_url": "https://github.com/octocat", "blog": "https://octo.dev"}
+        routes = {"/repos": jr([repo("a", "Python", stars=3)]), "/users/": jr(user)}
+        if fail_with:
+            routes = {"/users/": FakeResponse(fail_with)}
+        return mock.patch("apps.accounts.importing.github.GitHubClient", return_value=gh.GitHubClient(session=FakeSession(routes), token=""))
+
+    def start(self, username, **post):
+        return self.client.post(reverse("import_github"), {"username": username, **post}, follow=True)
+
+    def test_the_import_page_has_the_github_form(self):
+        html = self.client.get(reverse("profile_import")).content.decode()
+        self.assertIn('name="username"', html)
+        self.assertIn("Reads your public profile and repositories only", html)
+
+    def test_GH1_a_bad_username_shows_a_message_and_makes_no_job(self):
+        response = self.start("../etc/passwd")
+        self.assertContains(response, "not a valid GitHub username")
+        self.assertEqual(ImportJob.objects.count(), 0)
+
+    def test_a_username_flows_through_status_to_review_and_apply(self):
+        with self.fake_github(), self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(reverse("import_github"), {"username": "https://github.com/octocat"})
+        job = ImportJob.objects.get()
+        self.assertEqual((job.kind, job.status), ("github", "ready"))
+        self.assertRedirects(response, reverse("import_status", args=[job.public_id]), fetch_redirect_response=False)
+        page = self.client.get(reverse("import_review", args=[job.public_id])).content.decode()
+        self.assertIn("https://github.com/octocat", page)
+        self.assertIn("Top languages: Python (1)", page)
+        self.assertNotIn("Experience and projects found", page)
+        post = {"decision__github_url": "accept", "value__github_url": "https://github.com/octocat",
+                "decision__portfolio_url": "accept", "value__portfolio_url": "https://octo.dev"}
+        self.client.post(reverse("import_apply", args=[job.public_id]), post)
+        profile = self.reload()
+        self.assertEqual((profile.github_url, profile.portfolio_url), ("https://github.com/octocat", "https://octo.dev"))
+
+    def test_a_failing_github_call_shows_a_friendly_message_on_the_status_page(self):
+        with self.fake_github(fail_with=404), self.captureOnCommitCallbacks(execute=True):
+            self.client.post(reverse("import_github"), {"username": "nobody-here"})
+        job = ImportJob.objects.get()
+        self.assertContains(self.client.get(reverse("import_status", args=[job.public_id])), "No GitHub user with that name")
+
+    def test_an_import_in_flight_and_the_hourly_limit_show_messages(self):
+        ImportJob.objects.create(profile=self.profile, kind="github", source_kind="github", status="running")
+        self.assertContains(self.start("octocat"), "already running")
+        ImportJob.objects.all().delete()
+        with self.settings(PROFILE_IMPORT_RATE_PER_HOUR=1), mock.patch("apps.accounts.tasks.run_github_import"):
+            self.start("octocat")
+            ImportJob.objects.update(status=ImportJob.Status.APPLIED)
+            self.assertContains(self.start("octocat"), "Try again in an hour")
+
+    def test_login_csrf_and_method_rules(self):
+        self.assertEqual(Client().post(reverse("import_github"), {"username": "octocat"}).status_code, 302)
+        strict = Client(enforce_csrf_checks=True)
+        strict.force_login(self.user)
+        self.assertEqual(strict.post(reverse("import_github"), {"username": "octocat"}).status_code, 403)
+        self.assertEqual(self.client.get(reverse("import_github")).status_code, 405)

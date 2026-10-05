@@ -30,6 +30,19 @@
     </form>
 </section>
 
+<section id="github">
+    <h2>Import from GitHub</h2>
+    <form method="post" action="{% url 'import_github' %}">
+        {% csrf_token %}
+        <p>
+            <label for="github-username">GitHub username</label>
+            <input type="text" id="github-username" name="username" maxlength="60" autocomplete="off" placeholder="octocat">
+            <span class="help">Reads your public profile and repositories only. No sign-in, nothing private. It can suggest your GitHub link, a website and a few skills.</span>
+        </p>
+        <button type="submit">Import from GitHub</button>
+    </form>
+</section>
+
 {% if llm_available %}
 <section id="ai">
     <h2>AI-assisted import</h2>

@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from apps.accounts.importing import review as review_logic
-from apps.accounts.importing import llm_gate, service
+from apps.accounts.importing import github, llm_gate, service
 from apps.accounts.importing.documents import DocumentError
 from apps.accounts.models import ImportJob, ResumeEntry
 from apps.accounts.services.resume_facts import delete_entry, format_years, years_by_skill
@@ -213,3 +213,21 @@ def import_consent(request):
         messages.info(request, "AI-assisted import is off. Imports use rules only.")
     profile.save(update_fields=["llm_import_consent_at", "llm_import_consent_version"])
     return redirect("profile_import")
+
+
+@login_required
+@require_POST
+def import_github(request):
+    """Start an import from a public GitHub username (no sign-in with GitHub)."""
+    try:
+        job = service.start_github_import(request.user.profile, request.POST.get("username", ""))
+    except github.GitHubError as exc:
+        messages.error(request, service.error_message(exc.code))
+        return redirect("profile_import")
+    except service.ImportInProgress:
+        messages.error(request, "An import is already running. Wait for it to finish.")
+        return redirect("profile_import")
+    except service.ImportRateLimited:
+        messages.error(request, "You have started a lot of imports. Try again in an hour.")
+        return redirect("profile_import")
+    return redirect("import_status", public_id=job.public_id)
