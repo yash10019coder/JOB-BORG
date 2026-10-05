@@ -216,6 +216,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.auto_apply.sweep_stale_auto_apply_drafts",
         "schedule": crontab(minute="*/5"),  # same cadence as location-alias-sweep
     },
+    "import-job-sweep": {
+        "task": "apps.accounts.sweep_import_jobs",
+        "schedule": crontab(minute="*/15"),  # expire proposals, fail stuck jobs, drop old rows
+    },
     "learning-sweep-nightly": {
         "task": "apps.accounts.sweep_learning",
         "schedule": crontab(minute=30, hour=3),  # off-peak; the send path learns incrementally
@@ -252,6 +256,14 @@ PROFILE_IMPORT_TTL_HOURS = env.int("PROFILE_IMPORT_TTL_HOURS", default=24)
 PROFILE_IMPORT_MAX_PDF_BYTES = env.int("PROFILE_IMPORT_MAX_PDF_BYTES", default=5 * 1024 * 1024)
 PROFILE_IMPORT_MAX_PAGES = env.int("PROFILE_IMPORT_MAX_PAGES", default=10)
 PROFILE_IMPORT_MAX_TEXT_CHARS = env.int("PROFILE_IMPORT_MAX_TEXT_CHARS", default=40_000)
+# Abuse and housekeeping (rules A1-A2, P1): imports per user per hour, how long a
+# job may sit pending/running before the sweep fails it, and how long finished
+# rows are kept.
+PROFILE_IMPORT_RATE_PER_HOUR = env.int("PROFILE_IMPORT_RATE_PER_HOUR", default=10)
+PROFILE_IMPORT_STUCK_MINUTES = env.int("PROFILE_IMPORT_STUCK_MINUTES", default=30)
+PROFILE_IMPORT_ROW_RETENTION_DAYS = env.int("PROFILE_IMPORT_ROW_RETENTION_DAYS", default=30)
+PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS", default=120)
+PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS", default=90)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

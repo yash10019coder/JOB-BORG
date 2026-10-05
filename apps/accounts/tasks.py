@@ -132,6 +132,32 @@ def parse_resume(profile_id):
     profile.save(update_fields=["resume_text", "updated_at"])
 
 
+@shared_task(
+    name="apps.accounts.run_document_import",
+    time_limit=settings.PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS,
+    soft_time_limit=settings.PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS,
+)
+def run_document_import(public_id):
+    """Extract import proposals from one uploaded document (or the saved resume).
+
+    Takes the job's public id (never a profile or file path). Idempotent: a job
+    that is no longer pending is left alone. Writes only to the ``ImportJob``;
+    the user's review decides what reaches the profile.
+    """
+    from .importing.service import run_job
+
+    job = run_job(public_id)
+    return job.status if job is not None else None
+
+
+@shared_task(name="apps.accounts.sweep_import_jobs")
+def sweep_import_jobs():
+    """Expire unreviewed proposals, fail stuck jobs, delete old rows."""
+    from .importing.service import sweep
+
+    return sweep()
+
+
 @shared_task(name="apps.accounts.learn_for_profile")
 def learn_for_profile_task(profile_id):
     """Run the consensus learner for one profile (idempotent).
