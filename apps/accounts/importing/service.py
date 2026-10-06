@@ -19,7 +19,7 @@ from django.core.files.base import ContentFile
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from apps.accounts.importing import github, rules, skills_lexicon
+from apps.accounts.importing import github, github_skills, rules, skills_lexicon
 from apps.accounts.importing import titles as title_lexicon
 from apps.accounts.importing.documents import (
     ALLOWED_EXTENSIONS,
@@ -30,10 +30,12 @@ from apps.accounts.importing.documents import (
 from apps.accounts.importing.llm_extract import extract_with_llm
 from apps.accounts.importing.pipeline import merge, run_rules
 from apps.accounts.models import ImportJob
+from apps.accounts.services import profile_skills
 
 logger = logging.getLogger(__name__)
 
-PAYLOAD_VERSION = 1
+PAYLOAD_VERSION = 2
+GITHUB_QUOTA_KEY = "profile_import:github:quota"
 
 # Friendly text for each short error code (shown on the status page).
 ERROR_MESSAGES = {
@@ -60,6 +62,9 @@ ERROR_MESSAGES = {
     "github_rate_limited": "GitHub is limiting requests right now. Try again later.",
     "github_error": "GitHub returned something unexpected.",
     "github_unavailable": "Could not reach GitHub. Try again later.",
+    "github_link_required": "Add your GitHub link to your profile first, then import from it.",
+    "github_not_your_account": "You can only import the GitHub account linked on your profile.",
+    "github_cooldown": "You imported from GitHub a moment ago. Wait a few minutes and try again.",
     "timeout": "That import took too long and was stopped.",
     "unexpected": "Something went wrong reading that document.",
 }
@@ -139,6 +144,9 @@ def start_github_import(profile, raw_username):
     from apps.accounts.tasks import run_github_import
 
     username = github.normalize_username(raw_username)
+    require_saved_github_login(profile, username)
+    if cache.get(_cooldown_key(profile.user_id)):
+        raise github.GitHubError("github_cooldown")
     check_rate_limit(profile.user_id, "github")
     try:
         with transaction.atomic():
@@ -147,8 +155,31 @@ def start_github_import(profile, raw_username):
             )
     except IntegrityError:
         raise ImportInProgress() from None
+    cache.set(_cooldown_key(profile.user_id), 1, settings.PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS)
     transaction.on_commit(lambda: run_github_import.delay(str(job.public_id), username))
     return job
+
+
+def _cooldown_key(user_id):
+    return f"profile_import:github:cooldown:{user_id}"
+
+
+def saved_github_login(profile):
+    """The login in the profile's saved GitHub link, or ``None`` (GHX0)."""
+    try:
+        return github.normalize_username(profile.github_url or "")
+    except github.GitHubError:
+        return None
+
+
+def require_saved_github_login(profile, username):
+    """GHX0: the import only runs for the account the profile already links to,
+    because public data alone cannot show that an account belongs to the user."""
+    saved = saved_github_login(profile)
+    if saved is None:
+        raise github.GitHubError("github_link_required")
+    if saved.casefold() != username.casefold():
+        raise github.GitHubError("github_not_your_account")
 
 
 # --------------------------------------------------------------------------
@@ -269,23 +300,48 @@ def run_github_job(public_id, username, client=None):
     if not claimed:
         return None
     job = ImportJob.objects.get(public_id=public_id)
+    client = client or github.GitHubClient()
     try:
-        proposals = github.propose((client or github.GitHubClient()).fetch(username))
-        if proposals:
+        full = _github_full_mode(client)
+        data = client.fetch_profile(username, full=full)
+        if client.remaining is not None:
+            cache.set(GITHUB_QUOTA_KEY, client.remaining, 3600)
+        proposals = github.propose(data)
+        proposals.pop("github_url", None)  # the saved link is the precondition (GHX0)
+        derived = github_skills.derive(data, profile_skills.dismissed_keys(job.profile))
+        if proposals or derived["entries"] or derived["skills"]:
             _finish(
                 job, ImportJob.Status.READY,
-                payload={"v": PAYLOAD_VERSION, "fields": proposals, "entries": [], "meta": {"source": "github"}},
+                payload={
+                    "v": PAYLOAD_VERSION, "fields": proposals, "entries": derived["entries"],
+                    "skills": derived["skills"],
+                    "meta": {"source": "github", "mode": data["meta"]["mode"], "scanned": data["meta"]["scanned"]},
+                },
             )
         else:
             _finish(job, ImportJob.Status.FAILED, error_code="nothing_found")
     except github.GitHubError as exc:
+        if exc.code == "github_rate_limited":
+            cache.set(GITHUB_QUOTA_KEY, 0, 600)  # stop sending users into a limit that is already hit
         _finish(job, ImportJob.Status.FAILED, error_code=exc.code)
     except Exception as exc:  # noqa: BLE001 -- coded, class name only
         logger.error("import job %s failed: %s", job.public_id, type(exc).__name__)
         _finish(job, ImportJob.Status.FAILED, error_code="unexpected")
-    logger.info("import job %s %s fields=%d code=%s", job.public_id, job.status,
-                len(job.payload.get("fields", {})), job.error_code)
+    logger.info("import job %s %s fields=%d entries=%d skills=%d mode=%s code=%s", job.public_id, job.status,
+                len(job.payload.get("fields", {})), len(job.payload.get("entries", [])),
+                len(job.payload.get("skills", [])), (job.payload.get("meta") or {}).get("mode", ""), job.error_code)
     return job
+
+
+def _github_full_mode(client):
+    """GHX1: full mode needs a token and enough remaining quota; a nearly empty
+    quota refuses the import, a low one drops it to light mode."""
+    left = cache.get(GITHUB_QUOTA_KEY)
+    if left is not None and left < settings.PROFILE_IMPORT_GITHUB_QUOTA_LOW_ANONYMOUS:
+        raise github.GitHubError("github_rate_limited")
+    if not client.token:
+        return False
+    return left is None or left >= settings.PROFILE_IMPORT_GITHUB_QUOTA_LOW_WITH_TOKEN
 
 
 # --------------------------------------------------------------------------

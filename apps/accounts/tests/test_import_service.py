@@ -142,7 +142,7 @@ class RunTests(_Base):
         job = self.run_started(docx_upload())
         self.assertEqual((job.status, job.extractor, job.error_code), ("ready", "rule", ""))
         payload = job.payload
-        self.assertEqual(payload["v"], 1)
+        self.assertEqual(payload["v"], service.PAYLOAD_VERSION)
         self.assertEqual(payload["fields"]["full_name"]["value"], "Jane Doe")
         self.assertEqual(payload["fields"]["current_employer"]["value"], "Acme Payments")
         self.assertEqual(payload["fields"]["phone"]["value"], "+91 9876543210")

@@ -16,7 +16,7 @@ role/level tags are ever imported into ``target_tags``.
 """
 import re
 
-SKILLS_LEXICON_VERSION = "2026-10-1"
+SKILLS_LEXICON_VERSION = "2026-10-2"
 
 # canonical name -> alternative spellings (all compared case-insensitively)
 LEXICON = {
@@ -279,3 +279,69 @@ def all_spellings():
     pairs = list(_ALIAS_INDEX.items())
     pairs.sort(key=lambda item: (-len(item[0]), item[0]))
     return pairs
+
+
+# --------------------------------------------------------------------------
+# Dependency names -> canonical skill (GitHub import, rule GHX5).
+#
+# Authored content like the lexicon above: a package that is not listed proposes
+# nothing. Keys are lowercase; Python names use "-" for "_". Go modules match by
+# prefix (see ``package_skill``); every value is a LEXICON canonical name.
+# --------------------------------------------------------------------------
+PACKAGE_SKILLS = {
+    # npm / composer
+    "react": "React", "react-dom": "React", "next": "Next.js", "vue": "Vue", "nuxt": "Nuxt.js",
+    "@angular/core": "Angular", "svelte": "Svelte", "express": "Express", "@nestjs/core": "NestJS",
+    "jquery": "jQuery", "redux": "Redux", "@reduxjs/toolkit": "Redux", "tailwindcss": "Tailwind CSS",
+    "bootstrap": "Bootstrap", "webpack": "Webpack", "vite": "Vite", "jest": "Jest", "mocha": "Mocha",
+    "cypress": "Cypress", "playwright": "Playwright", "@playwright/test": "Playwright",
+    "graphql": "GraphQL", "socket.io": "Socket.io", "@mui/material": "Material UI",
+    "typescript": "TypeScript", "react-native": "React Native", "firebase": "Firebase",
+    "mongoose": "MongoDB", "mongodb": "MongoDB", "pg": "PostgreSQL", "mysql": "MySQL", "mysql2": "MySQL",
+    "redis": "Redis", "ioredis": "Redis", "@storybook/react": "Storybook", "@supabase/supabase-js": "Supabase",
+    "stripe": "Stripe", "jsonwebtoken": "JWT", "kafkajs": "Kafka",
+    "laravel/framework": "Laravel", "symfony/symfony": "Symfony", "symfony/framework-bundle": "Symfony",
+    # Python
+    "django": "Django", "flask": "Flask", "fastapi": "FastAPI", "celery": "Celery", "pandas": "Pandas",
+    "numpy": "NumPy", "scipy": "SciPy", "scikit-learn": "scikit-learn", "sklearn": "scikit-learn",
+    "tensorflow": "TensorFlow", "torch": "PyTorch", "keras": "Keras", "xgboost": "XGBoost",
+    "opencv-python": "OpenCV", "nltk": "NLTK", "spacy": "spaCy", "langchain": "LangChain",
+    "transformers": "Hugging Face", "matplotlib": "Matplotlib", "pytest": "pytest", "selenium": "Selenium",
+    "psycopg": "PostgreSQL", "psycopg2": "PostgreSQL", "psycopg2-binary": "PostgreSQL", "pymongo": "MongoDB",
+    "boto3": "AWS", "kafka-python": "Kafka", "grpcio": "gRPC", "apache-airflow": "Airflow",
+    "pyspark": "Spark", "dbt-core": "dbt", "jupyter": "Jupyter",
+    # Ruby / Java / Gradle artifacts
+    "rails": "Ruby on Rails", "spring-boot": "Spring", "spring-boot-starter": "Spring",
+    "hibernate-core": "Hibernate", "junit": "JUnit", "junit-jupiter": "JUnit", "kafka-clients": "Kafka",
+    # Go modules (matched by prefix)
+    "google.golang.org/grpc": "gRPC", "github.com/segmentio/kafka-go": "Kafka",
+    "github.com/go-redis/redis": "Redis", "github.com/redis/go-redis": "Redis", "github.com/lib/pq": "PostgreSQL",
+    "go.mongodb.org/mongo-driver": "MongoDB", "github.com/aws/aws-sdk-go": "AWS",
+}
+# Files whose presence in a repository's root is evidence by itself.
+FILE_SKILLS = {"dockerfile": "Docker", "docker-compose.yml": "Docker", "docker-compose.yaml": "Docker"}
+# GitHub's language names that are not LEXICON spellings.
+LANGUAGE_SKILLS = {"shell": "Bash", "jupyter notebook": "Python", "hcl": "Terraform", "dockerfile": "Docker"}
+
+
+def package_skill(name):
+    """The canonical skill for a dependency name, or ``None``. Exact match first;
+    a Go-style module path also matches by prefix (``.../aws-sdk-go/service/s3``)."""
+    key = (name or "").strip().lower().replace("_", "-")
+    if not key:
+        return None
+    hit = PACKAGE_SKILLS.get(key)
+    if hit:
+        return hit
+    if "." in key.split("/")[0]:  # a module path such as github.com/org/repo/sub
+        for prefix, skill in PACKAGE_SKILLS.items():
+            if "." in prefix.split("/")[0] and key.startswith(prefix + "/"):
+                return skill
+    return None
+
+
+def language_skill(name):
+    """The canonical skill for a GitHub language name, or ``None`` (unknown and
+    noise languages such as Makefile propose nothing)."""
+    key = (name or "").strip().lower()
+    return LANGUAGE_SKILLS.get(key) or canonical_skill(name)

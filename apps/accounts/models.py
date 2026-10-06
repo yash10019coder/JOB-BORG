@@ -830,6 +830,10 @@ class ResumeEntry(models.Model):
     )
     # Canonical skill names, grounded in the entry's own text when imported.
     skills = models.JSONField(default=list, blank=True)
+    # A project's short description and its https link (GitHub import); shown
+    # as plain text, never as markup.
+    description = models.TextField(blank=True, default="")
+    url = models.URLField(max_length=255, blank=True, default="")
     source = models.CharField(
         max_length=16, choices=Source.choices, default=Source.IMPORTED
     )
@@ -853,3 +857,40 @@ class ResumeEntry(models.Model):
 
     def __str__(self):
         return f"ResumeEntry<{self.profile_id}:{self.kind}:{self.title}>"
+
+
+class ProfileSkill(models.Model):
+    """A skill on the profile as a whole, with the evidence that supports it.
+
+    Unlike the skills listed on a ``ResumeEntry`` (which belong to one job or
+    project), this is the user's overall list. ``evidence`` describes where the
+    import saw the skill (repo count, first/last seen); it is shown to the user
+    and never added to job-based years. Re-importing merges or refreshes the
+    evidence and never deletes: removing a skill sets ``dismissed`` so the next
+    import shows it unticked instead of proposing it as new.
+    """
+
+    class Origin(models.TextChoices):
+        GITHUB = "github", "GitHub"
+
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="profile_skills"
+    )
+    name = models.CharField(max_length=40)
+    key = models.CharField(max_length=40)  # casefolded name
+    origin = models.CharField(max_length=16, choices=Origin.choices)
+    evidence = models.JSONField(default=dict, blank=True)
+    dismissed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "key"], name="uniq_profileskill_profile_key"
+            ),
+        ]
+
+    def __str__(self):
+        return f"ProfileSkill<{self.profile_id}:{self.name}>"

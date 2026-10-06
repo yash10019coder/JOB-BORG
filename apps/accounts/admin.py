@@ -8,6 +8,7 @@ from .models import (
     EmailInboxCredential,
     ImportJob,
     Profile,
+    ProfileSkill,
     ProfileSuggestion,
     ResumeEntry,
 )
@@ -165,6 +166,16 @@ class ResumeEntryAdmin(admin.ModelAdmin):
     list_display = ("profile", "kind", "title", "organization", "start_date", "is_current", "source")
     list_filter = ("kind", "source")
     search_fields = ("title", "organization", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ProfileSkill)
+class ProfileSkillAdmin(admin.ModelAdmin):
+    list_display = ("profile", "name", "origin", "dismissed", "updated_at")
+    list_filter = ("origin", "dismissed")
+    search_fields = ("name", "profile__user__username")
 
     def has_add_permission(self, request):
         return False

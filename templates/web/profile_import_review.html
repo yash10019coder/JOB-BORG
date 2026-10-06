@@ -9,6 +9,9 @@
     is saved until you press Save.
 </p>
 {% if linkedin_note %}<p class="notice">This does not look like a LinkedIn export, so it was read like an ordinary resume. Check each value.</p>{% endif %}
+{% if review.mode == "light" %}<p class="notice">Without a GitHub access token on this server, only each repository's main language and topics were read, so frameworks and libraries are not shown. Skills and projects reflect your public activity only.</p>
+{% elif review.mode == "partial" %}<p class="notice">GitHub limited requests during this import, so some repositories were not read in depth. Skills and projects reflect your public activity only.</p>
+{% elif review.mode == "full" %}<p class="muted">Skills and projects reflect your public GitHub activity only. Private work is not included.</p>{% endif %}
 {% if review.truncated %}<p class="notice">The document was very long, so only the first part was read.</p>{% endif %}
 
 <form method="post" action="{% url 'import_apply' job.public_id %}">
@@ -54,15 +57,40 @@
     </table>
     {% endif %}
 
+    {% if has_skills %}
+    <h2>Skills found</h2>
+    <p class="muted">Each skill shows what it was seen in. Skills seen in two or more repositories start ticked; you can untick any. These are self-reported from your public GitHub, not verified.</p>
+    <ul style="list-style:none; padding-left:0;">
+    {% for row in review.skills %}
+        <li>
+        {% if row.existing == "unchanged" %}
+            <strong>{{ row.name }}</strong> <span class="muted">Already saved &middot; {{ row.proof }}</span>
+        {% else %}
+            <label>
+                <input type="checkbox" name="skill_decision__{{ row.index }}" value="accept"{% if row.accept %} checked{% endif %}>
+                <strong>{{ row.name }}</strong> <span class="muted">{{ row.proof }}</span>
+            </label>
+            {% if row.existing == "removed" %}<span class="tag">you removed this</span>{% endif %}
+            {% if row.existing == "update" %}<span class="tag">updates what is saved</span>{% endif %}
+            {% if row.error %}<span class="error" role="alert">This skill is not valid ({{ row.error }}).</span>{% endif %}
+        {% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+    {% endif %}
+
     {% if has_entries %}
-    <h2>Experience and projects found</h2>
-    <p class="muted">Each entry keeps the skills that appear in its own description. Entries marked <em>check this</em> were not clear enough to pre-select.</p>
+    <h2>{% if review.mode %}Projects found{% else %}Experience and projects found{% endif %}</h2>
+    <p class="muted">Each entry keeps the skills that appear in its own description. Entries marked <em>check this</em> were not clear enough to pre-select.{% if review.mode %} Projects start unticked: choose the ones you want on your profile.{% endif %}</p>
     {% for row in review.entries %}
+    {% if review.mode and forloop.counter == 11 %}<details><summary>Show {{ entry_total|add:"-10" }} more projects</summary>{% endif %}
     <div class="entry-card{% if row.existing == 'kept' or row.existing == 'unchanged' %} dimmed{% endif %}">
         <strong>{{ row.title|default:"(no title)" }}</strong>{% if row.organization %} &middot; {{ row.organization }}{% endif %}
         <span class="tag">{{ row.kind|capfirst }}</span>
         {% if row.needs_check %}<span class="tag" style="background:#fef3c7; color:#92400e;">check this</span>{% endif %}
         {% if row.layout_inferred %}<span class="tag">layout guessed</span>{% endif %}
+        {% if row.url %}<span class="muted plain-value">{{ row.url }}</span>{% endif %}
+        {% if row.description %}<p class="plain-value">{{ row.description }}</p>{% endif %}
         {% if row.existing == "kept" %}<p>Kept (you edited this entry before).</p>
         {% elif row.existing == "unchanged" %}<p>Already saved.</p>
         {% else %}
@@ -88,6 +116,7 @@
         </div>
         {% endif %}
     </div>
+    {% if review.mode and forloop.last and forloop.counter > 10 %}</details>{% endif %}
     {% endfor %}
     {% endif %}
 
