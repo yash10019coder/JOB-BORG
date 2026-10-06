@@ -18,7 +18,10 @@ The question's risk tier is recomputed on every call and the riskier of the
 stored and computed tier wins, so a classifier fix takes effect on rows that
 were written under the old rules. A T0/T1 value is *confirmed* only when its
 source is ``user``; anything learned or imported needs the user's explicit
-confirmation (``needs_confirmation``) before submission.
+confirmation (``needs_confirmation``) before submission. A *learned* answer is
+held in every tier: it is a prefill from the user's past behaviour, never
+something to send unreviewed. While the profile's ``learning_enabled`` is off,
+learned rows are not used at all.
 
 ``write_answer`` is the one writer of ``AnswerBank``: it enforces precedence
 (user-locked > user-set > learned > imported) and keeps the superseded value
@@ -343,6 +346,12 @@ def resolve_answer(
         return _typed_result(profile, fact, computed_tier, conflict)
 
     row = _bank_row(profile, question_text, key, job, bank_rows) if profile is not None else None
+    if (
+        row is not None
+        and row.source == AnswerBank.Source.LEARNED
+        and not profile.learning_enabled
+    ):
+        row = None
     if row is not None and not _is_expired(row, now):
         tier = higher_tier(row.risk_tier, computed_tier)
         value = _map_to_options(row.value, options)
@@ -353,7 +362,8 @@ def resolve_answer(
             value=value,
             provenance=provenance,
             needs_confirmation=(
-                tier in _NEEDS_CONFIRMATION_TIERS and row.source != AnswerBank.Source.USER
+                row.source == AnswerBank.Source.LEARNED
+                or (tier in _NEEDS_CONFIRMATION_TIERS and row.source != AnswerBank.Source.USER)
             ),
             tier=tier,
         )
@@ -364,6 +374,21 @@ def resolve_answer(
             return found
 
     return None
+
+
+def would_refuse(existing, source, now=None):
+    """Whether ``write_answer`` would refuse ``source`` over ``existing``.
+
+    The user always wins; anyone else loses to an unexpired row of higher
+    precedence or a locked one. Exposed so callers (the learner's dry run) can
+    ask without writing.
+    """
+    source = AnswerBank.Source(source)
+    if existing is None or source == AnswerBank.Source.USER:
+        return False
+    if _is_expired(existing, now or timezone.now()):
+        return False
+    return SOURCE_RANK[source] < _rank(existing) or existing.is_locked
 
 
 def _locked_row(profile, key, scope_region=""):
@@ -452,9 +477,8 @@ def write_answer(
                 if existing is None:
                     raise
 
-        if source != AnswerBank.Source.USER and not _is_expired(existing, now):
-            if SOURCE_RANK[source] < _rank(existing) or existing.is_locked:
-                return WriteResult(False, existing)
+        if would_refuse(existing, source, now):
+            return WriteResult(False, existing)
 
         AnswerBankHistory.objects.create(
             profile=profile,

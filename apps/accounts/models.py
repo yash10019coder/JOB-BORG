@@ -90,6 +90,8 @@ _AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[bool | None, bool | None]] = {
     "requires_sponsorship": (None, True),
     # Not authorized says nothing about whether sponsorship would be needed.
     "not_authorized": (False, None),
+    # Both are known: not authorized now, and sponsorship would be needed.
+    "not_authorized_needs_sponsorship": (False, True),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
     "h1b": (True, None),
     "opt": (True, None),
@@ -195,8 +197,17 @@ class Profile(models.Model):
         CITIZEN = "citizen", "Citizen"
         PERMANENT_RESIDENT = "permanent_resident", "Permanent resident / Green card"
         WORK_PERMIT = "work_permit", "Work permit held (no sponsorship needed)"
-        REQUIRES_SPONSORSHIP = "requires_sponsorship", "Will require visa sponsorship"
-        NOT_AUTHORIZED = "not_authorized", "Not authorized to work"
+        REQUIRES_SPONSORSHIP = (
+            "requires_sponsorship",
+            "Will require visa sponsorship (current authorization not stated)",
+        )
+        NOT_AUTHORIZED = "not_authorized", "Not authorized to work (sponsorship not stated)"
+        # The common case for someone outside the country applying to its jobs:
+        # not authorized there today, and would need the employer to sponsor.
+        NOT_AUTHORIZED_NEEDS_SPONSORSHIP = (
+            "not_authorized_needs_sponsorship",
+            "Not authorized to work yet, will require sponsorship",
+        )
         # US-specific, with the country named in the label so the value is
         # never ambiguous about where it applies.
         H1B = "h1b", "H-1B (US)"
@@ -244,6 +255,11 @@ class Profile(models.Model):
     # should write this -- see FR7.10 in
     # docs/plans/2026-10-03-2300-consolidated-requirements.md.
     field_provenance = models.JSONField(default=dict, blank=True)
+
+    # Phase 3: when False the consensus learner writes nothing and learned
+    # answers are not used to prefill. Not a matching input, so it must be saved
+    # with ``update_fields`` (see apps.matching.signals).
+    learning_enabled = models.BooleanField(default=True)
 
     remote_pref = models.CharField(
         max_length=16,
@@ -597,7 +613,16 @@ class AnswerObservation(models.Model):
     # Where the submitted value came from (provenance of the draft entry).
     provenance_source = models.CharField(max_length=16, blank=True, default="")
     provenance_origin = models.CharField(max_length=64, blank=True, default="")
-    was_edited = models.BooleanField(default=False)
+    # The user saved the review form with this answer (any save sets it; it is
+    # NOT evidence the user wrote the value -- see ``user_edited``).
+    user_confirmed = models.BooleanField(default=False)
+    # The user typed or changed this value (the signal the learner counts).
+    user_edited = models.BooleanField(default=False)
+    # The remember box was offered pre-ticked and the user unticked it.
+    remember_declined = models.BooleanField(default=False)
+    # The learned answer that was prefilled for this question, if any: lets
+    # shadow metrics compare "what the learner would have filled" with ``value``.
+    learned_value = models.JSONField(null=True, blank=True)
     job_id = models.BigIntegerField(null=True, blank=True)
     draft_id = models.BigIntegerField(null=True, blank=True)
     employer_name = models.CharField(max_length=255, blank=True, default="")
@@ -618,3 +643,53 @@ class AnswerObservation(models.Model):
 
     def __str__(self):
         return f"AnswerObservation<{self.profile_id}:{self.question_key}>"
+
+
+class ProfileSuggestion(models.Model):
+    """A learned answer offered to the user for promotion to their own.
+
+    Written by the consensus learner for legal/commercial (T0/T1) answers. A
+    ``rejected`` row also records "do not propose this value again" (keyed by
+    ``value_fingerprint``), including when the user forgets a learned answer.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    value_fingerprint = models.CharField(max_length=40)
+    tier = models.CharField(max_length=16)
+    evidence = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    learner_version = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "question_key", "scope_region", "value_fingerprint"],
+                name="uniq_profilesuggestion_profile_key_scope_value",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "status"], name="psugg_profile_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"ProfileSuggestion<{self.profile_id}:{self.question_key}:{self.status}>"

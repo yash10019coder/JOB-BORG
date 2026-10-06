@@ -185,6 +185,17 @@ class AnswersSaveTests(_Base):
         self.assertContains(page, '<option value="h1b" selected>')
         self.assertContains(page, '<option value="IND" selected>')
 
+    def test_the_not_authorized_needs_sponsorship_status_can_be_saved_and_is_labelled(self):
+        self.answers(
+            **{"visa_country[]": ["USA"], "visa_status[]": ["not_authorized_needs_sponsorship"]}
+        )
+        self.assertEqual(
+            self.refreshed().visa_status_by_country, {"USA": "not_authorized_needs_sponsorship"}
+        )
+        page = self.client.get(reverse("profile_answers"))
+        self.assertContains(page, '<option value="not_authorized_needs_sponsorship" selected>')
+        self.assertContains(page, "Not authorized to work yet, will require sponsorship")
+
     def test_a_duplicate_country_is_an_error_and_saves_nothing(self):
         self.profile.visa_status_by_country = {"USA": "citizen"}
         self.profile.save()

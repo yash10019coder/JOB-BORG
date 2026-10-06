@@ -105,9 +105,31 @@ class ResolveAnswerTests(_Base):
         self.assertTrue(resolved.provenance["locked"])
         self.assertFalse(resolved.needs_confirmation)
 
-    def test_learned_t2_value_needs_no_confirmation(self):
-        self._store(PYTHON_Q, "7", "learned")
+    def test_learned_value_of_every_tier_needs_confirmation(self):
+        for text in (PYTHON_Q, SPONSOR_Q, SALARY_Q):
+            with self.subTest(text=text):
+                self._store(text, "x", "learned")
+                self.assertTrue(resolve_answer(self.profile, text).needs_confirmation)
+
+    def test_imported_t2_value_is_still_not_held(self):
+        self._store(PYTHON_Q, "7", "imported")
         self.assertFalse(resolve_answer(self.profile, PYTHON_Q).needs_confirmation)
+
+    def test_user_value_of_a_t2_question_is_never_held(self):
+        self._store(PYTHON_Q, "7", "user")
+        self.assertFalse(resolve_answer(self.profile, PYTHON_Q).needs_confirmation)
+
+    def test_learned_rows_are_ignored_while_learning_is_off(self):
+        self._store(PYTHON_Q, "7", "learned")
+        self.profile.learning_enabled = False
+        self.profile.save(update_fields=["learning_enabled"])
+        self.assertIsNone(resolve_answer(self.profile, PYTHON_Q))
+
+    def test_user_rows_still_resolve_while_learning_is_off(self):
+        self._store(PYTHON_Q, "7", "user")
+        self.profile.learning_enabled = False
+        self.profile.save(update_fields=["learning_enabled"])
+        self.assertEqual(resolve_answer(self.profile, PYTHON_Q).value, "7")
 
     def test_learned_and_imported_t0_t1_values_need_confirmation(self):
         for text, source in ((SPONSOR_Q, "learned"), (SALARY_Q, "imported")):

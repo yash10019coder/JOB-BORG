@@ -216,6 +216,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.auto_apply.sweep_stale_auto_apply_drafts",
         "schedule": crontab(minute="*/5"),  # same cadence as location-alias-sweep
     },
+    "learning-sweep-nightly": {
+        "task": "apps.accounts.sweep_learning",
+        "schedule": crontab(minute=30, hour=3),  # off-peak; the send path learns incrementally
+    },
 }
 
 # Dedicated Celery queue for Playwright submission tasks (U7 / D1)
@@ -234,6 +238,12 @@ REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
 # Debounce delay (seconds) collapsing rapid successive profile saves into one
 # rematch execution (U10).
 REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
+# Consensus learner (Phase 3): distinct employers that must give the same
+# authored answer before it is learned, profiles per nightly sweep, and how
+# long a pending suggestion stays open.
+LEARNING_MIN_DISTINCT_EMPLOYERS = env.int("LEARNING_MIN_DISTINCT_EMPLOYERS", default=2)
+LEARNING_SWEEP_BATCH_SIZE = env.int("LEARNING_SWEEP_BATCH_SIZE", default=200)
+LEARNING_SUGGESTION_TTL_DAYS = env.int("LEARNING_SUGGESTION_TTL_DAYS", default=90)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

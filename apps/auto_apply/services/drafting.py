@@ -327,6 +327,15 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             entry["needs_confirmation"] = resolved_answer.needs_confirmation
             entry["provenance"] = resolved_answer.provenance
             entry["tier"] = resolved_answer.tier
+            provenance = resolved_answer.provenance
+            if (
+                provenance.get("origin") == "answer_bank"
+                and provenance.get("source") == "learned"
+                and not invalid_option
+            ):
+                # What the learner prefilled, kept even if the user changes it:
+                # the shadow metrics compare it with what was submitted.
+                entry["learned_value"] = value
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
 
@@ -425,6 +434,12 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         entry["value"] = prior_value
         entry["needs_review"] = False
         entry["reason"] = "carried_forward_from_previous_draft"
+        # The user typed this on the earlier attempt: keep saying so, or the
+        # consensus learner would discard exactly the self-ID answers a retry
+        # carries forward (see apps.accounts.services.learning).
+        for flag in ("user_edited", "remember_declined"):
+            if prior_entry.get(flag):
+                entry[flag] = True
 
 
 def _persist_draft(

@@ -28,10 +28,13 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
 from apps.auto_apply.models import AutoApplyDraft
 from apps.auto_apply.services import answer_memory
 from apps.auto_apply.services.confirmation import (
+    bank_held_labels,
     build_submit_snapshot,
+    confirm_entry,
     is_blank_answer_value,
     unconfirmed_fields,
 )
+from apps.accounts.tasks import learn_for_profile_task
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
@@ -491,6 +494,7 @@ def auto_apply_queue(request):
                 needs_review_count += 1
         draft.display_answers = display_answers
         draft.needs_review_count = needs_review_count
+        draft.held_bank_count = len(bank_held_labels(draft.answers))
 
     # Group same-job repeat attempts (e.g. several FAILED retries before a
     # fix landed) under one card instead of one redundant top-level card
@@ -596,24 +600,20 @@ def edit_auto_apply_draft(request, pk):
             # what drafting put there): the only reliable sign that an answer
             # is theirs, since `user_confirmed` is set by any save.
             answers[label]["user_edited"] = True
+        offered = answer_memory.remember_ui(label, answers[label], draft.job)
+        if offered:
+            # An unticked, pre-ticked box is an explicit "do not remember this":
+            # the consensus learner must not learn it either.
+            answers[label]["remember_declined"] = bool(
+                offered["checked"] and remember_field not in request.POST
+            )
         answers[label]["value"] = cleaned
         if answers[label].get("needs_confirmation"):
             # A learned/imported legal or commercial answer is only ever
             # confirmed by an explicit, per-field action -- saving the form
             # (which re-posts every value) must not count as one.
             if confirm_field in request.POST and not is_blank_answer_value(cleaned):
-                entry = answers[label]
-                entry["confirmed_from"] = entry.get("provenance")
-                entry["provenance"] = {
-                    "origin": "draft_review",
-                    "source": "user",
-                    "locked": False,
-                    "confidence": 1.0,
-                    "detail": {},
-                }
-                entry["needs_confirmation"] = False
-                entry["needs_review"] = False
-                entry["user_confirmed"] = True
+                confirm_entry(answers[label])
             else:
                 answers[label]["needs_review"] = True
                 answers[label]["user_confirmed"] = False
@@ -642,6 +642,38 @@ def edit_auto_apply_draft(request, pk):
         )
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
+    return _auto_apply_queue_redirect(request)
+
+
+@login_required
+@require_POST
+def confirm_learned_answers(request, pk):
+    """Confirm, in one action, every held answer that came from the user's
+    stored answers (learned or imported) on a `DRAFTED` draft.
+
+    LLM guesses, blank fields and typed-settings values are never touched, and
+    nothing is promoted to the user's own answers: this only clears the
+    per-field hold, through the same transition as confirming each by hand.
+    Ownership+status scoped like the other draft actions (404 otherwise).
+    """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    answers = {label: dict(entry) if isinstance(entry, dict) else entry
+               for label, entry in (draft.answers or {}).items()}
+    labels = bank_held_labels(answers)
+    for label in labels:
+        confirm_entry(answers[label], origin="draft_review_bulk")
+    if labels:
+        draft.answers = answers
+        draft.save(update_fields=["answers", "updated_at"])
+        messages.info(
+            request,
+            f"Confirmed {len(labels)} remembered answer{'s' if len(labels) != 1 else ''}. "
+            "Check them before you send.",
+        )
+    else:
+        messages.info(request, "No remembered answers to confirm on this draft.")
     return _auto_apply_queue_redirect(request)
 
 
@@ -735,6 +767,10 @@ def send_auto_apply_draft(request, pk):
         # What is being submitted, recorded in the same transaction as the
         # transition so a lost race records nothing.
         answer_memory.record_observations(draft)
+        # Learn from what was just recorded, but only once it is committed:
+        # a worker must never run before the observations are visible.
+        profile_id = draft.user.profile.pk
+        transaction.on_commit(lambda: learn_for_profile_task.delay(profile_id))
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")

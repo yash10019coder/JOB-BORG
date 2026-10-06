@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Learning — JobBorg{% endblock %}
+{% block content %}
+<h1>Learning</h1>
+{% include "web/_profile_tabs.html" %}
+<p class="muted">
+    When you give the same answer to the same question for different employers,
+    JobBorg remembers it and prefills it next time. A learned answer is never
+    sent on its own: you confirm it on each application until you choose
+    &ldquo;Use from now on&rdquo; here.
+</p>
+
+<section id="settings">
+    <form method="post" action="{% url 'learning_settings' %}">
+        {% csrf_token %}
+        <label>{{ form.learning_enabled }} {{ form.learning_enabled.label }}</label>
+        <span class="help">When off, nothing new is learned and learned answers are not used to prefill. Your own answers are unaffected.</span>
+        <button type="submit">Save</button>
+    </form>
+    <form method="post" action="{% url 'learning_run' %}" class="actions">
+        {% csrf_token %}
+        <button type="submit"{% if not learning_enabled %} disabled{% endif %}>Improve my profile</button>
+        <span class="help">Look through your sent applications for answers you keep repeating.</span>
+    </form>
+</section>
+
+<section id="suggestions">
+    <h2>Suggestions</h2>
+    {% for suggestion in suggestions %}
+    <div class="card">
+        <strong>{{ suggestion.question_text }}</strong>
+        <p>
+            You answered <strong>{{ suggestion.value_display }}</strong>
+            {% if suggestion.evidence_employers %}for {{ suggestion.evidence_employers|join:", " }}{% endif %}.
+            {% if suggestion.scope_label %}<span class="tag">{{ suggestion.scope_label }} only</span>{% endif %}
+        </p>
+        <p class="muted">This is a legal or commercial question, so it stays locked once you accept: auto-apply will prefill it, but you still confirm it on each application.</p>
+        <form method="post" action="{% url 'suggestion_accept' suggestion.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Use from now on</button>
+        </form>
+        <form method="post" action="{% url 'suggestion_dismiss' suggestion.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Dismiss</button>
+        </form>
+    </div>
+    {% empty %}
+    <p class="muted">No suggestions right now.</p>
+    {% endfor %}
+</section>
+
+<section id="learned">
+    <h2>Learned answers</h2>
+    {% for row in learned_rows %}
+    <div class="card">
+        <strong>{{ row.question_text }}</strong>
+        <p>
+            Auto-apply will prefill: <strong>{{ row.value_display }}</strong>
+            {% if row.scope_label %}<span class="tag">{{ row.scope_label }} only</span>{% endif %}
+        </p>
+        <p class="muted">
+            {% if row.evidence_count %}Same answer for {{ row.evidence_count }} employer{{ row.evidence_count|pluralize }}{% if row.evidence_employers %} ({{ row.evidence_employers|join:", " }}){% endif %}.{% endif %}
+            You confirm it on each application until you use it from now on.
+        </p>
+        <form method="post" action="{% url 'learned_promote' row.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Use from now on{% if row.will_lock %} (locked){% endif %}</button>
+        </form>
+        <form method="post" action="{% url 'learned_forget' row.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Forget</button>
+        </form>
+    </div>
+    {% empty %}
+    <p class="muted">Nothing learned yet. Once you give the same answer to different employers, it shows up here.</p>
+    {% endfor %}
+    {% if learned_rows %}
+    <form method="post" action="{% url 'learned_forget_all' %}" class="actions"
+          onsubmit="return confirm('Forget all learned answers?');">
+        {% csrf_token %}<button type="submit">Forget all learned answers</button>
+    </form>
+    {% endif %}
+</section>
+{% endblock %}
