@@ -36,6 +36,11 @@ class EligibilityTests(SimpleTestCase):
         ]
         self.assertEqual([r["name"] for r in gs.eligible_repos(LOGIN, repos)], ["good"])
 
+    def test_GHX3_a_pinned_fork_counts_but_other_forks_do_not(self):
+        repos = [repo("good"), repo("mine-forked", fork=True), repo("other-fork", fork=True), repo("old", archived=True)]
+        names = [r["name"] for r in gs.eligible_repos(LOGIN, repos, pinned=["mine-forked", "old"])]
+        self.assertEqual(names, ["good", "mine-forked"])
+
     def test_GHX3_bad_names_and_missing_dates_are_dropped(self):
         repos = [repo("../evil"), repo("has space"), repo("ok-1"), repo("nodates", created_at=None), repo("baddate", pushed_at="soon")]
         self.assertEqual([r["name"] for r in gs.eligible_repos(LOGIN, repos)], ["ok-1"])
@@ -221,8 +226,12 @@ class ProjectTests(SimpleTestCase):
         # pinned leads; many stars outweigh being a year stale; recency breaks the rest
         self.assertEqual(order, ["pinned", "starred", "stale", "quiet"])
 
-    def test_GHX7_a_pinned_repo_that_is_not_eligible_is_ignored(self):
+    def test_GHX7_a_pinned_fork_is_proposed_and_leads(self):
         order = [e["title"] for e in self.projects([repo("aa"), repo("forked", fork=True)], pinned=["forked"])]
+        self.assertEqual(order, ["forked", "aa"])
+
+    def test_GHX7_a_pinned_archived_repo_is_still_ignored(self):
+        order = [e["title"] for e in self.projects([repo("aa"), repo("old", archived=True)], pinned=["old"])]
         self.assertEqual(order, ["aa"])
 
     def test_GHX7_at_most_25_projects(self):

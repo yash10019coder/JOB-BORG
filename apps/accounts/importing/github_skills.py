@@ -60,9 +60,11 @@ def _months_between(earlier, later):
 # --------------------------------------------------------------------------
 # Which repositories count
 # --------------------------------------------------------------------------
-def eligible_repos(login, repos):
-    """GHX3: own, non-fork, non-archived, non-template, non-trivial repositories
-    with a valid name and usable dates. Order is preserved."""
+def eligible_repos(login, repos, pinned=()):
+    """GHX3: own, non-archived, non-template, non-trivial repositories with a
+    valid name and usable dates. A fork counts only when the user pinned it.
+    Order is preserved."""
+    pinned = {p for p in pinned if isinstance(p, str)}
     out = []
     for repo in repos or []:
         if not isinstance(repo, dict):
@@ -71,7 +73,7 @@ def eligible_repos(login, repos):
         size = repo.get("size")
         if not isinstance(name, str) or not REPO_NAME.match(name):
             continue
-        if repo.get("fork") or repo.get("archived") or repo.get("is_template"):
+        if (repo.get("fork") and name not in pinned) or repo.get("archived") or repo.get("is_template"):
             continue
         if not isinstance(size, int) or size < MIN_REPO_SIZE_KB:
             continue
@@ -96,7 +98,7 @@ def rank_projects(login, repos, pinned=(), today=None):
             + (3 if recent else 0) + (1 if repo.get("description") else 0)
         )
 
-    return sorted(eligible_repos(login, repos), key=lambda r: (score(r), r["name"].casefold()))
+    return sorted(eligible_repos(login, repos, pinned), key=lambda r: (score(r), r["name"].casefold()))
 
 
 # --------------------------------------------------------------------------
@@ -312,8 +314,9 @@ def derive(data, dismissed=(), today=None):
     if not isinstance(login, str):
         return {"skills": [], "entries": []}
     enrichment = data.get("enrichment") or {}
-    ranked = rank_projects(login, data.get("repos") or [], data.get("pinned") or [], today)
+    pinned = data.get("pinned") or []
+    ranked = rank_projects(login, data.get("repos") or [], pinned, today)
     return {
-        "skills": build_skills(eligible_repos(login, data.get("repos") or []), enrichment, dismissed),
+        "skills": build_skills(eligible_repos(login, data.get("repos") or [], pinned), enrichment, dismissed),
         "entries": build_projects(login, ranked, enrichment),
     }
