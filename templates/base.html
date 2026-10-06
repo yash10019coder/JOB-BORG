@@ -36,7 +36,21 @@
         .notice { border-left: 3px solid #b45309; background: #fffbeb; padding: .5rem .75rem; margin: 1rem 0; }
         fieldset { border: 1px solid #e2e2e2; border-radius: 8px; margin: 1rem 0; }
         .help { display: block; color: #666; font-size: .85rem; }
+
+        /* Import review: Current vs Imported (server-rendered, no JS) */
+        table.diff { width: 100%; border-collapse: collapse; margin: .75rem 0; font-size: .92rem; }
+        table.diff caption { text-align: left; font-weight: 600; padding-bottom: .4rem; }
+        table.diff th, table.diff td { text-align: left; vertical-align: top; padding: .4rem .5rem; border-bottom: 1px solid #eee; }
+        table.diff th[scope=col] { font-size: .8rem; color: #555; text-transform: uppercase; letter-spacing: .03em; }
+        table.diff .kept { color: #555; background: #f7f7f7; }
+        table.diff .error, .entry-card .error { color: #b00020; font-size: .85rem; }
+        .entry-card { border: 1px solid #e2e2e2; border-radius: 8px; padding: .75rem 1rem; margin: .75rem 0; }
+        .entry-card.dimmed { background: #f7f7f7; color: #555; }
+        .entry-card label { margin-top: .4rem; font-weight: 500; }
+        .decision label { display: inline; font-weight: 400; margin: 0 .6rem 0 0; }
+        .plain-value { word-break: break-all; }
     </style>
+    {% block extra_head %}{% endblock %}
     <script src="{% static 'web/js/infinite_scroll.js' %}" defer></script>
     <script src="{% static 'web/js/modal.js' %}" defer></script>
 </head>

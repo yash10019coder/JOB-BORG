@@ -3,7 +3,7 @@ from django.contrib.auth import views as auth_views
 from django.urls import path
 from django.views.generic import RedirectView
 
-from . import views, views_learning, views_profile
+from . import views, views_import, views_learning, views_profile
 
 urlpatterns = [
     path("accounts/login/", auth_views.LoginView.as_view(), name="login"),
@@ -11,6 +11,15 @@ urlpatterns = [
     path("accounts/signup/", views.signup, name="signup"),
     path("profile/", views_profile.profile, name="profile"),
     path("profile/answers/", views_profile.profile_answers, name="profile_answers"),
+    path("profile/import/", views_import.profile_import, name="profile_import"),
+    path("profile/import/start/", views_import.import_start, name="import_start"),
+    path("profile/import/consent/", views_import.import_consent, name="import_consent"),
+    path("profile/import/github/", views_import.import_github, name="import_github"),
+    path("profile/import/entries/<int:pk>/delete/", views_import.import_entry_delete, name="import_entry_delete"),
+    path("profile/import/<uuid:public_id>/", views_import.import_status, name="import_status"),
+    path("profile/import/<uuid:public_id>/review/", views_import.import_review, name="import_review"),
+    path("profile/import/<uuid:public_id>/apply/", views_import.import_apply, name="import_apply"),
+    path("profile/import/<uuid:public_id>/discard/", views_import.import_discard, name="import_discard"),
     path("profile/learning/", views_learning.learning, name="profile_learning"),
     path("profile/learning/settings/", views_learning.learning_settings, name="learning_settings"),
     path("profile/learning/run/", views_learning.learning_run, name="learning_run"),

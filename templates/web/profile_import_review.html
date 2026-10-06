@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Review import — JobBorg{% endblock %}
+{% block content %}
+<h1>Review import</h1>
+{% include "web/_profile_tabs.html" %}
+<p class="muted">
+    Choose what to save. Values you change here are saved as yours. Anything you
+    have already set is shown as <em>Kept</em> and is never overwritten. Nothing
+    is saved until you press Save.
+</p>
+{% if linkedin_note %}<p class="notice">This does not look like a LinkedIn export, so it was read like an ordinary resume. Check each value.</p>{% endif %}
+{% if review.truncated %}<p class="notice">The document was very long, so only the first part was read.</p>{% endif %}
+
+<form method="post" action="{% url 'import_apply' job.public_id %}">
+    {% csrf_token %}
+
+    {% if has_fields %}
+    <table class="diff">
+        <caption>Profile details found</caption>
+        <thead>
+            <tr><th scope="col">Field</th><th scope="col">Current</th><th scope="col">Imported</th><th scope="col">Save?</th></tr>
+        </thead>
+        <tbody>
+        {% for row in review.fields %}
+            <tr{% if row.kept or row.unchanged %} class="kept"{% endif %}>
+                <th scope="row">{{ row.label }}{% if row.provisional %}<span class="help">Layout not verified: check it.</span>{% endif %}</th>
+                <td class="plain-value">{{ row.current|default:"—" }}</td>
+                {% if row.kept %}
+                <td colspan="2">{{ row.kept_label }}</td>
+                {% elif row.unchanged %}
+                <td colspan="2">Unchanged</td>
+                {% else %}
+                <td>
+                    {% if row.multiline %}
+                    <textarea name="value__{{ row.key }}" rows="3" aria-label="{{ row.label }}">{{ row.imported }}</textarea>
+                    <span class="help">One per line.</span>
+                    {% else %}
+                    <input type="text" name="value__{{ row.key }}" value="{{ row.imported }}" aria-label="{{ row.label }}">
+                    {% endif %}
+                    {% if row.error %}<span class="error" role="alert">This value is not valid ({{ row.error }}).</span>{% endif %}
+                    {% if row.snippet %}<details><summary class="muted">Where this came from</summary><span class="plain-value">{{ row.snippet }}</span></details>{% endif %}
+                </td>
+                <td class="decision">
+                    <fieldset style="border:0; margin:0; padding:0;">
+                        <legend class="help">Save {{ row.label }}?</legend>
+                        <label><input type="radio" name="decision__{{ row.key }}" value="accept"{% if row.accept %} checked{% endif %}> Save</label>
+                        <label><input type="radio" name="decision__{{ row.key }}" value="reject"{% if not row.accept %} checked{% endif %}> Skip</label>
+                    </fieldset>
+                </td>
+                {% endif %}
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if has_entries %}
+    <h2>Experience and projects found</h2>
+    <p class="muted">Each entry keeps the skills that appear in its own description. Entries marked <em>check this</em> were not clear enough to pre-select.</p>
+    {% for row in review.entries %}
+    <div class="entry-card{% if row.existing == 'kept' or row.existing == 'unchanged' %} dimmed{% endif %}">
+        <strong>{{ row.title|default:"(no title)" }}</strong>{% if row.organization %} &middot; {{ row.organization }}{% endif %}
+        <span class="tag">{{ row.kind|capfirst }}</span>
+        {% if row.needs_check %}<span class="tag" style="background:#fef3c7; color:#92400e;">check this</span>{% endif %}
+        {% if row.layout_inferred %}<span class="tag">layout guessed</span>{% endif %}
+        {% if row.existing == "kept" %}<p>Kept (you edited this entry before).</p>
+        {% elif row.existing == "unchanged" %}<p>Already saved.</p>
+        {% else %}
+        {% if row.existing == "update" %}<p class="help">Replaces the entry saved from an earlier import.</p>{% endif %}
+        <label for="entry-title-{{ row.index }}">Title</label>
+        <input type="text" id="entry-title-{{ row.index }}" name="entry_title__{{ row.index }}" value="{{ row.title }}">
+        {% if row.kind == "experience" %}
+        <label for="entry-org-{{ row.index }}">Employer</label>
+        <input type="text" id="entry-org-{{ row.index }}" name="entry_org__{{ row.index }}" value="{{ row.organization }}">
+        <label for="entry-start-{{ row.index }}">Start (YYYY-MM)</label>
+        <input type="text" id="entry-start-{{ row.index }}" name="entry_start__{{ row.index }}" value="{{ row.start }}" placeholder="2021-01">
+        <label for="entry-end-{{ row.index }}">End (YYYY-MM, blank if current)</label>
+        <input type="text" id="entry-end-{{ row.index }}" name="entry_end__{{ row.index }}" value="{{ row.end }}" placeholder="2023-06">
+        <label><input type="checkbox" name="entry_current__{{ row.index }}"{% if row.is_current %} checked{% endif %}> I still work here</label>
+        {% endif %}
+        <label for="entry-skills-{{ row.index }}">Skills (comma separated)</label>
+        <input type="text" id="entry-skills-{{ row.index }}" name="entry_skills__{{ row.index }}" value="{{ row.skills }}">
+        {% if row.error %}<p class="error" role="alert">This entry is not valid ({{ row.error }}).</p>{% endif %}
+        {% if row.snippet %}<details><summary class="muted">Where this came from</summary><span class="plain-value">{{ row.snippet }}</span></details>{% endif %}
+        <div class="decision">
+            <label><input type="radio" name="entry_decision__{{ row.index }}" value="accept"{% if row.accept %} checked{% endif %}> Save</label>
+            <label><input type="radio" name="entry_decision__{{ row.index }}" value="reject"{% if not row.accept %} checked{% endif %}> Skip</label>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    <button type="submit">Save selected</button>
+</form>
+
+<form method="post" action="{% url 'import_discard' job.public_id %}" class="actions">
+    {% csrf_token %}
+    <button type="submit">Discard this import</button>
+</form>
+{% endblock %}

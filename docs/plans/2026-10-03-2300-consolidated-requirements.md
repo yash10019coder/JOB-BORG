@@ -2,7 +2,7 @@
 artifact_contract: ce-unified-plan/v1
 product_contract_source: ce-brainstorm + ce-pov
 created_at: "2026-10-03T23:00:00Z"
-updated_at: "2026-10-04T00:30:00Z"
+updated_at: "2026-10-05T00:00:00Z"
 status: active
 artifact_readiness: implementation-ready
 scope: "Complete consolidated requirements for JobBorg Profile System overhaul"
@@ -171,7 +171,7 @@ classifier cannot place is treated as T0.
 | FR7.4 | `resolve_answer(profile, question, job=None)` in `apps/accounts/services/answer_resolver.py` returns `(value, provenance, needs_confirmation)` or `None`. Typed Profile facts (FR2–FR4, FR1.7) are consulted first, AnswerBank rows second (location-sensitive questions use only a row saved for the job's region or marked "applies everywhere"), the legacy answers last (**amended: read from backfilled `legacy:*` AnswerBank rows, not the `ExplicitAnswer` table; consulted only when no typed fact covers the question; each hit emits a fallback metric**). `needs_confirmation` is true for any T0/T1 value whose source is not a user-confirmed row | P0 |
 | FR7.5 | `apps/auto_apply/services/answer_resolution.py:resolve_field_answers` (the real `ExplicitAnswer` read path; `drafting.py` only calls it) must obtain answers via `resolve_answer()`, ahead of the LLM batch step. `resolve_answer()` replaces `_profile_derived_answer` and the category map there | P0 |
 | FR7.8 | **Tier enforced at resolve time:** `resolve_answer()` re-classifies the question text and uses the higher of stored and computed tier, so classifier fixes take effect on existing rows. A DB `CheckConstraint` forbids `source in (learned, imported)` rows from being marked confirmed/locked | P0 |
-| FR7.10 | **`Profile.field_provenance`** (JSON, `{field_name: {source, locked, updated_at, detail}}`) gives plain Profile columns the same provenance as AnswerBank rows. Covered fields: `full_name`, `phone`, `current_employer`, `linkedin_url`, `github_url`, `portfolio_url`, `target_tags`, the FR1.7 contact/location facts, and per-key entries for `visa_status_by_country` / `citizenship_countries` / `salary_by_region` (`visa_status_by_country.USA`). A form save marks every field the user changed as `source=user` (and `locked` when the user toggles it); importer/learner writes record `imported`/`learned`. A missing entry means `user` for any non-empty legacy value. FR7.3 precedence applies: a lower-precedence writer cannot overwrite a higher one or a locked field — it may only create a diff row/`ProfileSuggestion`. One shared `set_profile_field(profile, field, value, source)` helper is the only write path for covered fields, so no writer can skip the check | P0 |
+| FR7.10 | **`Profile.field_provenance`** (JSON, `{field_name: {source, locked, updated_at, detail}}`) gives plain Profile columns the same provenance as AnswerBank rows. Covered fields: `full_name`, `phone`, `current_employer`, `linkedin_url`, `github_url`, `portfolio_url`, `target_tags`, the FR1.7 contact/location facts, and per-key entries for `visa_status_by_country` / `citizenship_countries` / `salary_by_region` (`visa_status_by_country.USA`). A form save marks every field the user changed as `source=user` (and `locked` when the user toggles it); importer/learner writes record `imported`/`learned`. A missing entry means `user` for any non-empty legacy value. FR7.3 precedence applies: a lower-precedence writer cannot overwrite a higher one or a locked field — it may only create a diff row/`ProfileSuggestion`. One shared `profile_fields.apply_profile_field(profile, key, value, source)` helper (and `apply_imported` for an import) is the only write path for covered fields, so no writer can skip the check | P0 |
 | FR7.9 | Submit gate: a draft containing any `needs_confirmation` T0/T1 field cannot be submitted until each is confirmed or edited in the review queue; the confirmed value and its prior provenance are recorded in the FR7.6 snapshot | P0 |
 | FR7.6 | Submitted drafts snapshot the exact answers + provenance used (legal-attestation audit trail) | P0 |
 | FR7.7 | Expiry: `learned` T2 answers expire after 180 days, `imported` after 365 days unless re-confirmed; expired rows resolve to `None` | P0 |
@@ -195,20 +195,20 @@ classifier cannot place is treated as T0.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR9.1 | One structured-output LLM call (provider via existing LangChain multi-provider layer, default GPT-4o-mini) extracts contact, skills, education, projects, experience | P1 |
+| FR9.1 | One structured-output LLM call (provider via existing LangChain multi-provider layer, default GPT-4o-mini) extracts contact, skills, education, projects, experience  **Amended (Phase 4):** rules run first and always; the LLM only *locates* quotes (never supplies a value) and is off unless an operator lists a provider (FR9.10). Imported: contact, links, location, skills, titles, and experience and project entries with their own skills (new `ResumeEntry`). **Education, certifications and spoken languages are not stored.** Years per skill are computed in code from entry dates and shown, not yet used to answer questions. | P1 |
 | FR9.2 | Every extracted value must be grounded in a source span of the document text; ungrounded values are dropped | P1 |
-| FR9.3 | Deterministic validation: regex for email/phone/URLs/dates. Rule-based parser (`pypdf`) is the fallback when the LLM is unavailable. Must use RE2 or regex execution timeouts and input length bounds to prevent ReDoS | P1 |
+| FR9.3 | Deterministic validation: regex for email/phone/URLs/dates. Rule-based parser (`pypdf`) is the fallback when the LLM is unavailable. Must use RE2 or regex execution timeouts and input length bounds to prevent ReDoS  **Decided (Phase 4): stdlib `re` with hard input bounds** (text capped at 40,000 chars, long lines skipped) instead of a new RE2 dependency, guarded by adversarial-timing tests. | P1 |
 | FR9.4 | Resume text is untrusted input: fixed system prompt with the document delimited as data, output schema enforced. The importer may *propose* T0/T1 values but never writes them as confirmed; they surface as `needs_confirmation`. URL fields are restricted to `https` with no `javascript:`/`data:`; the review template relies on Django autoescape (no `|safe`) | P1 |
 | FR9.5 | LinkedIn: PDF export upload through the same pipeline. **No scraping** | P1 |
 | FR9.6 | GitHub: public REST API by username (no OAuth): languages → `target_tags` suggestions, top repos → `portfolio_url` suggestion | P1 |
 | FR9.7 | Runs async in Celery; UI polls a status endpoint for progress and redirects to the dedicated review route upon completion | P1 |
-| FR9.8 | Results are shown via a dedicated review route (`/profile/import/<task_id>/review/`) displaying a two-column diff (Current vs. Imported) with checkboxes to accept/reject/edit each field before any write; accepted values are written with `source=imported` | P1 |
+| FR9.8 | Results are shown via a dedicated review route (`/profile/import/<uuid>/review/`) displaying a two-column diff (Current vs. Imported) with checkboxes to accept/reject/edit each field before any write; accepted values are written with `source=imported`  **Built:** the route uses the job's public UUID (`/profile/import/<uuid>/review/`); a value the user edits in the review is saved as `user`, an unedited accepted value as `imported`. | P1 |
 | FR9.9 | Re-sync (resume / LinkedIn / GitHub) shows a diff and never touches user-set or locked values, as recorded in `Profile.field_provenance` (FR7.10) and AnswerBank `source`/`is_locked`. Locked/user-set rows appear in the diff read-only with a "kept" label | P1 |
 | FR9.10 | Consent: unchecked-by-default opt-in next to the upload control, stored as `Profile.llm_import_consent_at` (+ version) and checked inside the Celery task before any LLM call; absent/declined → rule-based parser. Only providers on a zero-retention allowlist may be used (fail closed). Resume text and prompts/responses are never logged | P1 |
 | FR9.11 | Imported values do **not** seed the learning loop as evidence (avoid parser errors compounding into "learned" answers) | P1 |
 | FR9.12 | GitHub fetch: username validated against `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`, requests only to `https://api.github.com` with the username URL-quoted, redirects disabled, timeout and response-size caps, per-user rate limit, only whitelisted JSON fields consumed | P1 |
-| FR9.13 | PDF upload: max size (default 5 MB) and page cap, `%PDF` magic-byte check, encrypted/JS-bearing PDFs rejected, Celery time/memory limits, non-public storage with randomized names served only through an owner-checked view, extracted text truncated to a fixed token budget before any LLM call | P1 |
-| FR9.14 | `ImportJob` record (profile FK, task_id, status, expires_at). Every `/profile/import/<task_id>/*`, `/profile/suggestions/` and `/profile/answers/` lookup filters by `request.user.profile` (404 on mismatch); Celery results are never read by raw task_id; the diff payload is deleted after apply or TTL | P1 |
+| FR9.13 | PDF upload: max size (default 5 MB) and page cap, `%PDF` magic-byte check, encrypted/JS-bearing PDFs rejected, Celery time/memory limits, non-public storage with randomized names served only through an owner-checked view, extracted text truncated to a fixed token budget before any LLM call  **Built:** `PROFILE_IMPORT_MAX_PDF_BYTES` (5 MB, separate from the 10 MB resume upload), 10 pages, stored under `imports/` with a random name and deleted as soon as it is read. Active-content detection rejects only code-running actions (`/JavaScript`, `/Launch`, `/SubmitForm`...), because a bare `/OpenAction` view destination is normal (29 of 81 real resumes carry one). | P1 |
+| FR9.14 | `ImportJob` record (profile FK, public UUID, status, expires_at). Every `/profile/import/<uuid>/*`, `/profile/suggestions/` and `/profile/answers/` lookup filters by `request.user.profile` (404 on mismatch); Celery results are never read by raw task_id; the diff payload is deleted after apply or TTL | P1 |
 
 ---
 
@@ -244,9 +244,18 @@ class Profile:
     llm_import_consent_at = DateTimeField(null=True)   # FR9.10
     llm_import_consent_version = CharField(blank=True)
 
-class ImportJob(Model):                  # FR9.14, ownership-bound import task
+class ImportJob(Model):                  # FR9.14, ownership-bound import task (Phase 4)
     profile = FK(Profile, CASCADE, related_name="import_jobs")
-    task_id, status, expires_at, created_at / updated_at
+    public_id (UUID), kind (document/github), source_kind, status, extractor (rule/llm),
+    error_code, source_file (deleted after reading), payload (proposals + <=80-char snippets,
+    cleared on apply/discard/expiry), expires_at, applied_at, created_at / updated_at
+    # UniqueConstraint(profile) where status in (pending, running): one in-flight import
+
+class ResumeEntry(Model):                # Phase 4: reviewed experience / project entries
+    profile = FK(Profile, CASCADE, related_name="resume_entries")
+    kind (experience/project), title, organization, start_date, end_date, is_current,
+    precision (month/year), skills (JSON), source (imported/user), natural_key
+    # UniqueConstraint(profile, kind, natural_key); a re-import never deletes entries
 
 class AnswerBank(Model):
     class Source(TextChoices): USER, LEARNED, IMPORTED
@@ -298,7 +307,7 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 | `/profile/suggestions/` | GET/POST | List / accept / reject suggestions |
 | `/profile/learn/` | POST | On-demand learning run |
 | `/profile/import/` | POST | Start resume / LinkedIn PDF / GitHub import → task id |
-| `/profile/import/<task_id>/` | GET | Import status + proposed field diff |
+| `/profile/import/<uuid>/` | GET | Import status (refreshes itself; redirects to the review when ready) |
 
 `resolve_answer()` is an internal service, not an HTTP endpoint.
 
@@ -308,14 +317,29 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 
 | Phase | Weeks | Scope | Exit criterion |
 |---|---|---|---|
-| **1. Foundation** | 1–2 | AnswerBank + history, risk classifier, `resolve_answer()` with ExplicitAnswer fallback, drafting switched to resolver, answer snapshot on submit | Drafting tests green; no behaviour change for existing users |
-| **2. Profile UI** | 3–4 | Two-page profile, typed-fact resolver (FR2–FR4, FR1.7), custom answers CRUD, remember-on-review + observation capture, questions panel + quick-fill, ExplicitAnswer backfill | Users can maintain all answers from one page; a question answered once is not re-entered |
-| **3. Learning (consensus)** | 5 | Consensus learner over `AnswerObservation` (same authored answer across 2 distinct employers → learned row, held for confirmation in every tier), Learning tab, "confirm all remembered answers", shadow metrics (measure only). Built: see `2026-10-04-003-feat-consensus-learner-plan.md` | Reuse without re-typing; NFR2 intact |
-| **4. Import** | 6–7 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
-| **4b. Learning (embeddings + shadow gate)** | 8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
-| **5. Enablement & cleanup** | 9+ | T2 auto-apply behind precision gate, drop ExplicitAnswer after zero-fallback release | Gate passes 2 weeks; legacy table removed |
+| **1. Foundation** — built, PR #125 | 1–2 | AnswerBank + history, risk classifier, `resolve_answer()` with ExplicitAnswer fallback, drafting switched to resolver, answer snapshot on submit | Drafting tests green; no behaviour change for existing users |
+| **2. Profile UI** — built, PR #133 | 3–4 | Two-page profile, typed-fact resolver (FR2–FR4, FR1.7), custom answers CRUD, remember-on-review + observation capture, questions panel + quick-fill, ExplicitAnswer backfill | Users can maintain all answers from one page; a question answered once is not re-entered |
+| **3. Learning (consensus)** — built, PR #135 | 5 | Consensus learner over `AnswerObservation` (same authored answer across 2 distinct employers → learned row, held for confirmation in every tier), Learning tab, "confirm all remembered answers", shadow metrics (measure only). Built: see `2026-10-04-003-feat-consensus-learner-plan.md` | Reuse without re-typing; NFR2 intact |
+| **4. Import** — built (`feat/profile-import`) | 6–7 | LLM structured import + grounding + validation, rule-based fallback, LinkedIn PDF, GitHub username, review/diff UI, consent | Import never writes T0/T1; per-field review works |
+| **4b. Learning (embeddings + shadow gate)** — planned (also reworded-question matching, #130) | 8 | Exact-match learner, suggestions UI, embeddings retrieval, three execution contexts, shadow logging | Suggestions flowing; shadow precision dashboard live |
+| **5. Enablement & cleanup** — planned | 9+ | T2 auto-apply behind precision gate, drop ExplicitAnswer after zero-fallback release | Gate passes 2 weeks; legacy table removed |
 
 ---
+
+### Phase 4 (Import): what was built and decided
+
+Phases 1-3 are built in stacked PRs (#125 → #133 → #135); Phase 4 (#136) stacks on them. The plan is `2026-10-05-001-feat-profile-import-plan.md` and the rules it is tested against are `2026-10-05-002-profile-import-rules.md`: every rule ID there is cited by a test, and a test fails if one is not.
+
+**Decisions that were open, now settled:**
+1. *Provider allowlist (Open Question 3):* `PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS`, empty by default, so a fresh install imports with rules only and the consent control is not even shown. A call also needs a known provider with its key set, the user's consent at the current version, and the daily cap (5).
+2. *UI states (Open Question 14):* a fourth **Import** tab; a status page that refreshes itself without JavaScript (and stops after three minutes); a review page with a Current-vs-Imported table and entry cards; friendly messages for each failure code.
+3. *Rate limits, CSRF, storage (Open Question 15):* 10 imports per user per hour per kind, one in-flight job per profile (a database constraint), CSRF on every POST, uploads stored under `imports/` and deleted as soon as they are read.
+4. *Retention:* the job's proposals live 24 hours (`PROFILE_IMPORT_TTL_HOURS`); finished rows are deleted after 30 days; stored `ResumeEntry` rows persist until the user deletes them or the account is deleted.
+5. *What the importer may touch:* only `IMPORTABLE_FIELDS` plus `ResumeEntry`; a field the user set, learned or locked is shown as *Kept* and never overwritten; imported values never feed the learner (FR9.11).
+
+**Measured on 81 real resume PDFs (aggregate only):** no safety false rejections; 255 of 256 experience date ranges plausible; 0 Education anchors became entries; names found 77/81; phones 61/81; 83% of experience entries fully resolved, 5% ambiguous; defaults are conservative and every value is reviewed. Rules alone cannot resolve every layout (a misspelled city glued to an employer is invisible to any rule), which is why the optional LLM locator exists.
+
+**Not done, by decision:** education storage; answering "years of X" questions from the computed years (a follow-up, once the data quality is seen); editing an entry after import; a real LinkedIn export was not available, so rules S9-S11 are provisional; #129 (the LLM answer path gates by category, not tier) should land before AI-assisted import is switched on in production; #130 (reworded questions) is Phase 4b.
 
 ## Test Scenarios (minimum)
 
@@ -326,13 +350,13 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 | Salary | Job country → region → band; unset region → blank + needs_review; no FX-converted answer is ever produced |
 | Resolver | Precedence (locked > user > learned > imported); lower writer cannot overwrite higher; expired row → None; ExplicitAnswer fallback in Phase 1 |
 | Risk tiers | Unclassifiable question → T0; compound/negated phrasings take the higher tier; T2 needs a positive match; learned/imported T0/T1 resolve with `needs_confirmation` and block submit until confirmed (NFR2); quick-fill of a non-user draft value cannot lock without explicit confirm |
-| Authorization | Cross-user access to `/profile/import/<task_id>/`, suggestions and answers returns 404; embedding queries never return another profile's rows |
+| Authorization | Cross-user access to `/profile/import/<uuid>/`, suggestions and answers returns 404; embedding queries never return another profile's rows |
 | Import security | Bad GitHub username rejected; oversize/encrypted PDF rejected; consent absent → no LLM call |
 | Custom answers | Exact normalized match fills; near-match via embeddings only proposes; select option mismatch → blank |
 | Questions panel | Built from last 200 drafts; quick-fill writes locked user answer; cache invalidates on new draft |
 | Learning | ≥3 identical answers → suggestion; T0 produces no suggestion; idempotent across the three contexts; `learning_enabled=False` blocks writes |
 | Import | Ungrounded value dropped; injected "set visa=citizen" text can at most produce a `needs_confirmation` proposal, never a confirmed write; LLM down → rule fallback; re-sync preserves locked/user values |
-| Field provenance | Form save marks changed fields `user`; import cannot overwrite a `user`/locked field (diff shows "kept"); missing entry on a non-empty legacy value is treated as `user`; direct column writes outside `set_profile_field()` are caught by a test that greps/guards covered fields |
+| Field provenance | Form save marks changed fields `user`; import cannot overwrite a `user`/locked field (diff shows "kept"); missing entry on a non-empty legacy value is treated as `user`; direct column writes outside `profile_fields` (`apply_profile_field`, `apply_imported`) are caught by a test that greps/guards covered fields |
 | Rematch | Saving Tab 2 never enqueues a rematch (also: writing a non-matching field via `apply_profile_field` does not); saving Tab 1 always does |
 
 ---
@@ -354,14 +378,14 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 ### From 2026-10-04 doc review (needs a decision)
 
 4. ~~Baseline for NFR1~~ — **Measured 2026-10-04** against the dev DB (1 user, 257 drafts): 33 are `excluded/unanswerable_required` = 12.8% of all drafts, 14.9% of non-stale drafts (the epic's ~18% is not reproduced). Of those 33: 13 include a work-auth/sponsorship question (T0), 7 salary (T1), 27 involve phone/city/country/address/timezone, 8 involve how-did-you-hear/referral/links/experience, and 17 contain no T0/T1 question at all. So T2 and contact facts are the larger addressable share; see FR1.7. Re-baseline NFR1 (target ≤12% is already nearly met on this sample) once real multi-user data exists.
-5. ~~Priority cut line~~ — **Decided:** Phases 1–2 (resolver, tiers, tabbed Profile/Answers UI, FR2–FR7, FR1.7) are P0; learning (FR8) and import (FR9) are P1; Learning tab appears with Phase 4.
-6. ~~Embeddings and import timing~~ — **Follows from 5:** both are P1 and ship after Phases 1–2 are measured. Embedding/worker-image work (FR8.3/FR8.10) stays inside Phase 4 and can be dropped if exact-match coverage is enough.
+5. ~~Priority cut line~~ — **Decided:** Phases 1–2 (resolver, tiers, tabbed Profile/Answers UI, FR2–FR7, FR1.7) are P0; learning (FR8) and import (FR9) are P1. **Amended:** the Learning tab shipped with Phase 3 (FR1.1).
+6. ~~Embeddings and import timing~~ — **Follows from 5:** both are P1 and ship after Phases 1–2 are measured. Embedding/worker-image work (FR8.3/FR8.10) is Phase 4b. **Amended (first real use):** exact-match coverage is *not* enough: the remaining retyping is reworded questions (4 wordings of gender, 4 of ethnicity, 5 of sponsorship on real sends), so semantic matching is wanted. It must only propose; see #130.
 7. ~~Shadow gate unit~~ — **Decided:** observe per (user, job, question), roll up per (user, question_key), then to a global per-question_key figure when enough distinct users exist (FR8.6). Still open: what the learning loop delivers if no scope ever reaches the 99% gate (suggestions accepted into AnswerBank still count toward the metric).
-8. ~~Imported provenance on Profile columns~~ — **Decided:** `Profile.field_provenance` JSON (FR7.10), written only through one `set_profile_field()` helper. Open detail: backfill treats existing non-empty values as `user`.
-9. ~~ExplicitAnswer migration mapping~~ — **Decided: dual write** (see Data Model Changes). Open detail: behavior when a legacy row disagrees with a typed Profile fact (currently: logged + surfaced in review queue).
+8. ~~Imported provenance on Profile columns~~ — **Decided:** `Profile.field_provenance` JSON (FR7.10), written only through `profile_fields` (`apply_profile_field` for one field, `apply_imported` for an import's accepted fields in one validated save). Open detail: backfill treats existing non-empty values as `user`.
+9. ~~ExplicitAnswer migration mapping~~ — **Decided (amended in Phase 2): one-time backfill, then read-only** (see Data Model Changes). Open detail: behavior when a legacy row disagrees with a typed Profile fact (currently: logged + surfaced in review queue).
 10. ~~`AnswerBankHistory`~~ — **Kept (Phase 2):** remember-on-review, overwrite and delete all write it, so it has consumers.
 11. ~~GDPR scope~~ — **Deferred** (NFR8). Policy for now: on account deletion delete everything persisted/cached; application/form-field server data is temporary. Still make snapshots/history write-once and admin read-only.
-12. **Timeline:** with learning/import at P1, Phases 1–2 are the committed scope; enablement (shadow ≥2 weeks + gate ≥2 weeks after Phase 4) lands around week 11+. Epic says 9 weeks.
+12. **Timeline:** Phases 1–3 are built (2026-10-04/05) and awaiting merge; the rest is P1 and unscheduled; enablement (shadow ≥2 weeks + gate ≥2 weeks after Phase 4) lands around week 11+. Epic says 9 weeks.
 13. **Epic #117 vs this doc:** epic lists 9 categories incl. `visa_details`, 10 visa statuses, global salary fallback, WebSocket progress, pdfplumber; doc has 8, 11 (matches code), none, polling, pypdf. Update the epic text; #113/#112/#100/#16 are still open despite "supersedes".
 14. **UI specs missing:** tab URLs/submit boundaries, import progress/diff/failure states, Learning-tab suggestion cards and empty states, provenance badge/lock semantics, accessibility/responsive NFR, FR1.6 redirect vs import flow.
 15. **Rate limits/CSRF:** per-user quotas for `/profile/import/` and `/profile/learn/`; state CSRF coverage for new POST endpoints.
@@ -396,7 +420,7 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 - `apps/accounts/services/__init__.py` and `apps/accounts/services/answer_resolver.py`: `resolve_answer(profile, question, job=None)` returning `(value, provenance, needs_confirmation)`; resolve-time re-classification (FR7.8); legacy `ExplicitAnswer` fallback injected from `auto_apply`, emitting a fallback-hit metric.
 - `apps/auto_apply/services/answer_resolution.py` (`resolve_field_answers`): call `resolve_answer()` ahead of the LLM batch step; replace `_profile_derived_answer` and the category map. `drafting.py` only needs to carry the `needs_confirmation` flag through to the review queue and the submit gate (FR7.9).
 - `AnswerBank` `CheckConstraint` (FR7.8); append-only `AnswerBankHistory`/snapshot models read-only in admin.
-- `Profile.field_provenance` + `set_profile_field()` helper (FR7.10); route the existing Profile form save through it and backfill (non-empty values → `user`).
+- `Profile.field_provenance` + the `profile_fields` write path (`apply_profile_field`, `apply_imported`) (FR7.10); route the existing Profile form save through it and backfill (non-empty values → `user`).
 - **No T2 auto-apply gate logic in this unit** (moved to Units 4–5). Until the gate exists, learned T2 values are suggest-only.
 - **Test File**: `apps/accounts/tests/test_answer_resolver.py`
 
@@ -415,7 +439,7 @@ All `/profile/*` endpoints must be authenticated and explicitly authorize access
 **Objective**: Extract data from Resume/LinkedIn PDF via LLM with rule fallback. Extract target tags and repos from GitHub API.
 - `apps/accounts/tasks.py`: Extend `parse_resume` to use LangChain structured output. Implement rule-based fallback with `pypdf`.
 - `apps/accounts/services/importer.py`: Orchestrate grounding and validation. Ensure T0/T1 fields are never written. Implement GitHub REST API client for tags and repos.
-- `apps/web/views/profile_import.py`: Endpoints `/profile/import/`, `/profile/import/<task_id>/` and `/profile/import/<task_id>/review/` (progress + two-column diff, template included). `ImportJob` ownership binding (FR9.14).
+- `apps/web/views/profile_import.py`: Endpoints `/profile/import/`, `/profile/import/<uuid>/` and `/profile/import/<uuid>/review/` (progress + two-column diff, template included). `ImportJob` ownership binding (FR9.14).
 - Consent gate and persisted `llm_import_consent_at` checked in the task (FR9.10); GitHub validation/egress limits (FR9.12); PDF limits and storage (FR9.13). Pick one ReDoS mitigation (e.g. pinned `google-re2` in `requirements/base.txt`) and reuse the existing `extract_text_from_pdf`; define how source spans are tracked for FR9.2 grounding.
 - **Test File**: `apps/accounts/tests/test_importer.py`
 

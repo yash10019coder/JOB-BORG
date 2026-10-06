@@ -6,8 +6,10 @@ from .models import (
     AnswerBankHistory,
     AnswerObservation,
     EmailInboxCredential,
+    ImportJob,
     Profile,
     ProfileSuggestion,
+    ResumeEntry,
 )
 
 
@@ -135,6 +137,34 @@ class ProfileSuggestionAdmin(admin.ModelAdmin):
     list_display = ("profile", "question_key", "tier", "status", "created_at")
     list_filter = ("tier", "status")
     search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ImportJob)
+class ImportJobAdmin(admin.ModelAdmin):
+    """Operational view of imports. The payload (proposed personal data) and the
+    uploaded file are deliberately not shown (rule P1)."""
+
+    list_display = ("public_id", "profile", "source_kind", "status", "extractor", "error_code", "created_at")
+    list_filter = ("status", "source_kind", "extractor")
+    search_fields = ("public_id", "profile__user__username")
+    exclude = ("payload", "source_file")
+    readonly_fields = (
+        "public_id", "profile", "kind", "source_kind", "status", "extractor",
+        "error_code", "created_at", "updated_at", "expires_at", "applied_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ResumeEntry)
+class ResumeEntryAdmin(admin.ModelAdmin):
+    list_display = ("profile", "kind", "title", "organization", "start_date", "is_current", "source")
+    list_filter = ("kind", "source")
+    search_fields = ("title", "organization", "profile__user__username")
 
     def has_add_permission(self, request):
         return False

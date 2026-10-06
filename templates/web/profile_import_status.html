@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Import — JobBorg{% endblock %}
+{% block extra_head %}{% if refresh %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}{% endblock %}
+{% block content %}
+<h1>Import</h1>
+{% include "web/_profile_tabs.html" %}
+
+<div role="status" aria-live="polite">
+    {% if waiting %}
+        {% if refresh %}
+        <p>Reading your document&hellip; this page refreshes by itself.</p>
+        {% else %}
+        <p>This is taking longer than usual. <a href="{% url 'import_status' job.public_id %}">Refresh</a> to check again.</p>
+        {% endif %}
+    {% elif job.status == "failed" %}
+        <p class="notice"><strong>We could not import that.</strong> {{ error_text }}</p>
+    {% elif job.status == "applied" %}
+        <p>This import was applied.</p>
+    {% elif job.status == "discarded" %}
+        <p>This import was discarded. Nothing was changed.</p>
+    {% elif job.status == "expired" %}
+        <p>This import expired before it was reviewed. Start a new one.</p>
+    {% endif %}
+</div>
+
+<p><a href="{% url 'profile_import' %}">&larr; Back to Import</a></p>
+{% endblock %}

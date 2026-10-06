@@ -5,6 +5,7 @@ is a OneToOne extension holding everything the matching fan-out reads.
 """
 import os
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -20,6 +21,21 @@ def resume_upload_path(instance, filename):
     regardless of which storage backend (local/S3) is active."""
     extension = os.path.splitext(filename)[1].lower()
     return f"resumes/{instance.user_id}/{uuid.uuid4().hex}{extension}"
+
+
+def import_upload_path(instance, filename):
+    """Import uploads are deliberately not under ``resumes/``: an import source
+    (a resume, a LinkedIn export) is deleted as soon as it is read and must never
+    be mistaken for, or replace, the user's saved resume. The user's filename is
+    discarded (rule D7)."""
+    extension = os.path.splitext(filename)[1].lower()
+    return f"imports/{instance.profile.user_id}/{uuid.uuid4().hex}{extension}"
+
+
+def default_import_expiry():
+    return timezone.now() + timedelta(
+        hours=getattr(settings, "PROFILE_IMPORT_TTL_HOURS", 24)
+    )
 
 
 def validate_resume_file(file):
@@ -260,6 +276,13 @@ class Profile(models.Model):
     # answers are not used to prefill. Not a matching input, so it must be saved
     # with ``update_fields`` (see apps.matching.signals).
     learning_enabled = models.BooleanField(default=True)
+
+    # Phase 4: opt-in to sending resume text to an LLM provider for import
+    # (FR9.10). Unchecked by default; the Celery task re-reads these right before
+    # any LLM call, and a bump of ``PROFILE_IMPORT_CONSENT_VERSION`` requires the
+    # user to consent again.
+    llm_import_consent_at = models.DateTimeField(null=True, blank=True)
+    llm_import_consent_version = models.CharField(max_length=16, blank=True, default="")
 
     remote_pref = models.CharField(
         max_length=16,
@@ -693,3 +716,140 @@ class ProfileSuggestion(models.Model):
 
     def __str__(self):
         return f"ProfileSuggestion<{self.profile_id}:{self.question_key}:{self.status}>"
+
+
+class ImportJob(models.Model):
+    """One run of the profile importer: a resume / LinkedIn PDF, or GitHub.
+
+    The job holds *proposals*, never the resume text: ``payload`` carries the
+    proposed values with short evidence snippets, lives for ``expires_at`` (24 h
+    by default) and is cleared on apply, discard or expiry. The uploaded file is
+    deleted as soon as it has been read. Looked up by ``public_id`` (never the
+    Celery task id) and always through the owning profile.
+    """
+
+    class Kind(models.TextChoices):
+        DOCUMENT = "document", "Document"
+        GITHUB = "github", "GitHub"
+
+    class SourceKind(models.TextChoices):
+        RESUME = "resume", "Resume upload"
+        LINKEDIN_PDF = "linkedin_pdf", "LinkedIn PDF"
+        CURRENT_RESUME = "current_resume", "Saved resume"
+        GITHUB = "github", "GitHub"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        READY = "ready", "Ready for review"
+        APPLIED = "applied", "Applied"
+        DISCARDED = "discarded", "Discarded"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    class Extractor(models.TextChoices):
+        RULE = "rule", "Rules"
+        LLM = "llm", "LLM"
+
+    IN_FLIGHT = (Status.PENDING, Status.RUNNING)
+
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="import_jobs"
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    source_kind = models.CharField(max_length=16, choices=SourceKind.choices)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    extractor = models.CharField(
+        max_length=8, choices=Extractor.choices, default=Extractor.RULE
+    )
+    # A short machine code (``pdf_encrypted``, ``no_text_found`` ...), never
+    # exception text, which could carry resume content.
+    error_code = models.CharField(max_length=40, blank=True, default="")
+    source_file = models.FileField(upload_to=import_upload_path, null=True, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(default=default_import_expiry)
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # At most one pending/running job per profile: the database-level
+            # guard against concurrent imports.
+            models.UniqueConstraint(
+                fields=["profile"],
+                condition=models.Q(status__in=["pending", "running"]),
+                name="uniq_importjob_one_inflight_per_profile",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "expires_at"], name="importjob_status_exp_idx"),
+        ]
+
+    def __str__(self):
+        return f"ImportJob<{self.public_id}:{self.status}>"
+
+
+class ResumeEntry(models.Model):
+    """One reviewed experience or project from an import, with its own skills.
+
+    Persisted (unlike an import job's payload) so years per skill can be
+    computed and shown. Dates are month precision, stored as the first of the
+    month; ``precision`` records when only the year was known. ``source`` says
+    whether the user edited the entry on the review page. Re-importing never
+    deletes entries.
+    """
+
+    class Kind(models.TextChoices):
+        EXPERIENCE = "experience", "Experience"
+        PROJECT = "project", "Project"
+
+    class Source(models.TextChoices):
+        IMPORTED = "imported", "Imported"
+        USER = "user", "User"
+
+    class Precision(models.TextChoices):
+        MONTH = "month", "Month"
+        YEAR = "year", "Year"
+
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="resume_entries"
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    title = models.CharField(max_length=255)
+    organization = models.CharField(max_length=255, blank=True, default="")
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    is_current = models.BooleanField(default=False)
+    precision = models.CharField(
+        max_length=8, choices=Precision.choices, default=Precision.MONTH
+    )
+    # Canonical skill names, grounded in the entry's own text when imported.
+    skills = models.JSONField(default=list, blank=True)
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.IMPORTED
+    )
+    # casefold(organization|title|YYYY-MM of start): identifies "the same entry"
+    # across re-imports so they update instead of duplicating.
+    natural_key = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_current", "-start_date", "title"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "kind", "natural_key"],
+                name="uniq_resumeentry_profile_kind_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "kind"], name="resumeentry_profile_kind_idx"),
+        ]
+
+    def __str__(self):
+        return f"ResumeEntry<{self.profile_id}:{self.kind}:{self.title}>"
