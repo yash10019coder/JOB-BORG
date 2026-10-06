@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block title %}Auto-apply answers — JobBorg{% endblock %}
+{% block content %}
+<h1>Auto-apply answers</h1>
+{% include "web/_profile_tabs.html" %}
+<p class="muted">Everything auto-apply fills into application forms. Saving here never changes your job recommendations.</p>
+
+<form method="post" action="{% url 'profile_answers' %}" id="answers-form">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+    <input type="hidden" name="visa_rows_present" value="1">
+
+    <section id="contact">
+        <h2>Contact &amp; location</h2>
+        {% for field in form.contact_fields %}
+        <p>
+            {{ field.label_tag }}
+            {{ field }}
+            {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+            {{ field.errors }}
+        </p>
+        {% endfor %}
+    </section>
+
+    <section id="work-auth">
+        <fieldset id="visa-authorization">
+            <legend>Work authorization by country</legend>
+            <p class="muted">
+                Authorization is country-specific — being authorized to work in
+                the US says nothing about Germany. Add one row per country you
+                would be applying to.
+            </p>
+            <div id="visa-rows">
+                {% for row_country, row_status in visa_rows %}
+                <p class="visa-row">
+                    <select name="visa_country[]" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}
+                            <option value="{{ value }}"{% if value == row_country %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <select name="visa_status[]" aria-label="Work authorization">
+                        <option value="">— Select status —</option>
+                        {% for value, label in visa_status_choices %}
+                            <option value="{{ value }}"{% if value == row_status %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" class="visa-remove">Remove</button>
+                </p>
+                {% endfor %}
+                {# One blank row so the form is usable without any JavaScript. #}
+                <p class="visa-row">
+                    <select name="visa_country[]" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <select name="visa_status[]" aria-label="Work authorization">
+                        <option value="">— Select status —</option>
+                        {% for value, label in visa_status_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="visa-remove">Remove</button>
+                </p>
+            </div>
+            <button type="button" id="visa-add">Add country</button>
+            <template id="visa-row-template">
+                <p class="visa-row">
+                    <select name="visa_country[]" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <select name="visa_status[]" aria-label="Work authorization">
+                        <option value="">— Select status —</option>
+                        {% for value, label in visa_status_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="visa-remove">Remove</button>
+                </p>
+            </template>
+        </fieldset>
+    </section>
+
+    <section id="citizenship">
+        <h2>Citizenship</h2>
+        <fieldset>
+            <legend>Countries whose passports you hold</legend>
+            <p class="muted">{{ form.citizenship_countries.help_text }} Leave it empty if you would rather answer those questions yourself.</p>
+            <input type="hidden" name="citizenship_rows_present" value="1">
+            <div id="citizenship-rows">
+                {% for code in citizenship_rows %}
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}
+                            <option value="{{ value }}"{% if value == code %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+                {% endfor %}
+                {# One blank row so the form is usable without any JavaScript. #}
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+            </div>
+            <button type="button" id="citizenship-add">Add another passport</button>
+            <template id="citizenship-row-template">
+                <p class="citizenship-row">
+                    <select name="citizenship_countries" aria-label="Country">
+                        <option value="">— Select country —</option>
+                        {% for value, label in country_choices %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                    </select>
+                    <button type="button" class="row-remove">Remove</button>
+                </p>
+            </template>
+            {{ form.citizenship_countries.errors }}
+        </fieldset>
+    </section>
+
+    <section id="salary">
+        <h2>Salary expectation by region</h2>
+        <p class="muted">Used for the region of each job. A region you leave blank is left for you to answer.</p>
+        {% for field in form.salary_fields %}
+        <p>
+            {{ field.label_tag }}
+            {{ field }}
+            {{ field.errors }}
+        </p>
+        {% endfor %}
+    </section>
+
+    <button type="submit">Save answers</button>
+</form>
+
+<section id="custom">
+    <h2>Custom answers</h2>
+    <p class="muted">Answers you give once and reuse. They fill any question with the same wording. “Auto-apply will use” shows exactly what is sent.</p>
+    {% for value, label, rows in groups %}
+    <details{% if rows %} open{% endif %}>
+        <summary>{{ label }} ({{ rows|length }})</summary>
+        {% for row in rows %}
+        <div class="card">
+            <strong>{{ row.question_text }}</strong>
+            <p>Auto-apply will use: <strong>{{ row.value_display }}</strong>
+                <span class="muted">— source: {{ row.source }}, confidence {{ row.confidence|floatformat:2 }}</span>
+                {% if row.is_locked %}<span class="tag">Locked</span>{% endif %}
+                <span class="tag">{{ row.risk_tier }}</span>
+                {% if row.scope_label %}<span class="tag">{{ row.scope_label }} only</span>{% endif %}
+            </p>
+            <form method="post" action="{% url 'custom_answer_update' row.pk %}">
+                {% csrf_token %}
+                <label>Answer <textarea name="value" rows="2" maxlength="2000" required>{{ row.value_display }}</textarea></label>
+                <label>Category
+                    <select name="category">
+                        {% for cat_value, cat_label in custom_form.fields.category.choices %}
+                        <option value="{{ cat_value }}"{% if cat_value == row.category %} selected{% endif %}>{{ cat_label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label><input type="checkbox" name="lock" value="1"{% if row.is_locked %} checked{% endif %}> Lock</label>
+                <button type="submit">Save</button>
+            </form>
+            <form method="post" action="{% url 'custom_answer_delete' row.pk %}" class="actions">
+                {% csrf_token %}<button type="submit">Delete</button>
+            </form>
+        </div>
+        {% endfor %}
+    </details>
+    {% endfor %}
+
+    <h3>Add an answer</h3>
+    <form method="post" action="{% url 'custom_answer_create' %}" id="custom-answer-form">
+        {% csrf_token %}
+        {{ custom_form.non_field_errors }}
+        {% for field in custom_form.visible_fields %}
+        <p>
+            {{ field.label_tag }}
+            {{ field }}
+            {% if field.help_text %}<span class="help">{{ field.help_text }}</span>{% endif %}
+            {{ field.errors }}
+        </p>
+        {% endfor %}
+        <button type="submit">Save answer</button>
+    </form>
+</section>
+
+{% include "web/_questions_panel.html" %}
+
+<section id="legacy">
+    <h2>Saved answers from the old page</h2>
+    {% if conflicts %}
+    <div class="notice">
+        <strong>Some of these disagree with your per-country settings:</strong>
+        <ul>
+            {% for conflict in conflicts %}
+            <li>Your saved {{ conflict.label }} answer differs from your settings for {{ conflict.country }}. The settings win; delete the old answer if it is out of date.</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    {% if legacy_rows %}
+    <p class="muted">These are used only when your settings above don't cover a question.</p>
+    {% for row in legacy_rows %}
+    <div class="card">
+        <strong>{{ row.question_text }}</strong>
+        <p>Auto-apply will use: <strong>{{ row.value_display }}</strong>
+            {% if row.source_detail.region %}<span class="tag">{{ row.source_detail.region }} only</span>{% endif %}</p>
+        <form method="post" action="{% url 'custom_answer_delete' row.pk %}" class="actions">
+            {% csrf_token %}<button type="submit">Delete</button>
+        </form>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p class="muted">None.</p>
+    {% endif %}
+</section>
+
+<script>
+(function () {
+    // "Add" clones the row template; "Remove" drops a row. Without JavaScript
+    // every saved row plus one blank row is already on the page.
+    function wire(rowsId, templateId, addId) {
+        var rows = document.getElementById(rowsId);
+        var template = document.getElementById(templateId);
+        document.getElementById(addId).addEventListener("click", function () {
+            rows.appendChild(template.content.cloneNode(true));
+        });
+        rows.addEventListener("click", function (event) {
+            var button = event.target;
+            if (button.classList.contains("visa-remove") || button.classList.contains("row-remove")) {
+                button.closest("p").remove();
+            }
+        });
+    }
+    wire("visa-rows", "visa-row-template", "visa-add");
+    wire("citizenship-rows", "citizenship-row-template", "citizenship-add");
+})();
+</script>
+{% endblock %}

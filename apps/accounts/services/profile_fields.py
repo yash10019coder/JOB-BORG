@@ -20,12 +20,17 @@ from copy import deepcopy
 from django.utils import timezone
 
 from apps.accounts.models import AnswerBank
+from apps.accounts.services.precedence import LOCKED_RANK, SOURCE_RANK, is_blank
 
 # Whole-field keys: a single provenance entry covers the entire value.
 SIMPLE_FIELDS = (
     "full_name",
     "phone",
     "current_employer",
+    "location_city",
+    "location_country",
+    "mailing_address",
+    "working_timezone",
     "linkedin_url",
     "github_url",
     "portfolio_url",
@@ -36,18 +41,6 @@ SIMPLE_FIELDS = (
 # "visa_status_by_country.USA".
 KEYED_FIELDS = ("visa_status_by_country", "salary_by_region")
 COVERED_FIELDS = SIMPLE_FIELDS + KEYED_FIELDS
-
-_SOURCE_RANK = {
-    AnswerBank.Source.IMPORTED: 1,
-    AnswerBank.Source.LEARNED: 2,
-    AnswerBank.Source.USER: 3,
-}
-_LOCKED_RANK = 4
-
-
-def _is_empty(value):
-    return value in (None, "", [], {})
-
 
 def _entry(source, *, locked=False, detail=""):
     return {
@@ -60,8 +53,8 @@ def _entry(source, *, locked=False, detail=""):
 
 def _rank(entry):
     if entry.get("locked"):
-        return _LOCKED_RANK
-    return _SOURCE_RANK.get(entry.get("source"), _SOURCE_RANK[AnswerBank.Source.USER])
+        return LOCKED_RANK
+    return SOURCE_RANK.get(entry.get("source"), SOURCE_RANK[AnswerBank.Source.USER])
 
 
 def snapshot(profile):
@@ -82,7 +75,7 @@ def provenance_for(profile, key):
     value = getattr(profile, field)
     if subkey:
         value = (value or {}).get(subkey)
-    if _is_empty(value):
+    if is_blank(value):
         return None
     return _entry(AnswerBank.Source.USER)
 
@@ -114,7 +107,7 @@ def record_user_edits(profile, before):
                 else:
                     provenance.pop(full, None)
         elif old != new:
-            if _is_empty(new):
+            if is_blank(new):
                 provenance.pop(field, None)
             else:
                 locked = bool(provenance.get(field, {}).get("locked"))
@@ -138,7 +131,7 @@ def apply_profile_field(profile, key, value, source, *, detail=""):
         raise ValueError(f"{key!r} is not a covered profile field")
 
     existing = provenance_for(profile, key)
-    if existing is not None and _rank(existing) >= _SOURCE_RANK[source]:
+    if existing is not None and _rank(existing) >= SOURCE_RANK[source]:
         return False
 
     if subkey:

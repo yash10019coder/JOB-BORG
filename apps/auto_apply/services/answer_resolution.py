@@ -1,22 +1,17 @@
-"""Explicit-answer lookup layered in front of U4's LLM-based `resolve_answers`.
+"""Caller-side answer resolution layered in front of U4's LLM-based
+`resolve_answers`.
 
-`apps.auto_apply.llm.base.resolve_answers()` deliberately does not consult
-`ExplicitAnswer` -- its own docstring says as much: "this does not consult
-`ExplicitAnswer` records (owned by a separate implementation unit) --
-callers that want the explicit-answer override layered in front of LLM
-inference filter their question list accordingly before calling this."
-
-This module is that caller-side layer (U6, per R5/R9): for each rendered
-question, a saved `ExplicitAnswer` -- if the question's classified category
-maps onto one the user has -- always wins over LLM inference, and the LLM
-client is never consulted for that question. Only questions with no
-matching explicit answer are handed to `resolve_answers()`, preserving that
-function's category hard-exclusion / groundedness / confidence gating and
-its one-call-per-batch behavior for the remainder.
+`apps.auto_apply.llm.base.resolve_answers()` deliberately consults no stored
+answers: callers layer the user's own answers in front of LLM inference and
+filter their question list before calling it. This module is that layer (U6,
+per R5/R9, extended for the Profile Overhaul): every question goes through
+`apps.accounts.services.answer_resolver.resolve_answer` -- typed profile
+facts, then saved AnswerBank answers (including the backfilled legacy
+`ExplicitAnswer` rows) -- and only what that cannot answer is handed to
+`resolve_answers()`, preserving its category hard-exclusion / groundedness /
+confidence gating and its one-call-per-batch behavior for the remainder.
 """
 from __future__ import annotations
-
-import re
 
 from apps.auto_apply.llm.base import (
     AnswerInferenceClient,
@@ -25,91 +20,24 @@ from apps.auto_apply.llm.base import (
     ResolvedAnswer,
     resolve_answers,
 )
-from apps.accounts.services.answer_resolver import resolve_answer
-from apps.auto_apply.llm.categories import QuestionCategory, classify
-from apps.auto_apply.models import ExplicitAnswer
+from apps.accounts.question_semantics import blocks_llm
+from apps.accounts.services.answer_resolver import load_bank_rows, resolve_answer
+from apps.auto_apply.greenhouse_form.field_mapping import TEXTAREA
+from apps.auto_apply.llm.categories import classify
 
 # A reason string for answers sourced from ExplicitAnswer -- not part of
 # `llm.base.ResolutionReason`, which only enumerates LLM-orchestration
 # outcomes; kept here so callers/tests can reference it by name.
 EXPLICIT_ANSWER_REASON = "explicit_answer"
 
-# An answer sourced from a `Profile` field collected for a different purpose
-# (matching, not this exact question's wording) -- see `_profile_derived_answer`.
-# Unlike EXPLICIT_ANSWER_REASON, always marked `needs_review=True`: the value
-# is real and usable but was never confirmed by the user as *this* question's
-# answer, so it surfaces in the review queue rather than being sent silently.
-PROFILE_DERIVED_REASON = "profile_derived"
+# An answer taken straight from the user's own profile settings (work
+# authorization per country, citizenship, salary by region, contact facts).
+PROFILE_FACT_REASON = "profile_fact"
+# A question the typed layer owns (citizenship, "are you located in X") that
+# the profile could not answer confidently: left blank for review, never
+# guessed by the LLM.
+TYPED_FACT_UNANSWERED_REASON = "typed_fact_unanswered"
 ANSWER_BANK_REASON = "answer_bank"
-
-# Which ExplicitAnswer.Category values satisfy a question classified into a
-# given QuestionCategory (categories.py). Only categories with a real
-# analog in ExplicitAnswer.Category are mapped here -- QuestionCategory.
-# GENERIC and the hard-excluded categories with no ExplicitAnswer analog
-# (LEGAL_ATTESTATION, BACKGROUND_CHECK) simply fall through to
-# resolve_answers(), which already routes them to needs_review the same way
-# it always has (hard-exclusion for the latter two, LLM inference for the
-# former).
-_CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES: dict[str, tuple[str, ...]] = {
-    QuestionCategory.WORK_AUTHORIZATION: (
-        ExplicitAnswer.Category.WORK_AUTHORIZATION,
-    ),
-    QuestionCategory.SALARY_EXPECTATION: (ExplicitAnswer.Category.SALARY_EXPECTATION,),
-}
-
-
-_SPONSORSHIP_QUESTION = re.compile(r"\bsponsor", re.IGNORECASE)
-_AMBIGUOUS_AUTHORIZATION_QUESTION = re.compile(
-    r"\bh-?1b\b|\bimmigration\b|\bwork[ -]permit\b|\bcitizenship\b",
-    re.IGNORECASE,
-)
-_AUTHORIZATION_QUESTION = re.compile(
-    r"\bwork authoriz|\bauthoriz(?:ed|ation) to work\b|"
-    r"\beligib(?:le|ility) to work\b|\bright to work\b",
-    re.IGNORECASE,
-)
-
-
-def _explicit_categories_for(question_text: str, category: str) -> tuple[str, ...]:
-    """Which `ExplicitAnswer` categories may answer this question.
-
-    Both "Are you authorized to work?" and "Will you require visa
-    sponsorship?" classify as WORK_AUTHORIZATION, but their answers are not
-    interchangeable -- "No" to one means the opposite of "No" to the other, so
-    a saved answer for the wrong sub-category must never be used. Split them by
-    question wording; ambiguous status questions and combined questions
-    require human review.
-    """
-    if category == QuestionCategory.WORK_AUTHORIZATION:
-        text = question_text or ""
-        sponsorship = _SPONSORSHIP_QUESTION.search(text)
-        authorization = _AUTHORIZATION_QUESTION.search(text)
-        if _AMBIGUOUS_AUTHORIZATION_QUESTION.search(text) or (sponsorship and authorization):
-            return ()
-        if sponsorship:
-            return (ExplicitAnswer.Category.SPONSORSHIP,)
-        if authorization:
-            return (ExplicitAnswer.Category.WORK_AUTHORIZATION,)
-        return ()
-    return _CATEGORY_TO_EXPLICIT_ANSWER_CATEGORIES.get(category, ())
-
-
-def _profile_derived_answer(category: str, profile) -> str | None:
-    """A direct value derivable from `Profile` data for a hard-excluded
-    category with no `ExplicitAnswer` saved -- currently just salary
-    expectation from `Profile.min_salary` (collected at signup for
-    matching, per `apps.matching.scoring`, but otherwise unused here).
-
-    Returns `None` when nothing on the profile answers this category, so
-    the question falls through to its normal blank/needs_review handling
-    exactly as before this existed.
-    """
-    if category == QuestionCategory.SALARY_EXPECTATION:
-        min_salary = getattr(profile, "min_salary", None)
-        if min_salary:
-            return str(min_salary)
-    return None
-
 
 def resolve_field_answers(
     user,
@@ -117,49 +45,68 @@ def resolve_field_answers(
     resume_text: str,
     profile,
     llm_client: AnswerInferenceClient,
+    job=None,
 ) -> list[ResolvedAnswer]:
-    """Resolve every question, preferring a saved `ExplicitAnswer`, then a
-    directly-derivable `Profile` field, over LLM inference.
+    """Resolve every question from what the user has already told us, and only
+    then ask the LLM.
 
-    For each question: classify it. If the classified category maps onto an
-    `ExplicitAnswer.Category` the user has a saved answer for, use it
-    directly (`needs_review=False`; the LLM client is never called for that
-    question). Otherwise, if `_profile_derived_answer` can answer it from
-    `Profile` data collected for another purpose (e.g. salary expectation
-    from `Profile.min_salary`), use that instead (`needs_review=True`, since
-    the value was never confirmed as *this* question's answer). Every
-    remaining question is handed to `llm.base.resolve_answers()` as a single
-    batch.
+    Each question goes through `resolve_answer`: the user's typed profile
+    facts first, then their saved answers, then the backfilled legacy
+    answers. A question the typed layer owns but the profile cannot answer
+    confidently (a citizenship or "are you located in X" question) is left
+    blank for review and never reaches the LLM. Every remaining question is
+    handed to `llm.base.resolve_answers()` as a single batch.
+
+    `job` supplies the country (for per-country authorization and salary
+    bands), the region (for location-sensitive saved answers) and the
+    employer name (stripped from the question key for short factual fields,
+    kept for narrative `textarea` questions).
 
     Returns one `ResolvedAnswer` per input `question`, in the same order.
     """
     if not questions:
         return []
 
-    explicit_by_category = {
-        answer.category: answer for answer in ExplicitAnswer.objects.filter(user=user)
-    }
-
-    def legacy_lookup(question_text):
-        """The old ExplicitAnswer table, handed to the resolver as its last
-        resort so `apps.accounts` never imports `apps.auto_apply`."""
-        category = classify(question_text)
-        for candidate_category in _explicit_categories_for(question_text, category):
-            if candidate_category in explicit_by_category:
-                return explicit_by_category[candidate_category].answer_text
-        return None
-
     resolved: dict[str, ResolvedAnswer] = {}
     remaining: list[Question] = []
+    # One query for the whole draft instead of one per question.
+    bank_rows = load_bank_rows(profile)
 
     for question in questions:
         category = classify(question.text)
         found = resolve_answer(
-            profile, question.text, options=question.options, legacy_lookup=legacy_lookup
+            profile,
+            question.text,
+            job,
+            options=question.options,
+            bank_rows=bank_rows,
+            strip_employer=question.field_type != TEXTAREA,
         )
 
+        if found is not None and found.value is None:
+            # A stored answer exists but does not fit this form's options:
+            # leave it blank for review rather than guessing a choice, and do
+            # not let the LLM answer a question the user has already addressed.
+            resolved[question.id] = ResolvedAnswer(
+                question_id=question.id,
+                category=category,
+                answer=None,
+                needs_review=True,
+                reason=ResolutionReason.INVALID_OPTION,
+            )
+            continue
+
         if found is not None:
-            from_bank = found.provenance.get("origin") == "answer_bank"
+            origin = found.provenance.get("origin", "")
+            # Legacy answers keep their original shape (no provenance block);
+            # bank rows and profile facts carry theirs into the draft.
+            has_provenance = origin != "legacy_explicit_answer"
+            if origin == "answer_bank":
+                reason = ANSWER_BANK_REASON
+            elif has_provenance:
+                reason = PROFILE_FACT_REASON
+            else:
+                reason = EXPLICIT_ANSWER_REASON
             resolved[question.id] = _enforce_option_constraint(
                 ResolvedAnswer(
                     question_id=question.id,
@@ -169,26 +116,22 @@ def resolve_field_answers(
                     # exactly as before. An unconfirmed T0/T1 bank value must
                     # be reviewed before it can be sent.
                     needs_review=found.needs_confirmation,
-                    reason=ANSWER_BANK_REASON if from_bank else EXPLICIT_ANSWER_REASON,
+                    reason=reason,
                     needs_confirmation=found.needs_confirmation,
-                    provenance=found.provenance if from_bank else None,
-                    tier=found.tier if from_bank else "",
+                    provenance=found.provenance if has_provenance else None,
+                    tier=found.tier if has_provenance else "",
                 ),
                 question,
             )
             continue
 
-        profile_answer = _profile_derived_answer(category, profile)
-        if profile_answer is not None:
-            resolved[question.id] = _enforce_option_constraint(
-                ResolvedAnswer(
-                    question_id=question.id,
-                    category=category,
-                    answer=profile_answer,
-                    needs_review=True,
-                    reason=PROFILE_DERIVED_REASON,
-                ),
-                question,
+        if blocks_llm(question.text):
+            resolved[question.id] = ResolvedAnswer(
+                question_id=question.id,
+                category=category,
+                answer=None,
+                needs_review=True,
+                reason=TYPED_FACT_UNANSWERED_REASON,
             )
         else:
             remaining.append(question)

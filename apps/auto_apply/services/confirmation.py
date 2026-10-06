@@ -10,7 +10,11 @@ from apps.accounts.tiering import TIERING_VERSION
 from apps.auto_apply.greenhouse_form.field_mapping import FILE
 
 
-def _is_blank(value):
+def is_blank_answer_value(value) -> bool:
+    """A list/tuple value (multi-select, checkbox group) is blank when every
+    item is blank -- ``str(["  "])`` is a non-empty string and would otherwise
+    read as "answered". The one definition of "blank" shared by drafting, the
+    review views and the send gate."""
     if isinstance(value, (list, tuple)):
         return not any(str(item or "").strip() for item in value)
     return not str(value or "").strip()
@@ -27,7 +31,7 @@ def unconfirmed_fields(answers):
         for label, entry in (answers or {}).items()
         if isinstance(entry, dict)
         and entry.get("needs_confirmation")
-        and not _is_blank(entry.get("value"))
+        and not is_blank_answer_value(entry.get("value"))
     )
 
 

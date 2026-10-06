@@ -64,6 +64,20 @@
                     {% else %}
                     <p>{{ entry.value }}</p>
                     {% endif %}
+                    {% if entry.remember and draft.status == "drafted" %}
+                    <p class="muted">
+                        <label>
+                            <input type="checkbox" name="remember__{{ forloop.counter0 }}"{% if entry.remember.checked %} checked{% endif %}>
+                            {% if entry.remember.always %}Always use this answer for this question{% else %}Remember this answer for similar questions{% endif %}
+                        </label>
+                        {% if entry.remember.sensitive %}
+                        <label>
+                            <input type="checkbox" name="everywhere__{{ forloop.counter0 }}">
+                            Use it for jobs in any region{% if entry.remember.region_label %} (otherwise only {{ entry.remember.region_label }}){% endif %}
+                        </label>
+                        {% endif %}
+                    </p>
+                    {% endif %}
                     {% if entry.needs_confirmation and draft.status == "drafted" %}
                     <p>
                         <label>

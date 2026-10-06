@@ -22,6 +22,7 @@ import re
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
@@ -36,13 +37,7 @@ from apps.auto_apply.models import AutoApplyDraft
 from apps.jobs.models import JobSource
 
 from . import answer_resolution
-from apps.web.salary_bands import (
-    DEFAULT_SALARY_BANDS,
-    SALARY_BANDS_BY_REGION,
-    _get_salary_band_label,
-    validate_salary_by_region,
-)
-from apps.web.regions import region_for_country
+from .confirmation import is_blank_answer_value
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +260,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         for f in custom_fields
     ]
     resolved = answer_resolution.resolve_field_answers(
-        user, questions, resume_text, profile, llm_client
+        user, questions, resume_text, profile, llm_client, job=job
     )
     fields_by_label = {f.label: f for f in custom_fields}
 
@@ -335,58 +330,6 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
 
-    # -- Salary region resolution from Profile.salary_by_region ---------------
-    if profile and profile.salary_by_region:
-        # Validate the stored salary_by_region first
-        cleaned_salary_by_region = validate_salary_by_region(profile.salary_by_region)
-
-        # Get job's country from normalized location
-        job_country = ""
-        if job.target_locations_normalized:
-            # target_locations_normalized is a list of {"raw": ..., "country": ...}
-            for loc in job.target_locations_normalized:
-                if loc.get("country"):
-                    job_country = loc["country"]
-                    break
-        job_region = region_for_country(job_country)
-
-        if job_region and job_region in cleaned_salary_by_region:
-            band_key = cleaned_salary_by_region[job_region]
-            label = _get_salary_band_label(job_region, band_key)
-
-            # Find the salary_expectation question in answers_payload and override
-            for q_label, entry in answers_payload.items():
-                if entry.get("category") == "salary_expectation":
-                    # Do not override user-confirmed answers
-                    if entry.get("user_confirmed"):
-                        continue
-                    # For option-bearing fields, validate the band key against form options
-                    field_options = entry.get("options") or []
-                    if field_options and label not in field_options:
-                        # Band key not in current form's options - keep existing answer with needs_review
-                        entry["needs_review"] = True
-                        entry["reason"] = "profile_derived_region_invalid_option"
-                        continue
-                    # Valid override
-                    entry["value"] = label
-                    entry["needs_review"] = False
-                    entry["reason"] = "profile_derived_region"
-                    if "provenance" in entry:
-                        # The value now comes from the user's own profile, not
-                        # the AnswerBank row that was resolved first: drop that
-                        # row's hold and attribution so the user isn't asked to
-                        # confirm their own band and the submit snapshot
-                        # records the real source.
-                        entry["needs_confirmation"] = False
-                        entry["provenance"] = {
-                            "origin": "profile.salary_by_region",
-                            "source": "user",
-                            "locked": False,
-                            "confidence": 1.0,
-                            "detail": {"region": job_region},
-                        }
-                    break
-
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here
         # now -- an incomplete Profile, not an LLM judgment call. Custom
@@ -412,12 +355,6 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         answers=answers_payload,
         form_schema_snapshot=schema_to_dict(schema),
     )
-
-
-def _is_blank(value) -> bool:
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
 
 
 def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
@@ -460,7 +397,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         return
 
     for label, entry in answers_payload.items():
-        if not entry.get("needs_review") or not _is_blank(entry.get("value")):
+        if not entry.get("needs_review") or not is_blank_answer_value(entry.get("value")):
             continue
         prior_entry = (previous.answers or {}).get(label)
         if not isinstance(prior_entry, dict) or not prior_entry.get("user_confirmed"):
@@ -468,7 +405,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         if prior_entry.get("field_type") != entry.get("field_type"):
             continue
         prior_value = prior_entry.get("value")
-        if _is_blank(prior_value):
+        if is_blank_answer_value(prior_value):
             continue
         # Re-validate against the *current* schema's options before
         # reusing a confirmed value. SINGLE_SELECT/MULTI_SELECT/
@@ -508,7 +445,7 @@ def _persist_draft(
     """
     try:
         with transaction.atomic():
-            return AutoApplyDraft.objects.create(
+            draft = AutoApplyDraft.objects.create(
                 user=user,
                 job=job,
                 status=status,
@@ -517,6 +454,9 @@ def _persist_draft(
                 reason_code=reason_code,
                 form_schema_snapshot=form_schema_snapshot,
             )
+            # The questions panel is built from recent drafts.
+            invalidate_questions_panel(user.pk)
+            return draft
     except IntegrityError:
         logger.info(
             "draft_for(user=%s, job=%s): an active draft already exists; "

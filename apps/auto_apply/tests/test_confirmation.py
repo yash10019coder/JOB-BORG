@@ -1,5 +1,6 @@
 from django.test import SimpleTestCase
 
+from apps.accounts.tiering import TIERING_VERSION
 from apps.auto_apply.services.confirmation import build_submit_snapshot, unconfirmed_fields
 
 
@@ -40,7 +41,7 @@ class BuildSubmitSnapshotTests(SimpleTestCase):
                 ),
             }
         )
-        self.assertEqual(snapshot["tiering_version"], "v1")
+        self.assertEqual(snapshot["tiering_version"], TIERING_VERSION)
         recorded = snapshot["answers"]["Authorized?"]
         self.assertEqual(recorded["value"], "Yes")
         self.assertEqual(recorded["tier"], "t0_legal")

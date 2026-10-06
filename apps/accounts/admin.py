@@ -1,7 +1,13 @@
 from django.contrib import admin
 
 from .services import profile_fields
-from .models import AnswerBank, AnswerBankHistory, EmailInboxCredential, Profile
+from .models import (
+    AnswerBank,
+    AnswerBankHistory,
+    AnswerObservation,
+    EmailInboxCredential,
+    Profile,
+)
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -26,7 +32,8 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
-    readonly_fields = ("resume_text",)
+    # field_provenance is written only by profile_fields, never by hand.
+    readonly_fields = ("resume_text", "field_provenance")
 
     def save_model(self, request, obj, form, change):
         """The admin is a write path to `Profile.resume` too (see U1), so it
@@ -46,7 +53,7 @@ class ProfileAdmin(admin.ModelAdmin):
             # Save every other field first (this also creates the row on the
             # add view), then apply the resume change through set_resume() --
             # which only saves resume fields -- so nothing else edited in the
-            # same submit is silently dropped. Mirrors ProfileForm.save().
+            # same submit is silently dropped. Mirrors ProfileSearchForm.save().
             new_resume = form.cleaned_data.get("resume")
             obj.resume = form.initial.get("resume") or None
             super().save_model(request, obj, form, change)
@@ -70,9 +77,19 @@ class EmailInboxCredentialAdmin(admin.ModelAdmin):
 
 @admin.register(AnswerBank)
 class AnswerBankAdmin(admin.ModelAdmin):
-    list_display = ("profile", "question_key", "source", "risk_tier", "is_locked", "updated_at")
+    list_display = (
+        "profile", "question_key", "scope_region", "source", "risk_tier", "is_locked", "updated_at",
+    )
     list_filter = ("source", "risk_tier", "is_locked")
     search_fields = ("question_key", "profile__user__username")
+    # Rows are written through write_answer() so precedence and history are
+    # enforced; the admin only inspects them (and may delete a bad row).
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(AnswerBankHistory)
@@ -80,6 +97,24 @@ class AnswerBankHistoryAdmin(admin.ModelAdmin):
     """Audit trail: browsable, never editable from the admin."""
 
     list_display = ("profile", "question_key", "source", "superseded_by_source", "superseded_at")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AnswerObservation)
+class AnswerObservationAdmin(admin.ModelAdmin):
+    """What users actually submitted: browsable, never editable."""
+
+    list_display = ("profile", "question_key", "tier", "provenance_source", "was_edited", "created_at")
+    list_filter = ("tier", "provenance_source", "was_edited")
     search_fields = ("question_key", "profile__user__username")
 
     def has_add_permission(self, request):

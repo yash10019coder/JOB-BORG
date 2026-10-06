@@ -1,0 +1,9 @@
+<div class="profile-tabs" role="navigation" aria-label="Profile sections">
+    <a href="{% url 'profile' %}"{% if active_tab == "profile" %} aria-current="page"{% endif %}>Profile</a>
+    <a href="{% url 'profile_answers' %}"{% if active_tab == "answers" %} aria-current="page"{% endif %}>Auto-apply answers</a>
+</div>
+{% if messages %}
+<ul class="messages">
+    {% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}
+</ul>
+{% endif %}

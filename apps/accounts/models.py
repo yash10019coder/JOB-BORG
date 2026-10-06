@@ -70,33 +70,33 @@ def validate_resume_file(file):
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
-# Profile.VisaStatus value -> (work_authorization option key, sponsorship option
-# key), as consumed by `Profile.authorization_for_country` and
-# `drafting.py`. The keys match `apps.web.forms.WORK_AUTH_CHOICES` /
-# `SPONSORSHIP_CHOICES`, and every one is re-validated against the live
-# Greenhouse form's actual options before it is used for a draft.
-#
-# An empty sponsorship key ("") means *deliberately unknown*, and is the
-# point of this table: a US visa status tells us the applicant is authorized
-# in the US but says nothing reliable about whether they will require
-# sponsorship (someone extending from F-1 onto a new H-1B did; a green card
-# holder did not). Inferring one from the other would be a guess, and
-# `drafting.py` leaves such a field blank + needs_review instead -- the same
-# "a confidently wrong resolution is worse than an unresolved one" rule
-# `apps.locations.engine` follows.
-_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[str, str]] = {
-    "citizen": ("yes_authorized", "no"),
-    "permanent_resident": ("yes_green_card", "no"),
-    "work_permit": ("yes_authorized", "no"),
-    "requires_sponsorship": ("no_need_sponsorship", "other"),
-    "not_authorized": ("no_sponsorship_needed", "no"),
+# Profile.VisaStatus value -> (authorized, needs_sponsorship), as consumed by
+# `Profile.authorization_for_country`. Each element is True / False, or None
+# meaning *deliberately unknown* -- which is the point of this table: a US
+# visa status tells us the applicant is authorized in the US but says nothing
+# reliable about whether they will *require sponsorship* (someone extending
+# from F-1 onto a new H-1B did; a green card holder did not). Inferring one
+# from the other would be a guess, so the answer stays unknown and the draft
+# leaves the field blank + needs_review -- the same "a confidently wrong
+# resolution is worse than an unresolved one" rule `apps.locations.engine`
+# follows. Mapping these onto a live form's option labels is the job of
+# `apps.accounts.question_semantics`, not this table.
+_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[bool | None, bool | None]] = {
+    "citizen": (True, False),
+    "permanent_resident": (True, False),
+    "work_permit": (True, False),
+    # Needs sponsorship, but authorization is unknown: H-1B transferees also
+    # choose this, and they are authorized to work for their current employer.
+    "requires_sponsorship": (None, True),
+    # Not authorized says nothing about whether sponsorship would be needed.
+    "not_authorized": (False, None),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
-    "h1b": ("yes_h1b", ""),
-    "opt": ("yes_opt", ""),
-    "o1": ("yes_o1", ""),
-    "tn": ("yes_tn", ""),
-    "e3": ("yes_e3", ""),
-    "other": ("other", ""),
+    "h1b": (True, None),
+    "opt": (True, None),
+    "o1": (True, None),
+    "tn": (True, None),
+    "e3": (True, None),
+    "other": (None, None),
 }
 
 
@@ -126,6 +126,16 @@ class Profile(models.Model):
     portfolio_url = models.URLField(max_length=255, blank=True, default="")
     current_employer = models.CharField(max_length=255, blank=True, default="")
 
+    # Where the applicant lives and works, for "Country" / "City" / "Address" /
+    # "Time zone" questions. These are form-filling facts, not matching
+    # criteria (`target_locations` is that), so matching never reads them.
+    # `location_country` is ISO 3166-1 alpha-3, like every other country on
+    # this model; `working_timezone` is an IANA name ("Asia/Kolkata").
+    location_city = models.CharField(max_length=255, blank=True, default="")
+    location_country = models.CharField(max_length=3, blank=True, default="")
+    mailing_address = models.TextField(blank=True, default="")
+    working_timezone = models.CharField(max_length=64, blank=True, default="")
+
     # Resume -- standard-field source for auto-apply drafting (see
     # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md U1).
     # `resume_text` is populated asynchronously by the `parse_resume` Celery
@@ -152,7 +162,7 @@ class Profile(models.Model):
     target_locations = models.JSONField(default=list, blank=True)
     # Structured mirror of target_locations, one entry per raw string, each
     # shaped {"raw": str, "city": str|None, "region": str|None,
-    # "country": str|None, "resolved": bool} — computed by ProfileForm via
+    # "country": str|None, "resolved": bool} — computed by ProfileSearchForm via
     # apps.locations.engine.normalize_location whenever target_locations
     # changes. target_locations itself stays untouched (raw, user-typed) so
     # the CSV form field round-trips exactly what the user entered.
@@ -177,7 +187,7 @@ class Profile(models.Model):
     #   visa_status_by_country: {"IND": "citizen", "DEU": "requires_sponsorship"}
     #   citizenship_countries:  ["IND"]  (dual citizens list several)
     #
-    # Keys are ISO 3166-1 alpha-3 (see apps.web.regions for why alpha-3 and
+    # Keys are ISO 3166-1 alpha-3 (see apps.accounts.regions for why alpha-3 and
     # not alpha-2/the engine's canonical name).
     class VisaStatus(models.TextChoices):
         # Country-agnostic, and the only statuses a non-US applicant should
@@ -248,27 +258,21 @@ class Profile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def authorization_for_country(self, country):
-        """``(work_authorization, sponsorship)`` option keys for `country`, or
-        ``None`` if this profile says nothing about it.
+        """``(authorized, needs_sponsorship)`` for `country`, or ``None`` if
+        this profile says nothing about it.
 
-        `country` may be given in any form :func:`apps.web.regions.region_for_country`
+        `country` may be given in any form :func:`apps.accounts.regions.region_for_country`
         accepts (alpha-3, alpha-2, or the locations engine's canonical name),
         because the caller usually has the last of those off a
-        ``Job.target_locations_normalized`` entry.
+        ``Job.location_country``.
 
-        Both returned values are option keys drawn from the auto-apply form
-        vocabularies (``WORK_AUTH_CHOICES`` / ``SPONSORSHIP_CHOICES``); either
-        may be ``""`` meaning *deliberately unknown*. That is the important
-        part of the contract: a US work visa tells us the applicant is
-        authorized in the US, but says nothing reliable about whether they
-        will *require sponsorship* (an H-1B holder renewing from F-1 did, a
-        green-card holder did not), so a per-country visa status alone must
-        not produce a sponsorship answer. ``drafting.py`` leaves such a field
-        blank and needs_review rather than guessing.
+        Each element is ``True``, ``False`` or ``None`` meaning *deliberately
+        unknown* (see ``_AUTHORIZATION_BY_VISA_STATUS``): a per-country visa
+        status alone must not produce a sponsorship answer.
 
-        Returns ``None`` -- not a blank pair -- when the profile has no entry
-        for the country at all, so callers can tell "nothing known" apart from
-        "known to require sponsorship".
+        Returns ``None`` -- not ``(None, None)`` -- when the profile has no
+        entry for the country at all, so callers can tell "nothing known"
+        apart from "known, but deliberately undecided".
         """
         from apps.locations.engine import alpha3_for_country
 
@@ -278,7 +282,7 @@ class Profile(models.Model):
         if alpha3 in set(self.citizenship_countries or []):
             # Citizenship is authoritative for its own country: no
             # sponsorship is ever needed at home.
-            return ("yes_authorized", "no")
+            return (True, False)
         status = (self.visa_status_by_country or {}).get(alpha3)
         if status is None:
             return None
@@ -488,6 +492,11 @@ class AnswerBank(models.Model):
         related_name="answer_bank",
     )
     question_key = models.CharField(max_length=255)
+    # Region key (`apps.accounts.regions.REGION_KEYS`) this answer is limited
+    # to, or "" for "everywhere". Location-sensitive answers (relocation,
+    # on-site, a named country) are stored per region so one saved for a US
+    # job is never reused for an India job.
+    scope_region = models.CharField(max_length=8, blank=True, default="")
     question_text = models.TextField(blank=True, default="")
     value = models.JSONField()
     category = models.CharField(
@@ -506,8 +515,8 @@ class AnswerBank(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["profile", "question_key"],
-                name="uniq_answerbank_profile_question_key",
+                fields=["profile", "question_key", "scope_region"],
+                name="uniq_answerbank_profile_question_key_scope",
             ),
             # A lock is a user decision; automation must never hold one.
             models.CheckConstraint(
@@ -519,7 +528,8 @@ class AnswerBank(models.Model):
         ]
 
     def __str__(self):
-        return f"AnswerBank<{self.profile_id}:{self.question_key}:{self.source}>"
+        scope = f"@{self.scope_region}" if self.scope_region else ""
+        return f"AnswerBank<{self.profile_id}:{self.question_key}{scope}:{self.source}>"
 
 
 class AnswerBankHistory(models.Model):
@@ -535,6 +545,7 @@ class AnswerBankHistory(models.Model):
         related_name="answer_bank_history",
     )
     question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
     value = models.JSONField()
     risk_tier = models.CharField(max_length=16)
     source = models.CharField(max_length=16)
@@ -558,3 +569,52 @@ class AnswerBankHistory(models.Model):
 
     def __str__(self):
         return f"AnswerBankHistory<{self.profile_id}:{self.question_key}>"
+
+
+class AnswerObservation(models.Model):
+    """What the user actually submitted for one question on one application.
+
+    Written when a draft is sent, from the exact values in
+    ``AutoApplyDraft.submitted_answers_snapshot``. It is the ground truth the
+    learning loop counts over ("same answer across distinct jobs") and the
+    (user, job, question) unit shadow-mode precision is measured on.
+
+    ``job_id`` / ``draft_id`` are plain integers, not foreign keys: this app
+    sits below ``jobs`` and ``auto_apply`` and must not depend on them, and an
+    observation should outlive a discarded draft. Append-only.
+    """
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_observations",
+    )
+    question_key = models.CharField(max_length=255)
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    tier = models.CharField(max_length=16)
+    field_type = models.CharField(max_length=32, blank=True, default="")
+    # Where the submitted value came from (provenance of the draft entry).
+    provenance_source = models.CharField(max_length=16, blank=True, default="")
+    provenance_origin = models.CharField(max_length=64, blank=True, default="")
+    was_edited = models.BooleanField(default=False)
+    job_id = models.BigIntegerField(null=True, blank=True)
+    draft_id = models.BigIntegerField(null=True, blank=True)
+    employer_name = models.CharField(max_length=255, blank=True, default="")
+    job_region = models.CharField(max_length=8, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["profile", "question_key"], name="aobs_profile_question_idx"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValueError("AnswerObservation is append-only; it cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"AnswerObservation<{self.profile_id}:{self.question_key}>"

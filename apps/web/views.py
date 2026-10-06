@@ -20,19 +20,25 @@ from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from apps.accounts.models import EmailInboxCredential, Profile
+from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
 )
 from apps.auto_apply.models import AutoApplyDraft
-from apps.auto_apply.services.confirmation import build_submit_snapshot, unconfirmed_fields
+from apps.auto_apply.services import answer_memory
+from apps.auto_apply.services.confirmation import (
+    build_submit_snapshot,
+    is_blank_answer_value,
+    unconfirmed_fields,
+)
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
-from apps.web.regions import country_choices
+from apps.accounts.regions import country_choices
 
-from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
+from .forms import EmailInboxCredentialForm
 
 
 RECOMMENDATIONS_PER_PAGE = 20
@@ -78,68 +84,6 @@ def signup(request):
     else:
         form = UserCreationForm()
     return render(request, "registration/signup.html", {"form": form})
-
-
-def _profile_form_context(request, form):
-    """Template context shared by the profile and explicit-answers views.
-
-    Both render `web/profile_form.html`, and the per-country authorization
-    repeater needs the country list and status vocabulary in both. Salary
-    bands no longer go through here: they are now real per-region
-    `<select>` fields on `ProfileForm`, so there is no JSON blob to hand the
-    template and no client-side state to reconcile.
-    """
-    profile_obj = request.user.profile
-    return {
-        "form": form,
-        "explicit_answers_form": ExplicitAnswersForm(user=request.user),
-        "country_choices": country_choices(),
-        "visa_status_choices": Profile.VisaStatus.choices,
-        # One [alpha3, status] pair per stored row, so the repeater can
-        # re-render what's already saved. JSON-encoded here rather than in
-        # the template to keep quoting/escaping correct.
-        "visa_rows_json": json.dumps(
-            [
-                [alpha3, status]
-                for alpha3, status in (profile_obj.visa_status_by_country or {}).items()
-            ]
-        ),
-    }
-
-
-@login_required
-def profile(request):
-    instance = request.user.profile  # always the requesting user's own profile
-    if request.method == "POST":
-        form = ProfileForm(request.POST, request.FILES, instance=instance)
-        if form.is_valid():
-            form.save()  # Profile post-save signal -> debounced rematch
-            return redirect("recommendations")
-    else:
-        form = ProfileForm(instance=instance)
-    return render(request, "web/profile_form.html", _profile_form_context(request, form))
-
-
-@login_required
-def explicit_answers(request):
-    """Self-service UI for saved ExplicitAnswer values (work auth, sponsorship, salary)."""
-    if request.method == "POST":
-        form = ExplicitAnswersForm(request.POST, user=request.user)
-        if form.is_valid():
-            form.save()
-            # `salary_by_region` and the per-country authorization rows are
-            # Profile fields now, edited by the profile form above; the
-            # explicit-answers form saves only the free-text answer rows, so
-            # it cannot clobber the Profile-owned structured values.
-            messages.info(request, "Saved answers updated.")
-            return redirect("profile")
-    else:
-        form = ExplicitAnswersForm(user=request.user)
-    return render(
-        request,
-        "web/profile_form.html",
-        _profile_form_context(request, ProfileForm(instance=request.user.profile)),
-    )
 
 
 # --- Recommendations ------------------------------------------------------
@@ -239,7 +183,8 @@ _REASON_CODE_MESSAGES = {
         "This application has a question we couldn't fill in automatically."
     ),
     AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS: (
-        "Some answers need your confirmation before this application can be sent."
+        "This application was held back because some answers had not been "
+        "confirmed. Retry it to review and confirm them."
     ),
     AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
         "We couldn't load this employer's application form."
@@ -301,15 +246,6 @@ def _snapshot_fields(draft):
     }
 
 
-def _is_blank_answer_value(value) -> bool:
-    """A list/tuple value (multi-select, checkbox group) is blank when every
-    item is blank -- `str(["  "])` is a non-empty string and would otherwise
-    read as "answered"."""
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
-
-
 def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
     """Use snapshot requirements only when the answer has no explicit flag.
 
@@ -326,7 +262,7 @@ def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
         for label, entry in (answers or {}).items()
         if isinstance(entry, dict)
         and entry.get("required", fields.get(label, {}).get("required", False))
-        and _is_blank_answer_value(entry.get("value"))
+        and is_blank_answer_value(entry.get("value"))
     )
 
 
@@ -541,6 +477,7 @@ def auto_apply_queue(request):
                 continue
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
+            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job)
             field = _answer_edit_field(entry, fields.get(label, {}))
             if field is not None:
                 value = entry.get("value", "")
@@ -611,6 +548,7 @@ def edit_auto_apply_draft(request, pk):
     answers = {label: dict(entry) for label, entry in (draft.answers or {}).items()}
     fields = _snapshot_fields(draft)
     invalid_labels = []
+    edits = []
     index = 0
     while f"label__{index}" in request.POST:
         # Browsers normalize a lone "\n" in a submitted field's value to
@@ -623,6 +561,8 @@ def edit_auto_apply_draft(request, pk):
         label = request.POST[f"label__{index}"].replace("\r\n", "\n")
         value_field = f"value__{index}"
         confirm_field = f"confirm__{index}"
+        remember_field = f"remember__{index}"
+        everywhere_field = f"everywhere__{index}"
         index += 1
         if label not in answers:
             continue
@@ -642,12 +582,26 @@ def edit_auto_apply_draft(request, pk):
             # POST -- collect it and keep validating/saving the rest.
             invalid_labels.append(label)
             continue
+        edits.append(
+            answer_memory.ReviewEdit(
+                label=label,
+                value=cleaned,
+                old=dict(answers[label]),
+                remember=remember_field in request.POST,
+                everywhere=everywhere_field in request.POST,
+            )
+        )
+        if cleaned != answers[label].get("value"):
+            # The user typed or changed this value (as opposed to re-posting
+            # what drafting put there): the only reliable sign that an answer
+            # is theirs, since `user_confirmed` is set by any save.
+            answers[label]["user_edited"] = True
         answers[label]["value"] = cleaned
         if answers[label].get("needs_confirmation"):
             # A learned/imported legal or commercial answer is only ever
             # confirmed by an explicit, per-field action -- saving the form
             # (which re-posts every value) must not count as one.
-            if confirm_field in request.POST and not _is_blank_answer_value(cleaned):
+            if confirm_field in request.POST and not is_blank_answer_value(cleaned):
                 entry = answers[label]
                 entry["confirmed_from"] = entry.get("provenance")
                 entry["provenance"] = {
@@ -667,7 +621,7 @@ def edit_auto_apply_draft(request, pk):
         # A blank answer keeps its "needs review" hint regardless of
         # required-ness, so an optional placeholder doesn't quietly lose its
         # flag the moment the queue is re-rendered/saved.
-        answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
+        answers[label]["needs_review"] = is_blank_answer_value(cleaned)
         # Explicit provenance marker: `needs_review=False` alone doesn't
         # prove a human looked at this answer -- a confident LLM guess also
         # gets `needs_review=False` (see answer_resolution/llm/base.py) with
@@ -675,10 +629,17 @@ def edit_auto_apply_draft(request, pk):
         # actually reviewing/confirming the value, which is what
         # drafting._carry_forward_confirmed_answers() requires before
         # reusing an answer on a later retry (CodeRabbit finding on PR #99).
-        answers[label]["user_confirmed"] = not _is_blank_answer_value(cleaned)
+        answers[label]["user_confirmed"] = not is_blank_answer_value(cleaned)
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])
+    remembered = answer_memory.remember_reviewed_answers(draft, edits)
+    if remembered:
+        messages.info(
+            request,
+            f"Remembered {remembered} answer{'s' if remembered != 1 else ''} "
+            "for similar questions. Manage them under Profile \u2192 Auto-apply answers.",
+        )
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
     return _auto_apply_queue_redirect(request)
@@ -693,6 +654,7 @@ def discard_auto_apply_draft(request, pk):
     ).delete()
     if not deleted:
         raise Http404("Draft not found or not discardable.")
+    invalidate_questions_panel(request.user.pk)
     messages.info(request, "Draft discarded. You can draft this application again from recommendations.")
     return _auto_apply_queue_redirect(request)
 
@@ -759,16 +721,20 @@ def send_auto_apply_draft(request, pk):
     # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
     # sweep keys off it, and a draft that sat in the queue before Send would
     # otherwise look "stuck in SENDING" the moment it is sent.
-    updated = AutoApplyDraft.objects.filter(
-        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
-        answers=draft.answers,
-    ).update(
-        status=AutoApplyDraft.Status.SENDING,
-        updated_at=timezone.now(),
-        submitted_answers_snapshot=build_submit_snapshot(draft.answers),
-    )
-    if not updated:
-        raise Http404("Draft not found or not sendable.")
+    with transaction.atomic():
+        updated = AutoApplyDraft.objects.filter(
+            pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+            answers=draft.answers,
+        ).update(
+            status=AutoApplyDraft.Status.SENDING,
+            updated_at=timezone.now(),
+            submitted_answers_snapshot=build_submit_snapshot(draft.answers),
+        )
+        if not updated:
+            raise Http404("Draft not found or not sendable.")
+        # What is being submitted, recorded in the same transaction as the
+        # transition so a lost race records nothing.
+        answer_memory.record_observations(draft)
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")

@@ -1,0 +1,35 @@
+<section id="panel">
+    <h2>Questions you've been asked</h2>
+    {% if panel.question_count %}
+    <p class="muted">From your recent applications. Questions answered by your settings above link to the setting; for the rest, quick-fill saves an answer that auto-apply reuses.</p>
+    {% for group in panel.groups %}
+        {% if group.rows %}
+        <details>
+            <summary>{{ group.title }} — {{ group.answered }} of {{ group.total }} answered</summary>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead><tr class="muted"><th align="left">Question</th><th>Asked</th><th>Last seen</th><th align="left">Status</th><th></th></tr></thead>
+                <tbody>
+                {% for row in group.rows %}
+                <tr style="border-top:1px solid #eee;">
+                    <td title="{{ row.label }}">{{ row.short }}</td>
+                    <td align="center">{{ row.count }}</td>
+                    <td align="center">{{ row.last_seen|date:"M j" }}</td>
+                    <td>{% if row.answered %}✓ {% endif %}{{ row.status }}{% if row.source and row.source != "settings" %} <span class="muted">({{ row.source }})</span>{% endif %}</td>
+                    <td>
+                        {% if row.quick_fill %}
+                        <a class="btn" href="{% url 'quick_fill' %}?draft={{ row.quick_fill.draft }}&field={{ row.quick_fill.field }}">Quick-fill</a>
+                        {% elif row.anchor %}
+                        <a href="#{{ row.anchor }}">{% if row.answered %}Change{% else %}Set it up{% endif %}</a>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </details>
+        {% endif %}
+    {% endfor %}
+    {% else %}
+    <p class="muted">Nothing yet — questions show up here after auto-apply drafts an application.</p>
+    {% endif %}
+</section>

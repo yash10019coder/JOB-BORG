@@ -9,8 +9,9 @@ from django.test import TestCase
 
 from apps.auto_apply.llm.base import Question, QuestionAnswer, ResolutionReason
 from apps.auto_apply.models import ExplicitAnswer
+from apps.auto_apply.tests.legacy_seed import seed_explicit_answer
 from apps.auto_apply.services.answer_resolution import (
-    PROFILE_DERIVED_REASON, resolve_field_answers,
+    PROFILE_FACT_REASON, TYPED_FACT_UNANSWERED_REASON, resolve_field_answers,
 )
 
 User = get_user_model()
@@ -244,7 +245,7 @@ class ExplicitAnswerOptionConstraintTests(TestCase):
         self.profile.save()
 
     def test_explicit_answer_matching_an_option_passes_through(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
             answer_text="Yes",
@@ -265,7 +266,7 @@ class ExplicitAnswerOptionConstraintTests(TestCase):
         self.assertEqual(resolved.reason, "explicit_answer")
 
     def test_explicit_answer_not_in_options_is_treated_as_unanswerable(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
             answer_text="Yes, I am authorized to work without restriction.",
@@ -375,10 +376,10 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         )[0]
 
     def test_each_question_gets_its_own_saved_answer(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
         )
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
         )
 
@@ -386,7 +387,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         self.assertEqual(self._resolve(self.SPONSOR_Q).answer, "No")
 
     def test_saved_sponsorship_answer_is_not_used_for_the_authorization_question(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No, I do not require sponsorship.",
         )
@@ -397,7 +398,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
         self.assertTrue(resolved.needs_review)
 
     def test_saved_authorization_answer_is_not_used_for_the_sponsorship_question(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user, category=ExplicitAnswer.Category.WORK_AUTHORIZATION, answer_text="US Citizen"
         )
 
@@ -408,7 +409,7 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
 
     def test_ambiguous_questions_require_review_despite_saved_answers(self):
         for category in (ExplicitAnswer.Category.WORK_AUTHORIZATION, ExplicitAnswer.Category.SPONSORSHIP):
-            ExplicitAnswer.objects.create(user=self.user, category=category, answer_text="No")
+            seed_explicit_answer(user=self.user, category=category, answer_text="No")
 
         for text in (
             "Do you currently hold H-1B status?",
@@ -434,13 +435,16 @@ class WorkAuthorizationSponsorshipSplitTests(TestCase):
                 self.assertEqual(client.calls, [])
 
 
-class ProfileDerivedSalaryFallbackTests(TestCase):
-    """`SALARY_EXPECTATION` is a hard-excluded category (never sent to the
-    LLM); with no saved `ExplicitAnswer`, a salary question used to always
-    come back blank/needs_review even though `Profile.min_salary` was
-    already collected at signup for matching. It should be used as a
-    fallback instead -- surfaced for review rather than trusted outright,
-    since it was never confirmed as *this* question's exact answer."""
+def _job(country="US", employer="Acme"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(location_country=country, employer=SimpleNamespace(name=employer))
+
+
+class TypedFactResolutionTests(TestCase):
+    """Typed profile facts (salary band, contact/location, citizenship) answer
+    questions before the LLM, and `min_salary` -- a matching floor in the
+    user's own currency -- never becomes an answer (FR4.3/FR4.4)."""
 
     SALARY_Q = "What is your desired salary?"
 
@@ -451,65 +455,156 @@ class ProfileDerivedSalaryFallbackTests(TestCase):
         self.profile = self.user.profile
         self.profile.resume_text = "Grace."
 
-    def _resolve(self, text=SALARY_Q, field_type="text", options=None):
-        question = Question(id=text, text=text, field_type=field_type, options=options)
+    def _resolve(self, text=SALARY_Q, field_type="text", options=(), job=None):
+        question = Question(id=text, text=text, field_type=field_type, options=tuple(options))
         client = FakeLLMClient()
         resolved = resolve_field_answers(
-            self.user, [question], self.profile.resume_text, self.profile, client
+            self.user, [question], self.profile.resume_text, self.profile, client, job=job
         )[0]
         return resolved, client
 
-    def test_min_salary_answers_a_salary_question_when_no_explicit_answer(self):
+    def test_min_salary_never_answers_a_salary_question(self):
         self.profile.min_salary = 150000
         self.profile.save()
 
-        resolved, client = self._resolve()
-
-        self.assertEqual(resolved.answer, "150000")
-        self.assertTrue(resolved.needs_review)
-        self.assertEqual(resolved.reason, PROFILE_DERIVED_REASON)
-        self.assertEqual(client.calls, [])  # never reaches the LLM either
-
-    def test_explicit_answer_still_wins_over_profile_min_salary(self):
-        self.profile.min_salary = 150000
-        self.profile.save()
-        ExplicitAnswer.objects.create(
-            user=self.user,
-            category=ExplicitAnswer.Category.SALARY_EXPECTATION,
-            answer_text="Negotiable",
-        )
-
-        resolved, _ = self._resolve()
-
-        self.assertEqual(resolved.answer, "Negotiable")
-        self.assertFalse(resolved.needs_review)
-        self.assertEqual(resolved.reason, "explicit_answer")
-
-    def test_no_min_salary_falls_through_to_hard_exclusion_as_before(self):
-        self.profile.min_salary = None
-        self.profile.save()
-
-        resolved, client = self._resolve()
+        resolved, client = self._resolve(job=_job("US"))
 
         self.assertIsNone(resolved.answer)
         self.assertTrue(resolved.needs_review)
         self.assertEqual(resolved.reason, ResolutionReason.HARD_EXCLUDED_CATEGORY)
         self.assertEqual(client.calls, [])
 
-    def test_min_salary_is_still_option_constrained(self):
-        # A salary *range* select shouldn't get the raw number rubber-stamped
-        # if it doesn't exactly match a listed range -- same backstop as
-        # every other option-bearing answer.
-        self.profile.min_salary = 150000
+    def test_the_regional_band_answers_with_provenance(self):
+        self.profile.salary_by_region = {"US": "75-100k"}
+        self.profile.save()
+
+        resolved, client = self._resolve(job=_job("US"))
+
+        self.assertEqual(resolved.answer, "$75,000 – $100,000")
+        self.assertEqual(resolved.reason, PROFILE_FACT_REASON)
+        self.assertFalse(resolved.needs_review)
+        self.assertFalse(resolved.needs_confirmation)
+        self.assertEqual(resolved.provenance["origin"], "profile.salary_by_region.US")
+        self.assertEqual(client.calls, [])
+
+    def test_no_band_for_the_jobs_region_stays_blank_for_review(self):
+        self.profile.salary_by_region = {"US": "75-100k"}
+        self.profile.save()
+        for job in (_job("India"), _job(""), None):
+            resolved, _ = self._resolve(job=job)
+            self.assertIsNone(resolved.answer)
+            self.assertTrue(resolved.needs_review)
+
+    def test_band_that_is_not_one_of_the_forms_options_is_blank_for_review(self):
+        self.profile.salary_by_region = {"US": "75-100k"}
         self.profile.save()
 
         resolved, _ = self._resolve(
-            field_type="single_select", options=("$50k-100k", "$100k-150k", "$150k+"),
+            field_type="single_select", options=("$50k-100k", "$100k-150k"), job=_job("US")
         )
 
         self.assertIsNone(resolved.answer)
         self.assertTrue(resolved.needs_review)
-        self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+    def test_a_legacy_salary_answer_answers_only_a_job_in_its_own_region(self):
+        seed_explicit_answer(
+            user=self.user,
+            category=ExplicitAnswer.Category.SALARY_EXPECTATION,
+            answer_text="75-100k",
+        )
+
+        us, _ = self._resolve(job=_job("US"))
+        india, _ = self._resolve(job=_job("India"))
+
+        self.assertEqual(us.answer, "$75,000 – $100,000")
+        self.assertEqual(us.reason, "explicit_answer")
+        self.assertIsNone(india.answer)
+        self.assertTrue(india.needs_review)
+
+    def test_a_legacy_salary_answer_with_no_region_never_answers(self):
+        seed_explicit_answer(
+            user=self.user,
+            category=ExplicitAnswer.Category.SALARY_EXPECTATION,
+            answer_text="Negotiable",
+        )
+
+        resolved, _ = self._resolve(job=_job("US"))
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+
+    def test_country_picker_is_answered_from_the_profile_and_never_reaches_the_llm(self):
+        self.profile.location_country = "IND"
+        self.profile.save()
+
+        resolved, client = self._resolve(
+            "Country", "combobox_select", ("United States +1", "India +91"), job=_job("US")
+        )
+
+        self.assertEqual(resolved.answer, "India +91")
+        self.assertEqual(resolved.reason, PROFILE_FACT_REASON)
+        self.assertEqual(resolved.provenance["origin"], "profile.location_country")
+        self.assertEqual(client.calls, [])
+
+    def test_unanswered_citizenship_is_blank_and_never_guessed_by_the_llm(self):
+        resolved, client = self._resolve("Are you a US citizen?", options=("Yes", "No"))
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, TYPED_FACT_UNANSWERED_REASON)
+        self.assertEqual(client.calls, [])
+
+    def test_answered_citizenship_uses_the_profile(self):
+        self.profile.citizenship_countries = ["USA"]
+        self.profile.save()
+
+        resolved, _ = self._resolve("Are you a US citizen?", options=("Yes", "No"))
+
+        self.assertEqual(resolved.answer, "Yes")
+        self.assertEqual(resolved.reason, PROFILE_FACT_REASON)
+
+    def test_unanswered_location_membership_is_blank_and_never_guessed(self):
+        self.profile.location_country = "USA"
+        self.profile.save()
+
+        resolved, client = self._resolve(
+            "Are you currently located in the Bay Area?", options=("Yes", "No")
+        )
+
+        self.assertIsNone(resolved.answer)
+        self.assertEqual(resolved.reason, TYPED_FACT_UNANSWERED_REASON)
+        self.assertEqual(client.calls, [])
+
+    def test_a_narrative_question_keeps_the_employer_in_its_key(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        # A row keyed with the employer stripped (as a short-text answer would
+        # be) must not be found by a long-text question for the same employer:
+        # a narrative answer is about *that* employer and is never shared.
+        text = "Why do you want to work at Canonical?"
+        write_answer(self.profile, text, "I love Canonical", "user", employer="Canonical")
+
+        short = Question(id="s", text=text, field_type="text")
+        narrative = Question(id="n", text=text, field_type="textarea")
+        short_hit, narrative_hit = resolve_field_answers(
+            self.user, [short, narrative], self.profile.resume_text, self.profile,
+            FakeLLMClient(), job=_job("US", "Canonical"),
+        )
+        self.assertEqual(short_hit.reason, "answer_bank")
+        self.assertNotEqual(narrative_hit.reason, "answer_bank")
+
+    def test_a_short_factual_answer_is_shared_across_employers(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        write_answer(
+            self.profile, "How did you hear about Acme?", "LinkedIn", "user", employer="Acme"
+        )
+        question = Question(id="q", text="How did you hear about Beta?", field_type="text")
+        resolved = resolve_field_answers(
+            self.user, [question], self.profile.resume_text, self.profile,
+            FakeLLMClient(), job=_job("US", "Beta"),
+        )[0]
+        self.assertEqual((resolved.answer, resolved.reason), ("LinkedIn", "answer_bank"))
 
 
 class AnswerBankResolutionTests(TestCase):
@@ -535,7 +630,7 @@ class AnswerBankResolutionTests(TestCase):
         )[0]
 
     def test_user_answer_bank_row_beats_the_legacy_explicit_answer(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="Yes",
@@ -581,7 +676,7 @@ class AnswerBankResolutionTests(TestCase):
         self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
 
     def test_without_a_bank_row_the_legacy_path_is_unchanged(self):
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -594,8 +689,8 @@ class AnswerBankResolutionTests(TestCase):
         self.assertFalse(resolved.needs_review)
         self.assertIsNone(resolved.provenance)
 
-    def test_a_profile_less_call_still_resolves_legacy_answers(self):
-        ExplicitAnswer.objects.create(
+    def test_a_profile_less_call_has_no_saved_answers_to_use(self):
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -604,4 +699,53 @@ class AnswerBankResolutionTests(TestCase):
         resolved = resolve_field_answers(
             self.user, [Question(id=text, text=text)], "", None, FakeLLMClient()
         )[0]
-        self.assertEqual(resolved.answer, "No")
+        # Saved answers live on the profile now; without one there is nothing
+        # to read, and a hard-excluded question is left for the user.
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+
+
+class AnswerBankSingleQueryTests(TestCase):
+    """`resolve_field_answers` preloads the profile's AnswerBank rows once per
+    draft instead of querying per question."""
+
+    def test_one_answer_bank_query_regardless_of_question_count(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        user = User.objects.create_user(username="erin", password="pw", email="e@example.com")
+        profile = user.profile
+        profile.resume_text = "Erin."
+        profile.save()
+        questions = [
+            Question(id=f"q{i}", text=f"Tell us about project number {i}") for i in range(6)
+        ]
+        with CaptureQueriesContext(connection) as ctx:
+            resolve_field_answers(user, questions, profile.resume_text, profile, FakeLLMClient())
+        bank_queries = [q for q in ctx.captured_queries if "accounts_answerbank" in q["sql"]]
+        self.assertEqual(len(bank_queries), 1)
+
+
+class NegatedSponsorshipQuestionTests(TestCase):
+    """A negated phrasing flips the meaning of yes/no, so a saved sponsorship
+    answer must not be applied to it."""
+
+    def test_saved_sponsorship_answer_is_not_used_for_a_negated_question(self):
+        user = User.objects.create_user(username="finn", password="pw", email="f@example.com")
+        seed_explicit_answer(
+            user=user, category=ExplicitAnswer.Category.SPONSORSHIP, answer_text="No"
+        )
+        profile = user.profile
+        profile.resume_text = "Finn."
+        profile.save()
+        negated = "Can you work in the US without sponsorship?"
+        plain = "Will you now or in the future require visa sponsorship?"
+        resolved = resolve_field_answers(
+            user,
+            [Question(id=negated, text=negated), Question(id=plain, text=plain)],
+            profile.resume_text,
+            profile,
+            FakeLLMClient(),
+        )
+        self.assertNotEqual(resolved[0].reason, "explicit_answer")
+        self.assertEqual((resolved[1].answer, resolved[1].reason), ("No", "explicit_answer"))

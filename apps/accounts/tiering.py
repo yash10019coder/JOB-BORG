@@ -68,6 +68,8 @@ _CATEGORY_PATTERNS = [
             r"\bright to work\b",
             r"\bcitizenship status\b",
             r"\bimmigration status\b",
+            r"\bpetition\b",
+            r"\bemployment[- ]based (status|visa)\b",
         ],
     ),
     (
@@ -172,7 +174,7 @@ _TIER_RANK = {Tier.T2_FACTUAL: 0, Tier.T1_COMMERCIAL: 1, Tier.T0_LEGAL: 2}
 
 # Version stamped into submit snapshots so a later classifier change is
 # attributable. Bump whenever the tier logic or patterns change.
-TIERING_VERSION = "v1"
+TIERING_VERSION = "v2"
 
 
 def higher_tier(a, b):
@@ -227,6 +229,8 @@ _T2_PATTERNS = [
     r"\b(postal|zip) ?code\b",
     r"^\s*(state|province|country|region)\s*\*?\s*$",
     r"\btime ?zone\b",
+    r"\b(what|which) country\b.{0,40}\b(located|based|live|reside|work)",
+    r"\bwhere do you (currently )?(live|reside)\b",
     r"\blocation\b",
     r"\bresid(e|ence)\b",
     r"\bbased\b",
