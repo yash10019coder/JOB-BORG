@@ -1,0 +1,400 @@
+{
+ "_note": "Labelled question pairs for the reworded-question matcher (Phase 4b, #130). 'tuning' is what thresholds and intent wording are tuned on; 'held_out' is only ever checked, never tuned on. The near-miss lists prove only the classes they name; they do not prove zero false merges in general.",
+ "tuning": {
+  "reworded": [
+   {
+    "label": "gender 1",
+    "a": "Gender",
+    "b": "How would you describe your gender identity?"
+   },
+   {
+    "label": "gender 2",
+    "a": "Which gender do you identify as?",
+    "b": "How do you identify? (gender identity)"
+   },
+   {
+    "label": "race 1",
+    "a": "How do you identify? (race/ethnicity)",
+    "b": "Please indicate your race or ethnicity:"
+   },
+   {
+    "label": "race 2",
+    "a": "What is your ETHNICITY?",
+    "b": "How would you describe your racial/ethnic background"
+   },
+   {
+    "label": "sponsorship 1",
+    "a": "Will you now or in the future require sponsorship to work in the US?",
+    "b": "Do you require immigration sponsorship to work in the US?"
+   },
+   {
+    "label": "sponsorship 2",
+    "a": "Will you require visa sponsorship either now or in the future?",
+    "b": "Do you now or in the future require sponsorship?"
+   },
+   {
+    "label": "hear 1",
+    "a": "How did you hear about us?",
+    "b": "Where did you hear about this job?"
+   },
+   {
+    "label": "hear 2",
+    "a": "How did you hear about this role?",
+    "b": "How did you find out about this position?"
+   },
+   {
+    "label": "notice 1",
+    "a": "Notice period?",
+    "b": "What is your notice period?"
+   },
+   {
+    "label": "notice 2",
+    "a": "What is your notice period?",
+    "b": "How much notice do you need to give your current employer?"
+   },
+   {
+    "label": "start 1",
+    "a": "When can you start?",
+    "b": "What is your earliest start date?"
+   },
+   {
+    "label": "relocation 1",
+    "a": "Are you willing to relocate?",
+    "b": "Would you be open to relocation?"
+   },
+   {
+    "label": "years 1",
+    "a": "How many years of experience do you have with Python?",
+    "b": "Years of Python experience?"
+   },
+   {
+    "label": "veteran 1",
+    "a": "Are you a veteran?",
+    "b": "What is your veteran status?"
+   },
+   {
+    "label": "disability 1",
+    "a": "Do you have a disability?",
+    "b": "Please indicate your disability status"
+   },
+   {
+    "label": "decoration",
+    "a": "Phone number *",
+    "b": "Please provide your phone number (optional)"
+   }
+  ],
+  "near_miss": [
+   {
+    "label": "auth negated",
+    "a": "Are you authorized to work in the US?",
+    "b": "Are you NOT authorized to work in the US?"
+   },
+   {
+    "label": "auth vs sponsorship",
+    "a": "Are you authorized to work in the US?",
+    "b": "Will you require sponsorship?"
+   },
+   {
+    "label": "sponsorship negated",
+    "a": "Do you require sponsorship?",
+    "b": "Do you not require sponsorship?"
+   },
+   {
+    "label": "passport country",
+    "a": "Do you have a US passport?",
+    "b": "Do you have a UK passport?"
+   },
+   {
+    "label": "salary current vs expected",
+    "a": "What is your current salary?",
+    "b": "What are your salary expectations?"
+   },
+   {
+    "label": "terminated vs laid off",
+    "a": "Have you ever been terminated from a job?",
+    "b": "Have you ever been laid off from a job?"
+   },
+   {
+    "label": "felony vs misdemeanor",
+    "a": "Have you been convicted of a felony?",
+    "b": "Have you been convicted of a misdemeanor?"
+   },
+   {
+    "label": "age 18 vs 21",
+    "a": "Are you at least 18 years of age?",
+    "b": "Are you at least 21 years of age?"
+   },
+   {
+    "label": "current vs previous employer",
+    "a": "Are you currently employed by Acme?",
+    "b": "Were you previously employed by Acme?"
+   },
+   {
+    "label": "veteran vs disabled veteran",
+    "a": "Are you a veteran?",
+    "b": "Are you a disabled veteran?"
+   },
+   {
+    "label": "gender vs race",
+    "a": "What is your gender?",
+    "b": "What is your race?"
+   },
+   {
+    "label": "notice vs start",
+    "a": "What is your notice period?",
+    "b": "What is your start date?"
+   },
+   {
+    "label": "convicted vs charged",
+    "a": "Have you ever been convicted of a crime?",
+    "b": "Have you ever been charged with a crime?"
+   },
+   {
+    "label": "python vs java",
+    "a": "How many years of experience do you have with Python?",
+    "b": "How many years of experience do you have with Java?"
+   },
+   {
+    "label": "license vs passport",
+    "a": "Do you have a valid driver's license?",
+    "b": "Do you have a valid passport?"
+   },
+   {
+    "label": "marketing vs alerts",
+    "a": "Would you like to receive marketing emails?",
+    "b": "Would you like to receive job alerts?"
+   },
+   {
+    "label": "relocate vs onsite",
+    "a": "Are you willing to relocate?",
+    "b": "Are you willing to work on-site?"
+   }
+  ]
+ },
+ "held_out": {
+  "reworded": [
+   {
+    "label": "gender h1",
+    "a": "What is your gender?",
+    "b": "Gender identity"
+   },
+   {
+    "label": "race h1",
+    "a": "Race/Ethnicity",
+    "b": "What is your racial or ethnic background?"
+   },
+   {
+    "label": "sponsorship h1",
+    "a": "Do you require visa sponsorship?",
+    "b": "Will you now or in the future require sponsorship for employment?"
+   },
+   {
+    "label": "hear h1",
+    "a": "How did you hear about this opportunity?",
+    "b": "Where did you find out about us?"
+   },
+   {
+    "label": "notice h1",
+    "a": "What is your notice period?",
+    "b": "Notice period (in weeks)"
+   },
+   {
+    "label": "start h1",
+    "a": "What is your earliest start date?",
+    "b": "When could you start?"
+   },
+   {
+    "label": "relocation h1",
+    "a": "Are you open to relocating?",
+    "b": "Are you willing to relocate for this role?"
+   },
+   {
+    "label": "years h1",
+    "a": "How many years of experience do you have with Django?",
+    "b": "Years of Django experience"
+   }
+  ],
+  "near_miss": [
+   {
+    "label": "auth negated h",
+    "a": "Are you legally authorized to work in the United States?",
+    "b": "Are you not legally authorized to work in the United States?"
+   },
+   {
+    "label": "passport h",
+    "a": "Do you hold a Canadian passport?",
+    "b": "Do you hold a British passport?"
+   },
+   {
+    "label": "age h",
+    "a": "Are you over 18?",
+    "b": "Are you over 21?"
+   },
+   {
+    "label": "fired h",
+    "a": "Have you ever been fired?",
+    "b": "Have you ever resigned?"
+   },
+   {
+    "label": "sponsor now vs future h",
+    "a": "Do you require sponsorship?",
+    "b": "Do you not require sponsorship now?"
+   },
+   {
+    "label": "employed h",
+    "a": "Do you currently work for Acme?",
+    "b": "Did you previously work for Acme?"
+   },
+   {
+    "label": "hear vs referral h",
+    "a": "How did you hear about us?",
+    "b": "Who referred you to this role?"
+   },
+   {
+    "label": "python vs rust h",
+    "a": "Years of Python experience?",
+    "b": "Years of Rust experience?"
+   },
+   {
+    "label": "salary h",
+    "a": "What is your desired salary?",
+    "b": "What is your current salary?"
+   },
+   {
+    "label": "disability h",
+    "a": "Do you have a disability?",
+    "b": "Do you have a disabled family member?"
+   }
+  ]
+ },
+ "tier_shapes": [
+  "Are you legally authorized to work in the United States?",
+  "Will you now or in the future require visa sponsorship?",
+  "What are your salary expectations?",
+  "What is your notice period?",
+  "What is your gender?",
+  "Are you a veteran?",
+  "Do you have a disability?",
+  "Have you ever been convicted of a felony?",
+  "Are you willing to relocate?",
+  "Are you at least 18 years of age?",
+  "Do you agree to the privacy policy?"
+ ],
+ "fresh": {
+  "_note": "Written after the matcher was tuned, and run once before any further change. Report what fails; do not tune on it silently.",
+  "reworded": [
+   {
+    "label": "gender f1",
+    "a": "What gender do you identify with?",
+    "b": "Please select your gender"
+   },
+   {
+    "label": "race f1",
+    "a": "Please select your race/ethnicity",
+    "b": "What is your racial or ethnic background?"
+   },
+   {
+    "label": "notice f1",
+    "a": "What notice do you have to serve?",
+    "b": "What is your notice period?"
+   },
+   {
+    "label": "start f1",
+    "a": "What is your availability to start?",
+    "b": "What is your earliest start date?"
+   },
+   {
+    "label": "hear f1",
+    "a": "How did you first hear about our company?",
+    "b": "How did you learn about this role?"
+   },
+   {
+    "label": "relocation f1",
+    "a": "Would you consider relocating for this role?",
+    "b": "Are you open to relocation?"
+   },
+   {
+    "label": "sponsorship f1",
+    "a": "Do you now or will you in the future need visa sponsorship?",
+    "b": "Will you require sponsorship now or in the future?"
+   },
+   {
+    "label": "veteran f1",
+    "a": "Are you a protected veteran?",
+    "b": "Veteran status"
+   },
+   {
+    "label": "years f1",
+    "a": "How many years of experience do you have with React?",
+    "b": "Years of experience with React"
+   },
+   {
+    "label": "phone f1",
+    "a": "Phone number",
+    "b": "Please enter your phone number (optional)"
+   }
+  ],
+  "near_miss": [
+   {
+    "label": "auth country f1",
+    "a": "Are you legally authorized to work in Canada?",
+    "b": "Are you legally authorized to work in Mexico?"
+   },
+   {
+    "label": "sponsor ever f1",
+    "a": "Do you require sponsorship?",
+    "b": "Have you ever required sponsorship?"
+   },
+   {
+    "label": "dismissed f1",
+    "a": "Have you ever been dismissed from a position?",
+    "b": "Have you ever resigned from a position?"
+   },
+   {
+    "label": "age f1",
+    "a": "Are you over the age of 18?",
+    "b": "Are you over the age of 16?"
+   },
+   {
+    "label": "salary f1",
+    "a": "What is your expected salary?",
+    "b": "What is your current salary?"
+   },
+   {
+    "label": "cloud f1",
+    "a": "Do you have experience with AWS?",
+    "b": "Do you have experience with Azure?"
+   },
+   {
+    "label": "relocate travel f1",
+    "a": "Are you willing to relocate?",
+    "b": "Are you willing to travel?"
+   },
+   {
+    "label": "spouse veteran f1",
+    "a": "Are you a veteran?",
+    "b": "Are you a spouse of a veteran?"
+   },
+   {
+    "label": "referral f1",
+    "a": "How did you hear about us?",
+    "b": "Were you referred by an employee?"
+   },
+   {
+    "label": "disability record f1",
+    "a": "Do you have a disability?",
+    "b": "Do you have a criminal record?"
+   },
+   {
+    "label": "pronouns f1",
+    "a": "What pronouns do you use?",
+    "b": "What is your gender?"
+   },
+   {
+    "label": "start remote f1",
+    "a": "Can you start immediately?",
+    "b": "Can you work remotely?"
+   }
+  ]
+ }
+}

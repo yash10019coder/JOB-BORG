@@ -22,14 +22,16 @@ import re
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from apps.accounts.services.answer_resolver import load_bank_rows
 from apps.accounts.services.panel_cache import invalidate_questions_panel
+from apps.accounts.services.question_candidates import find_candidates
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
-    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT, FormField, schema_to_dict,
+    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT, TEXTAREA, FormField, schema_to_dict,
 )
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
@@ -338,6 +340,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
                 entry["learned_value"] = value
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
+    _attach_candidates(profile, job, answers_payload)
 
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here
@@ -364,6 +367,59 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         answers=answers_payload,
         form_schema_snapshot=schema_to_dict(schema),
     )
+
+
+def candidate_to_dict(candidate) -> dict:
+    """The JSON stored beside a blank entry (a candidate is never its value)."""
+    return {
+        "question_key": candidate.question_key,
+        "scope_region": candidate.scope_region,
+        "question_text": candidate.question_text,
+        "value": candidate.value,
+        "mapped_value": candidate.mapped_value,
+        "score": candidate.score,
+        "via": candidate.via,
+        "intent": candidate.intent,
+        "source": candidate.source,
+        "tier": candidate.tier,
+        "is_locked": candidate.is_locked,
+    }
+
+
+def _attach_candidates(profile, job, answers_payload) -> None:
+    """Show a reworded question's earlier answers beside a blank field.
+
+    Adds a ``candidates`` list to entries that are still blank and not
+    answered from typed settings or a saved answer. It never touches
+    ``value``, ``needs_review``, ``needs_confirmation`` or ``provenance`` (the
+    invariant in the plan's R2), and any failure just means no candidates: the
+    draft is built exactly as it would be without them. Candidate text and
+    values are never logged.
+    """
+    if profile is None:
+        return
+    try:
+        bank_rows = load_bank_rows(profile)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("candidates: could not load saved answers")
+        return
+    for label, entry in answers_payload.items():
+        if (
+            entry.get("category") == "standard"
+            or entry.get("field_type") in (FILE, TEXTAREA)
+            or entry.get("provenance") is not None
+            or not is_blank_answer_value(entry.get("value"))
+        ):
+            continue
+        try:
+            found = find_candidates(
+                profile, label, job, options=entry.get("options") or (), bank_rows=bank_rows
+            )
+        except Exception:
+            logger.warning("candidates: matching failed for one question; continuing without")
+            continue
+        if found:
+            entry["candidates"] = [candidate_to_dict(c) for c in found]
 
 
 def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:

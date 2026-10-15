@@ -20,5 +20,9 @@ CACHES = {
     },
 }
 
+# Reworded-question candidates are off unless a test turns them on, so the rest of the
+# suite sees drafts exactly as before.
+QUESTION_CANDIDATES_ENABLED = False
+
 # Faster password hashing in tests.
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

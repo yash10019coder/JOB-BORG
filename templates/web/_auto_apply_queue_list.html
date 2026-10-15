@@ -44,6 +44,8 @@
                 {% csrf_token %}
                 <input type="hidden" name="status" value="{{ status_filter }}">
                 <input type="hidden" name="ats" value="{{ ats_filter }}">
+                {# First submit button in the form is what Enter triggers: keep it "Save", never an accept button. #}
+                <button type="submit" tabindex="-1" aria-hidden="true" style="position:absolute; left:-9999px;">Save answers</button>
                 {% for label, entry in draft.display_answers.items %}
                 <div style="padding:.4rem .6rem; margin:.3rem 0; border-radius:4px;{% if entry.needs_review %} border-left:3px solid #f59e0b; background:#fffbeb;{% else %} border-left:3px solid #e5e7eb;{% endif %}">
                     <label for="{{ entry.control_id }}">
@@ -63,6 +65,25 @@
                     {{ entry.control }}
                     {% else %}
                     <p>{{ entry.value }}</p>
+                    {% endif %}
+                    {% if entry.candidates and draft.status == "drafted" %}
+                    <div class="muted" style="margin:.3rem 0;" data-candidates>
+                        <p>You answered similar questions before:</p>
+                        <ul>
+                            {% for candidate in entry.candidates %}
+                            <li>
+                                &ldquo;{{ candidate.question_text }}&rdquo; &rarr; <strong>{{ candidate.value }}</strong>
+                                ({{ candidate.source }})
+                                {% if candidate.can_accept %}
+                                <button type="submit" name="accept__{{ forloop.parentloop.counter0 }}" value="{{ candidate.question_key }}">Use this answer</button>
+                                {% else %}
+                                <span>(does not match this form&rsquo;s choices)</span>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        <p>This is a suggestion from an earlier, differently worded question and may not mean the same thing.{% if entry.candidates.0.held %} You will still need to confirm it before sending.{% endif %}</p>
+                    </div>
                     {% endif %}
                     {% if entry.remember and draft.status == "drafted" %}
                     <p class="muted">

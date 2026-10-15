@@ -646,6 +646,14 @@ class AnswerObservation(models.Model):
     # The learned answer that was prefilled for this question, if any: lets
     # shadow metrics compare "what the learner would have filled" with ``value``.
     learned_value = models.JSONField(null=True, blank=True)
+    # Reworded-question candidate (Phase 4b): the earlier question's key shown
+    # beside this blank field, whether the submitted value equalled its answer
+    # (None when no candidate was shown), and whether the value was taken with
+    # the one-click accept rather than typed. The candidate's own value is not
+    # copied here: it already lives in the AnswerBank row ``candidate_question_key``.
+    candidate_question_key = models.CharField(max_length=255, blank=True, default="")
+    candidate_equal = models.BooleanField(null=True, blank=True)
+    candidate_accepted = models.BooleanField(default=False)
     job_id = models.BigIntegerField(null=True, blank=True)
     draft_id = models.BigIntegerField(null=True, blank=True)
     employer_name = models.CharField(max_length=255, blank=True, default="")

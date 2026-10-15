@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from math import sqrt
 
-from apps.accounts.models import AnswerObservation
+from apps.accounts.models import AnswerBank, AnswerObservation
 from apps.accounts.services.learning import _fold
 
 BULK_ORIGIN = "draft_review_bulk"
@@ -43,6 +43,64 @@ def wilson_lower_bound(successes, n, z=1.96):
     centre = p + z * z / (2 * n)
     margin = z * sqrt((p * (1 - p) + z * z / (4 * n)) / n)
     return max(0.0, (centre - margin) / denominator)
+
+
+@dataclass
+class CandidateStats:
+    """How a reworded-question candidate fared, per risk tier.
+
+    ``precision`` counts only answers the user typed or changed (a click on
+    "use this answer" is not evidence the match was right), and leaves out
+    candidates drawn from an answer that was itself saved through an accept, so
+    accepted answers cannot raise their own score. ``accept_rate`` is reported
+    separately: a high rate with no typed answers means the number is
+    uninformative, not good.
+    """
+
+    tier: str
+    shown: int = 0
+    accepted: int = 0
+    typed: int = 0
+    matched: int = 0
+    self_reinforced: int = 0
+
+    @property
+    def precision(self):
+        return self.matched / self.typed if self.typed else None
+
+    @property
+    def lower_bound(self):
+        return wilson_lower_bound(self.matched, self.typed)
+
+    @property
+    def accept_rate(self):
+        return self.accepted / self.shown if self.shown else None
+
+
+def candidate_stats(profile=None):
+    """``{tier: CandidateStats}`` over observations where a candidate was shown."""
+    observations = AnswerObservation.objects.exclude(candidate_question_key="")
+    if profile is not None:
+        observations = observations.filter(profile=profile)
+    reinforced = set(
+        AnswerBank.objects.filter(source_detail__via_candidate=True)
+        .values_list("profile_id", "question_key")
+    )
+    stats = {}
+    for obs in observations.only(
+        "profile_id", "tier", "candidate_question_key", "candidate_equal", "candidate_accepted"
+    ):
+        entry = stats.setdefault(obs.tier, CandidateStats(obs.tier))
+        entry.shown += 1
+        if obs.candidate_accepted:
+            entry.accepted += 1
+            continue
+        if (obs.profile_id, obs.candidate_question_key) in reinforced:
+            entry.self_reinforced += 1
+            continue
+        entry.typed += 1
+        entry.matched += bool(obs.candidate_equal)
+    return stats
 
 
 def shadow_stats(profile=None):

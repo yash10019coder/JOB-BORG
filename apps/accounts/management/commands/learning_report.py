@@ -10,7 +10,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from apps.accounts.models import Profile
 from apps.accounts.services.learning import learn_for_profile
-from apps.accounts.services.shadow_metrics import shadow_stats
+from apps.accounts.services.shadow_metrics import candidate_stats, shadow_stats
 
 
 class Command(BaseCommand):
@@ -42,6 +42,25 @@ class Command(BaseCommand):
                 f"  {username}  {key[:60]!r}: n={stats.observations} "
                 f"precision={stats.precision:.2f} lower_bound={stats.lower_bound:.2f} "
                 f"bulk_confirmed={stats.bulk_confirmed}"
+            )
+
+        self.stdout.write("Reworded-question candidates (counts per tier; typed or changed answers only)")
+        totals = {}
+        for profile in profiles:
+            for tier, stats in candidate_stats(profile).items():
+                total = totals.setdefault(tier, type(stats)(tier))
+                for field in ("shown", "accepted", "typed", "matched", "self_reinforced"):
+                    setattr(total, field, getattr(total, field) + getattr(stats, field))
+        if not totals:
+            self.stdout.write("  no candidates shown yet")
+        for tier, stats in sorted(totals.items()):
+            precision = "n/a" if stats.precision is None else f"{stats.precision:.2f}"
+            accept = "n/a" if stats.accept_rate is None else f"{stats.accept_rate:.2f}"
+            self.stdout.write(
+                f"  {tier}: shown={stats.shown} accepted={stats.accepted} typed={stats.typed} "
+                f"matched={stats.matched} precision={precision} "
+                f"lower_bound={stats.lower_bound:.2f} accept_rate={accept} "
+                f"self_reinforced_excluded={stats.self_reinforced}"
             )
 
         if options["learn_dry_run"]:

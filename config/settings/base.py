@@ -248,6 +248,13 @@ REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
 LEARNING_MIN_DISTINCT_EMPLOYERS = env.int("LEARNING_MIN_DISTINCT_EMPLOYERS", default=2)
 LEARNING_SWEEP_BATCH_SIZE = env.int("LEARNING_SWEEP_BATCH_SIZE", default=200)
 LEARNING_SUGGESTION_TTL_DAYS = env.int("LEARNING_SUGGESTION_TTL_DAYS", default=90)
+# Reworded-question candidates (Phase 4b): an earlier answered question shown to
+# the reviewer next to a differently worded one. Propose-only; off until the
+# `manage.py question_match_eval` evaluates the threshold; set the env var to
+# false to switch the feature off without a deploy.
+QUESTION_CANDIDATES_ENABLED = env.bool("QUESTION_CANDIDATES_ENABLED", default=True)
+QUESTION_CANDIDATE_MIN_SCORE = env.float("QUESTION_CANDIDATE_MIN_SCORE", default=0.5)
+QUESTION_CANDIDATE_MAX = env.int("QUESTION_CANDIDATE_MAX", default=3)
 # Profile import (Phase 4): how long a finished-but-unreviewed import keeps its
 # proposals before the sweep clears them.
 PROFILE_IMPORT_TTL_HOURS = env.int("PROFILE_IMPORT_TTL_HOURS", default=24)
