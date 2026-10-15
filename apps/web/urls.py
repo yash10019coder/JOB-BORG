@@ -16,6 +16,7 @@ urlpatterns = [
     path("profile/import/consent/", views_import.import_consent, name="import_consent"),
     path("profile/import/github/", views_import.import_github, name="import_github"),
     path("profile/import/entries/<int:pk>/delete/", views_import.import_entry_delete, name="import_entry_delete"),
+    path("profile/import/skills/<int:pk>/remove/", views_import.import_skill_dismiss, name="import_skill_dismiss"),
     path("profile/import/<uuid:public_id>/", views_import.import_status, name="import_status"),
     path("profile/import/<uuid:public_id>/review/", views_import.import_review, name="import_review"),
     path("profile/import/<uuid:public_id>/apply/", views_import.import_apply, name="import_apply"),

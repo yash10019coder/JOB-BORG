@@ -31,7 +31,7 @@ Skills are the sharpest gap. The profile has no list of the user's skills as a w
 - F1. Import from GitHub
   - **Trigger:** The user enters a GitHub username on the Import tab.
   - **Actors:** A1
-  - **Steps:** The user submits the username. The import reads the account's public repos and picks the strongest ones. The review page shows proposed projects and proposed skills with proof lines, all unticked. The user ticks, edits or rejects each one and applies.
+  - **Steps:** The user submits the username. The import reads the account's public repos and picks the strongest ones. The review page shows proposed projects (unticked) and proposed skills with proof lines (ticked when seen in two or more repos, otherwise unticked). The user ticks, edits or rejects each one and applies.
   - **Outcome:** Accepted projects are saved as project entries, accepted skills are saved on the profile with their proof, and nothing the user set or locked is overwritten.
   - **Covered by:** R1, R2, R3, R5, R6, R9, R10
 
@@ -54,7 +54,7 @@ Skills are the sharpest gap. The profile has no list of the user's skills as a w
 - R8. GitHub-derived time is shown as "seen on GitHub since YYYY" and is never added to job-based years for a skill. Answers that use years of experience keep using job-based years only.
 
 **Review, safety and limits**
-- R9. All proposals go through the existing per-item review. A value the user edited is saved as user-set. A skill or project the user already has, set, learned or locked is shown as kept and not overwritten.
+- R9. All proposals go through the existing per-item review. A value the user edited is saved as user-set. A project the user already has, set, learned or locked is shown as kept and not overwritten. A skill the user removed is remembered and shown unticked with a "you removed this" note on the next import.
 - R10. The import uses public data only, with no login and no stored credential. Private repos and private contributions are invisible, and the review page says that the evidence reflects public activity only.
 - R11. A re-import never deletes what the user previously accepted.
 
@@ -93,7 +93,8 @@ Skills are the sharpest gap. The profile has no list of the user's skills as a w
 - Public data only: no credential to store or revoke, at the cost of undercounting people who work mostly in private repos.
 - Evidence over inference: a skill appears only if a repo shows it, with the proof visible, so the user can judge each one.
 - Separate GitHub years from job years: hobby and side-project time must not inflate "years of professional experience".
-- Curated and unticked: a prolific account can have hundreds of repos, so the review shows a short list the user opts into.
+- Curated and unticked: a prolific account can have hundreds of repos, so the review shows a short list the user opts into. Exception, decided during planning: skills seen in two or more repos start ticked, because they are the strongest evidence and a typical import should take few clicks.
+- Ownership: the import runs only for the GitHub login already saved on the profile, since public data alone cannot show the account belongs to the user. Stored skills and projects are labelled as coming from public GitHub activity.
 
 ---
 

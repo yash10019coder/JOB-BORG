@@ -10,6 +10,8 @@ answer application questions yet (Y4).
 """
 import math
 import re
+import unicodedata
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date
@@ -17,7 +19,7 @@ from datetime import date
 from django.db import transaction
 from django.utils import timezone
 
-from apps.accounts.importing.validators import ImportValueError, clean_text
+from apps.accounts.importing.validators import _CONTROL, ImportValueError, clean_text, clean_url
 from apps.accounts.models import Profile, ResumeEntry
 
 MIN_YEAR = 1970
@@ -26,6 +28,9 @@ MAX_SKILLS = 30
 MAX_SKILL_LEN = 40
 MAX_TITLE = 80
 MAX_ORG = 100
+MAX_DESCRIPTION = 300
+ENTRY_URL_HOSTS = frozenset({"github.com"})
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
 
 
 class EntryValueError(ValueError):
@@ -100,6 +105,32 @@ def clean_skills(raw):
     return out
 
 
+def clean_description(raw):
+    """A short, plain-text description: NFKC, no control, bidi or zero-width
+    characters, no angle brackets, whitespace collapsed, at most 300 characters.
+    Anything unusable becomes ``""`` (a description is optional, never an error)."""
+    if not isinstance(raw, str):
+        return ""
+    value = unicodedata.normalize("NFKC", raw)
+    value = _BIDI.sub("", _CONTROL.sub(" ", value)).replace("<", " ").replace(">", " ")
+    value = re.sub(r"\s+", " ", value).strip()[:MAX_DESCRIPTION].strip()
+    return value if any(ch.isalpha() for ch in value) else ""
+
+
+def clean_entry_url(raw):
+    """An https link to an allowed host (GitHub, for imported projects), or ``""``.
+    An invalid link is an error: it would otherwise be stored and shown."""
+    if raw in (None, ""):
+        return ""
+    try:
+        url = clean_url(raw)
+    except ImportValueError:
+        raise EntryValueError("bad_url") from None
+    if (urlsplit(url).hostname or "") not in ENTRY_URL_HOSTS:
+        raise EntryValueError("bad_url")
+    return url
+
+
 def clean_entry(data, today=None):
     """Validate one entry dict and return the cleaned values.
 
@@ -135,6 +166,8 @@ def clean_entry(data, today=None):
         "is_current": is_current,
         "precision": precision,
         "skills": clean_skills(data.get("skills")),
+        "description": clean_description(data.get("description")),
+        "url": clean_entry_url(data.get("url")),
     }
 
 
@@ -146,7 +179,22 @@ class EntriesResult:
     kept: list = dc_field(default_factory=list)  # existing user-edited rows
 
 
-_COMPARED = ("title", "organization", "start_date", "end_date", "is_current", "precision", "skills")
+_COMPARED = (
+    "title", "organization", "start_date", "end_date", "is_current", "precision", "skills",
+    "description", "url",
+)
+
+
+def find_existing(profile, values, key):
+    """The stored entry this one updates: matched by its link first (so a renamed
+    repo or an edited title is still "the same project"), then by natural key."""
+    if values.get("url"):
+        match = ResumeEntry.objects.filter(
+            profile=profile, kind=values["kind"], url=values["url"]
+        ).first()
+        if match is not None:
+            return match
+    return ResumeEntry.objects.filter(profile=profile, kind=values["kind"], natural_key=key).first()
 
 
 def apply_entries(profile_id, entries, *, today=None):
@@ -171,9 +219,9 @@ def apply_entries(profile_id, entries, *, today=None):
         profile = Profile.objects.select_for_update().get(pk=profile_id)
         for values, edited in cleaned:
             key = natural_key(values["kind"], values["organization"], values["title"], values["start_date"])
-            existing = ResumeEntry.objects.filter(
-                profile=profile, kind=values["kind"], natural_key=key
-            ).first()
+            existing = find_existing(profile, values, key)
+            if existing is not None:
+                key = existing.natural_key  # an entry found by its link keeps its identity
             if existing is None:
                 ResumeEntry.objects.create(
                     profile=profile,

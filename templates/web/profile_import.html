@@ -32,15 +32,19 @@
 
 <section id="github">
     <h2>Import from GitHub</h2>
+    {% if github_login %}
     <form method="post" action="{% url 'import_github' %}">
         {% csrf_token %}
         <p>
             <label for="github-username">GitHub username</label>
-            <input type="text" id="github-username" name="username" maxlength="60" autocomplete="off" placeholder="octocat">
-            <span class="help">Reads your public profile and repositories only. No sign-in, nothing private. It can suggest your GitHub link, a website and a few skills.</span>
+            <input type="text" id="github-username" name="username" maxlength="60" autocomplete="off" value="{{ github_login }}">
+            <span class="help">The account linked on your profile. Reads your public profile and repositories only: no sign-in, nothing private. It suggests your projects, skills with proof (how many repositories show each), a website and job-matching tags. You review everything first.</span>
         </p>
         <button type="submit">Import from GitHub</button>
     </form>
+    {% else %}
+    <p class="muted">To import from GitHub, first add your GitHub link on your <a href="{% url 'profile' %}">Profile</a> page. The import only runs for the account linked there.</p>
+    {% endif %}
 </section>
 
 {% if llm_available %}
@@ -79,6 +83,24 @@
     {% endfor %}
 </section>
 
+{% if skills %}
+<section id="skills">
+    <h2>Your skills</h2>
+    <p class="muted">Each skill shows what it was seen in. This comes from your public GitHub activity, is self-reported, and is never added to the years in your experience.</p>
+    <ul style="list-style:none; padding-left:0;">
+    {% for item in skills %}
+        <li>
+            <strong>{{ item.name }}</strong>
+            <span class="muted">{{ item.proof }}{% if item.since %} &middot; seen on GitHub since {{ item.since }}{% endif %}</span>
+            <form method="post" action="{% url 'import_skill_dismiss' item.pk %}" class="actions" style="display:inline;">
+                {% csrf_token %}<button type="submit" aria-label="Remove {{ item.name }}">Remove</button>
+            </form>
+        </li>
+    {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
 <section id="saved">
     <h2>Your experience and projects</h2>
     <p class="muted">Saved from your imports. Years per skill are worked out from the dates, with overlapping jobs counted once.</p>
@@ -108,7 +130,8 @@
     <h3>Projects</h3>
     {% for entry in projects %}
     <div class="card">
-        <strong>{{ entry.title }}</strong>
+        <strong>{{ entry.title }}</strong>{% if entry.url %} <span class="muted plain-value">{{ entry.url }}</span>{% endif %}
+        {% if entry.description %}<p class="plain-value">{{ entry.description }}</p>{% endif %}
         <p>{% for skill in entry.skills %}<span class="tag">{{ skill }}</span>{% empty %}<span class="muted">No skills listed.</span>{% endfor %}</p>
         <form method="post" action="{% url 'import_entry_delete' entry.pk %}" class="actions">
             {% csrf_token %}<button type="submit">Delete</button>

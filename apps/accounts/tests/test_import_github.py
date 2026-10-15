@@ -5,7 +5,7 @@ from unittest import mock
 import requests
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from apps.accounts import tasks
 from apps.accounts.importing import github, review, service
@@ -234,6 +234,7 @@ class ProposalTests(SimpleTestCase):
             self.assertEqual(proposal["extractor"], "github")
 
 
+@override_settings(PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS=0)
 class _Base(TestCase):
     def setUp(self):
         cache.clear()
@@ -242,6 +243,10 @@ class _Base(TestCase):
         self.schedule = patcher.start()
         self.profile = User.objects.create_user(username="alice", password="pw").profile
         self.other = User.objects.create_user(username="bob", password="pw").profile
+        # GHX0: the import only runs for the account linked on the profile
+        Profile.objects.filter(pk__in=[self.profile.pk, self.other.pk]).update(github_url="https://github.com/octocat")
+        self.profile.refresh_from_db()
+        self.other.refresh_from_db()
         self.schedule.reset_mock()
 
     def fake_github(self, session=None):
@@ -266,15 +271,17 @@ class ServiceTests(_Base):
     def test_a_ready_job_holds_only_proposals_and_marks_github_as_the_source(self):
         job = self.import_user()
         self.assertEqual((job.status, job.kind, job.source_kind, job.extractor), ("ready", "github", "github", "rule"))
-        self.assertEqual(set(job.payload["fields"]), {"github_url", "target_tags", "portfolio_url"})
+        self.assertEqual(set(job.payload["fields"]), {"target_tags", "portfolio_url"})  # the link is already saved
         self.assertEqual(job.payload["entries"], [])
-        self.assertEqual(job.payload["meta"], {"source": "github"})
+        self.assertEqual(job.payload["skills"], [])
+        self.assertEqual(job.payload["meta"], {"source": "github", "mode": "light", "scanned": 1})
         self.assertNotIn("secret", json.dumps(job.payload))
 
     def test_GH5_failures_become_coded_failed_jobs(self):
         cases = {404: "github_not_found", 403: "github_rate_limited", 500: "github_error"}
         for status, code in cases.items():
             with self.subTest(code=code):
+                cache.clear()  # a rate limit is remembered for a while; each case starts fresh
                 ImportJob.objects.all().delete()
                 job = self.import_user(session=FakeSession({"/users/": FakeResponse(status)}))
                 self.assertEqual((job.status, job.error_code, job.payload), ("failed", code, {}))
@@ -286,7 +293,7 @@ class ServiceTests(_Base):
 
     def test_P3_an_unexpected_error_is_coded_and_its_text_is_never_logged(self):
         class Boom(github.GitHubClient):
-            def fetch(self, username):
+            def fetch_profile(self, username, **kwargs):
                 raise ValueError(SENTINEL)
 
         with mock.patch("apps.accounts.importing.github.GitHubClient", return_value=Boom(session=FakeSession())):
@@ -340,11 +347,11 @@ class ReviewAndApplyTests(_Base):
         job = self.import_user()
         outcome = review.apply_review(job, self.post_for(job))
         profile = Profile.objects.get(pk=self.profile.pk)
-        self.assertEqual(profile.github_url, "https://github.com/octocat")
+        self.assertEqual(profile.github_url, "https://github.com/octocat")  # untouched: it is the precondition
         self.assertEqual(profile.portfolio_url, "https://octo.dev")
         self.assertEqual(profile.target_tags, ["python"])
-        self.assertEqual({profile.field_provenance[k]["source"] for k in ("github_url", "portfolio_url", "target_tags")}, {"imported"})
-        self.assertEqual(len(outcome.applied), 3)
+        self.assertEqual({profile.field_provenance[k]["source"] for k in ("portfolio_url", "target_tags")}, {"imported"})
+        self.assertEqual(len(outcome.applied), 2)
         self.assertEqual(self.schedule.call_count, 1)
 
     def test_values_the_user_already_set_are_kept(self):
@@ -359,4 +366,5 @@ class ReviewAndApplyTests(_Base):
         job = self.import_user()
         built = review.build_review(job)
         self.assertEqual(built.entries, [])
-        self.assertEqual({row.key for row in built.fields}, {"github_url", "target_tags", "portfolio_url"})
+        self.assertEqual({row.key for row in built.fields}, {"target_tags", "portfolio_url"})
+        self.assertEqual(built.skills, [])

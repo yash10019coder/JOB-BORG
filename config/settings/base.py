@@ -275,8 +275,15 @@ PROFILE_IMPORT_CONSENT_VERSION = env("PROFILE_IMPORT_CONSENT_VERSION", default="
 PROFILE_IMPORT_LLM_MAX_CHARS = env.int("PROFILE_IMPORT_LLM_MAX_CHARS", default=12_000)
 PROFILE_IMPORT_LLM_DAILY_CAP = env.int("PROFILE_IMPORT_LLM_DAILY_CAP", default=5)
 PROFILE_IMPORT_LLM_TIMEOUT_SECONDS = env.int("PROFILE_IMPORT_LLM_TIMEOUT_SECONDS", default=30)
-# Optional GitHub token (no scopes) to lift the unauthenticated 60 requests/hour/IP limit.
+# Optional GitHub token (no scopes, public read only) to lift the unauthenticated 60
+# requests/hour/IP limit. Recommended: without it the GitHub import runs in light mode
+# (no dependency files or pinned repos) and every user shares the 60 calls.
 GITHUB_API_TOKEN = env("GITHUB_API_TOKEN", default="")
+# Gap between one user's GitHub imports, and the remaining-quota levels below which new
+# imports drop to light mode (with a token) or are refused (rule GHX1).
+PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS = env.int("PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS", default=300)
+PROFILE_IMPORT_GITHUB_QUOTA_LOW_WITH_TOKEN = env.int("PROFILE_IMPORT_GITHUB_QUOTA_LOW_WITH_TOKEN", default=500)
+PROFILE_IMPORT_GITHUB_QUOTA_LOW_ANONYMOUS = env.int("PROFILE_IMPORT_GITHUB_QUOTA_LOW_ANONYMOUS", default=15)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

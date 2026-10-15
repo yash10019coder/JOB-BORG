@@ -17,6 +17,7 @@ from apps.accounts.importing import review as review_logic
 from apps.accounts.importing import github, llm_gate, service
 from apps.accounts.importing.documents import DocumentError
 from apps.accounts.models import ImportJob, ResumeEntry
+from apps.accounts.services import profile_skills
 from apps.accounts.services.resume_facts import delete_entry, format_years, years_by_skill
 
 REFRESH_SECONDS = 3
@@ -40,6 +41,27 @@ def _consent_current(profile):
     )
 
 
+def _skill_cards(profile):
+    """The stored skills with their proof, worded for the Import tab. GitHub years
+    are shown as "seen since" and are never merged with job years (GHX9)."""
+    cards = []
+    for row in profile_skills.visible_skills(profile):
+        evidence = row.evidence or {}
+        count, size = evidence.get("repo_count", 0), evidence.get("scope_size", 0)
+        if not size:
+            proof = ""
+        elif evidence.get("scope") == "recent":
+            proof = f"{count} of {size} recent repos"
+        else:
+            proof = f"{count} of your top {size} repos"
+        cards.append({
+            "pk": row.pk, "name": row.name, "proof": proof,
+            "since": (evidence.get("first_seen") or "")[:4],
+            "origin": row.get_origin_display(),
+        })
+    return cards
+
+
 @login_required
 def profile_import(request):
     profile = request.user.profile
@@ -58,6 +80,8 @@ def profile_import(request):
             "experience": [e for e in entries if e.kind == ResumeEntry.Kind.EXPERIENCE],
             "projects": [e for e in entries if e.kind == ResumeEntry.Kind.PROJECT],
             "years": years,
+            "skills": _skill_cards(profile),
+            "github_login": service.saved_github_login(profile) or "",
             "has_saved_resume": bool((profile.resume_text or "").strip()),
             # AI-assisted import is offered only when an operator has enabled a provider.
             "llm_available": llm_gate.provider_available(),
@@ -119,6 +143,8 @@ def _review_context(request, job, review, errors=None):
         "errors": errors or {},
         "has_fields": bool(review.fields),
         "has_entries": bool(review.entries),
+        "has_skills": bool(review.skills),
+        "entry_total": len(review.entries),
         # D9: they said LinkedIn but it does not look like an export: say so, don't fail.
         "linkedin_note": job.source_kind == ImportJob.SourceKind.LINKEDIN_PDF
         and not (job.payload.get("meta") or {}).get("linkedin_layout", True),
@@ -142,6 +168,9 @@ def _summary(outcome):
     stored = outcome.entries_created + outcome.entries_updated
     if stored:
         parts.append(f"saved {stored} experience/project entr{'ies' if stored != 1 else 'y'}")
+    skills = outcome.skills_created + outcome.skills_updated
+    if skills:
+        parts.append(f"saved {skills} skill{'s' if skills != 1 else ''}")
     kept = len(outcome.kept) + outcome.entries_kept
     if kept:
         parts.append(f"kept {kept} you had already set")
@@ -164,11 +193,13 @@ def import_apply(request, public_id):
             row.error = exc.field_errors.get(row.key, "")
         for row in review.entries:
             row.error = exc.entry_errors.get(row.index, "")
+        for row in review.skills:
+            row.error = exc.skill_errors.get(row.index, "")
         messages.error(request, "Some values need fixing. Nothing was saved.")
         return render(
             request,
             "web/profile_import_review.html",
-            _review_context(request, job, review, errors={**exc.field_errors, **exc.entry_errors}),
+            _review_context(request, job, review, errors={**exc.field_errors, **exc.entry_errors, **exc.skill_errors}),
         )
     messages.success(request, _summary(outcome))
     return redirect("profile_import")
@@ -184,6 +215,16 @@ def import_discard(request, public_id):
         messages.error(request, "This import is already closed.")
     else:
         messages.info(request, "Import discarded. Nothing was changed.")
+    return redirect("profile_import")
+
+
+@login_required
+@require_POST
+def import_skill_dismiss(request, pk):
+    """Hide one of the user's own skills; the next import shows it unticked (GHX8)."""
+    if not profile_skills.dismiss_skill(request.user.profile, pk):
+        raise Http404("No such skill.")
+    messages.info(request, "Skill removed. A later import will not tick it again.")
     return redirect("profile_import")
 
 

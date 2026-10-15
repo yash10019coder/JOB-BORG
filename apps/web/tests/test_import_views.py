@@ -572,7 +572,13 @@ class ConsentTests(_Base):
         self.assertIsNone(self.other.llm_import_consent_at)
 
 
+@override_settings(PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS=0)
 class GitHubViewTests(_Base):
+    def setUp(self):
+        super().setUp()
+        # GHX0: the import only runs for the account linked on the profile
+        Profile.objects.filter(pk=self.profile.pk).update(github_url="https://github.com/octocat")
+
     def fake_github(self, fail_with=None):
         from apps.accounts.importing import github as gh
         from apps.accounts.tests.test_import_github import FakeResponse, FakeSession, jr, repo
@@ -603,7 +609,6 @@ class GitHubViewTests(_Base):
         self.assertEqual((job.kind, job.status), ("github", "ready"))
         self.assertRedirects(response, reverse("import_status", args=[job.public_id]), fetch_redirect_response=False)
         page = self.client.get(reverse("import_review", args=[job.public_id])).content.decode()
-        self.assertIn("https://github.com/octocat", page)
         self.assertIn("Top languages: Python (1)", page)
         self.assertNotIn("Experience and projects found", page)
         post = {"decision__github_url": "accept", "value__github_url": "https://github.com/octocat",
@@ -614,7 +619,7 @@ class GitHubViewTests(_Base):
 
     def test_a_failing_github_call_shows_a_friendly_message_on_the_status_page(self):
         with self.fake_github(fail_with=404), self.captureOnCommitCallbacks(execute=True):
-            self.client.post(reverse("import_github"), {"username": "nobody-here"})
+            self.client.post(reverse("import_github"), {"username": "octocat"})
         job = ImportJob.objects.get()
         self.assertContains(self.client.get(reverse("import_status", args=[job.public_id])), "No GitHub user with that name")
 
