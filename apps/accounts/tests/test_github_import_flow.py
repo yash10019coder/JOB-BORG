@@ -96,25 +96,39 @@ class OwnershipTests(_Base):
 class ThrottleTests(_Base):
     @override_settings(PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS=300)
     def test_GHX1_a_second_import_inside_the_cooldown_is_refused_per_user(self):
-        with mock.patch("apps.accounts.tasks.run_github_import"):
+        with mock.patch("apps.accounts.tasks.run_github_import"), self.captureOnCommitCallbacks(execute=True):
             first = service.start_github_import(self.profile, "octocat")
-            ImportJob.objects.filter(pk=first.pk).update(status=ImportJob.Status.APPLIED)
-            with self.assertRaises(github.GitHubError) as caught:
-                service.start_github_import(self.profile, "octocat")
-            self.assertEqual(caught.exception.code, "github_cooldown")
-            Profile.objects.filter(pk=self.other.pk).update(github_url=LINK)
-            self.other.refresh_from_db()
+        ImportJob.objects.filter(pk=first.pk).update(status=ImportJob.Status.APPLIED)
+        with self.assertRaises(github.GitHubError) as caught:
+            service.start_github_import(self.profile, "octocat")
+        self.assertEqual(caught.exception.code, "github_cooldown")
+        Profile.objects.filter(pk=self.other.pk).update(github_url=LINK)
+        self.other.refresh_from_db()
+        with mock.patch("apps.accounts.tasks.run_github_import"):
             service.start_github_import(self.other, "octocat")  # another user is unaffected
 
     @override_settings(PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS=300)
     def test_GHX1_a_refused_start_does_not_start_the_cooldown(self):
-        with mock.patch("apps.accounts.tasks.run_github_import"):
+        with mock.patch("apps.accounts.tasks.run_github_import"), self.captureOnCommitCallbacks(execute=True):
             with self.assertRaises(github.GitHubError):
                 service.start_github_import(self.profile, "torvalds")  # not the linked account
             self.assertIsNone(cache.get(service._cooldown_key(self.profile.user_id)))
             service.start_github_import(self.profile, "octocat")  # still allowed
-            self.assertIsNotNone(cache.get(service._cooldown_key(self.profile.user_id)))
+        self.assertIsNotNone(cache.get(service._cooldown_key(self.profile.user_id)))
         self.assertEqual(ImportJob.objects.count(), 1)
+
+    @override_settings(PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS=300)
+    def test_GHX1_the_cooldown_starts_only_when_the_job_is_committed(self):
+        with mock.patch("apps.accounts.tasks.run_github_import") as task:
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                service.start_github_import(self.profile, "octocat")
+            # the transaction has not committed (or rolled back): no cooldown, nothing queued
+            self.assertIsNone(cache.get(service._cooldown_key(self.profile.user_id)))
+            task.delay.assert_not_called()
+            for callback in callbacks:
+                callback()
+        self.assertIsNotNone(cache.get(service._cooldown_key(self.profile.user_id)))
+        task.delay.assert_called_once()
 
     def test_GHX1_a_nearly_empty_quota_refuses_the_import_before_any_request(self):
         cache.set(service.GITHUB_QUOTA_KEY, 3, 600)
@@ -122,6 +136,13 @@ class ThrottleTests(_Base):
         job = self.run_import(session)
         self.assertEqual((job.status, job.error_code), ("failed", "github_rate_limited"))
         self.assertEqual(session.calls + session.posts, [])
+
+    def test_GHX1_a_local_refusal_does_not_extend_the_global_block(self):
+        cache.set(service.GITHUB_QUOTA_KEY, 3, 600)
+        for _ in range(2):  # a user retrying must not keep the block alive or deepen it
+            job = self.run_import(full_session())
+            self.assertEqual((job.status, job.error_code), ("failed", "github_rate_limited"))
+            self.assertEqual(cache.get(service.GITHUB_QUOTA_KEY), 3)
 
     def test_GHX1_a_low_quota_with_a_token_drops_to_light_mode(self):
         cache.set(service.GITHUB_QUOTA_KEY, 100, 600)

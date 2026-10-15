@@ -155,8 +155,14 @@ def start_github_import(profile, raw_username):
             )
     except IntegrityError:
         raise ImportInProgress() from None
-    cache.set(_cooldown_key(profile.user_id), 1, settings.PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS)
-    transaction.on_commit(lambda: run_github_import.delay(str(job.public_id), username))
+
+    def _start():
+        # Only once the job exists for good: a rolled-back transaction must not
+        # leave the user blocked for the whole cooldown with nothing running.
+        cache.set(_cooldown_key(profile.user_id), 1, settings.PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS)
+        run_github_import.delay(str(job.public_id), username)
+
+    transaction.on_commit(_start)
     return job
 
 
@@ -301,8 +307,13 @@ def run_github_job(public_id, username, client=None):
         return None
     job = ImportJob.objects.get(public_id=public_id)
     client = client or github.GitHubClient()
+    refused_locally = False
     try:
-        full = _github_full_mode(client)
+        try:
+            full = _github_full_mode(client)
+        except github.GitHubError:
+            refused_locally = True  # our own quota memory said no; GitHub was never asked
+            raise
         data = client.fetch_profile(username, full=full)
         if client.remaining is not None:
             cache.set(GITHUB_QUOTA_KEY, client.remaining, 3600)
@@ -321,8 +332,11 @@ def run_github_job(public_id, username, client=None):
         else:
             _finish(job, ImportJob.Status.FAILED, error_code="nothing_found")
     except github.GitHubError as exc:
-        if exc.code == "github_rate_limited":
-            cache.set(GITHUB_QUOTA_KEY, 0, 600)  # stop sending users into a limit that is already hit
+        if exc.code == "github_rate_limited" and not refused_locally:
+            # GitHub itself said so: stop sending users into a limit that is already hit.
+            # A local refusal must not do this, or every refused retry would restart the
+            # ten-minute block and keep all users out for as long as anyone retries.
+            cache.set(GITHUB_QUOTA_KEY, 0, 600)
         _finish(job, ImportJob.Status.FAILED, error_code=exc.code)
     except Exception as exc:  # noqa: BLE001 -- coded, class name only
         logger.error("import job %s failed: %s", job.public_id, type(exc).__name__)

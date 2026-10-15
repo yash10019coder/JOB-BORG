@@ -93,7 +93,19 @@ class ApplySkillsTests(TestCase):
         stored = ProfileSkill.objects.get().evidence
         self.assertEqual(stored["repo_count"], 14)
         self.assertEqual((stored["first_seen"], stored["last_seen"]), ("2019-03", "2026-10"))
-        self.assertEqual(stored["repos"], ["a", "b"])
+        # the richer evidence's own repos, never a mix of two populations
+        self.assertEqual(stored["repos"], ["a"])
+
+    def test_GHX8_merged_repos_and_sources_always_agree_with_the_winning_evidence(self):
+        old = evidence(repo_count=1, scope="top", scope_size=8, repos=["only"], sources=["topic"])
+        new = evidence(repo_count=5, scope="recent", scope_size=90, repos=["a", "b", "c", "d", "e"], sources=["language"])
+        merged = ps.merge_evidence(old, new)
+        self.assertEqual((merged["scope"], merged["repo_count"]), ("recent", 5))
+        self.assertEqual(merged["repos"], ["a", "b", "c", "d", "e"])
+        self.assertEqual(merged["sources"], ["language"])
+        richer_old = ps.merge_evidence(new, old)
+        self.assertEqual(richer_old["repos"], ["a", "b", "c", "d", "e"])
+        self.assertLessEqual(len(merged["repos"]), merged["repo_count"])
 
     def test_GHX8_nothing_is_ever_deleted_by_a_reimport(self):
         ps.apply_skills(self.profile.pk, [skill("Python"), skill("Go")])

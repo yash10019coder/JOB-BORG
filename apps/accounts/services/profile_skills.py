@@ -82,15 +82,17 @@ def clean_skill(data):
 
 def merge_evidence(old, new):
     """Keep the richer evidence: the larger count over the larger scope, the
-    earliest first and latest last month, and the union of repos and sources."""
+    earliest first and latest last month. The repos and sources are the richer
+    evidence's own, never a union, so they always agree with its ``repo_count``
+    and ``scope`` and two populations are never mixed."""
     if (new["repo_count"], new["scope_size"]) >= (old.get("repo_count", 0), old.get("scope_size", 0)):
         base = dict(new)
     else:
         base = dict(old)
     base["first_seen"] = min(old.get("first_seen", new["first_seen"]), new["first_seen"])
     base["last_seen"] = max(old.get("last_seen", new["last_seen"]), new["last_seen"])
-    base["repos"] = list(dict.fromkeys([*base.get("repos", []), *old.get("repos", []), *new["repos"]]))[:MAX_REPOS_SHOWN]
-    base["sources"] = sorted(set(old.get("sources", [])) | set(new["sources"]))
+    base["repos"] = list(dict.fromkeys(base.get("repos", [])))[:MAX_REPOS_SHOWN]
+    base["sources"] = sorted(set(base.get("sources", [])))
     return base
 
 
