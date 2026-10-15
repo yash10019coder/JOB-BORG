@@ -106,17 +106,17 @@ class GuardTests(SimpleTestCase):
         result = qm.match("Are you at least 18 years of age?", "Are you at least 21 years of age?")
         self.assertEqual(result.vetoed, "numbers")
 
-    def test_QM8b_a_swapped_name_vetoes(self):
+    def test_QM12_a_swapped_name_vetoes(self):
         result = qm.match("Do you have experience with Python?", "Do you have experience with Java?")
         self.assertEqual(result.vetoed, "named_terms")
 
-    def test_QM8b_shouting_slashes_and_title_case_are_not_names(self):
+    def test_QM12_shouting_slashes_and_title_case_are_not_names(self):
         self.assertEqual(qm._named_terms("What is your ETHNICITY?"), frozenset())
         self.assertEqual(qm._named_terms("Race/Ethnicity"), frozenset())
         self.assertEqual(qm._named_terms("What Is Your Notice Period Right Now"), frozenset())
         self.assertEqual(qm._named_terms("Do you know Python and Django?"), frozenset({"python", "django"}))
 
-    def test_QM8c_two_different_intents_veto(self):
+    def test_QM13_two_different_intents_veto(self):
         self.assertEqual(qm.match("What is your gender?", "What is your race?").vetoed, "intent")
         self.assertEqual(qm.match("What is your notice period?", "What is your start date?").vetoed, "intent")
 

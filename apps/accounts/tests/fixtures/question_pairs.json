@@ -279,5 +279,122 @@
   "Are you willing to relocate?",
   "Are you at least 18 years of age?",
   "Do you agree to the privacy policy?"
- ]
+ ],
+ "fresh": {
+  "_note": "Written after the matcher was tuned, and run once before any further change. Report what fails; do not tune on it silently.",
+  "reworded": [
+   {
+    "label": "gender f1",
+    "a": "What gender do you identify with?",
+    "b": "Please select your gender"
+   },
+   {
+    "label": "race f1",
+    "a": "Please select your race/ethnicity",
+    "b": "What is your racial or ethnic background?"
+   },
+   {
+    "label": "notice f1",
+    "a": "What notice do you have to serve?",
+    "b": "What is your notice period?"
+   },
+   {
+    "label": "start f1",
+    "a": "What is your availability to start?",
+    "b": "What is your earliest start date?"
+   },
+   {
+    "label": "hear f1",
+    "a": "How did you first hear about our company?",
+    "b": "How did you learn about this role?"
+   },
+   {
+    "label": "relocation f1",
+    "a": "Would you consider relocating for this role?",
+    "b": "Are you open to relocation?"
+   },
+   {
+    "label": "sponsorship f1",
+    "a": "Do you now or will you in the future need visa sponsorship?",
+    "b": "Will you require sponsorship now or in the future?"
+   },
+   {
+    "label": "veteran f1",
+    "a": "Are you a protected veteran?",
+    "b": "Veteran status"
+   },
+   {
+    "label": "years f1",
+    "a": "How many years of experience do you have with React?",
+    "b": "Years of experience with React"
+   },
+   {
+    "label": "phone f1",
+    "a": "Phone number",
+    "b": "Please enter your phone number (optional)"
+   }
+  ],
+  "near_miss": [
+   {
+    "label": "auth country f1",
+    "a": "Are you legally authorized to work in Canada?",
+    "b": "Are you legally authorized to work in Mexico?"
+   },
+   {
+    "label": "sponsor ever f1",
+    "a": "Do you require sponsorship?",
+    "b": "Have you ever required sponsorship?"
+   },
+   {
+    "label": "dismissed f1",
+    "a": "Have you ever been dismissed from a position?",
+    "b": "Have you ever resigned from a position?"
+   },
+   {
+    "label": "age f1",
+    "a": "Are you over the age of 18?",
+    "b": "Are you over the age of 16?"
+   },
+   {
+    "label": "salary f1",
+    "a": "What is your expected salary?",
+    "b": "What is your current salary?"
+   },
+   {
+    "label": "cloud f1",
+    "a": "Do you have experience with AWS?",
+    "b": "Do you have experience with Azure?"
+   },
+   {
+    "label": "relocate travel f1",
+    "a": "Are you willing to relocate?",
+    "b": "Are you willing to travel?"
+   },
+   {
+    "label": "spouse veteran f1",
+    "a": "Are you a veteran?",
+    "b": "Are you a spouse of a veteran?"
+   },
+   {
+    "label": "referral f1",
+    "a": "How did you hear about us?",
+    "b": "Were you referred by an employee?"
+   },
+   {
+    "label": "disability record f1",
+    "a": "Do you have a disability?",
+    "b": "Do you have a criminal record?"
+   },
+   {
+    "label": "pronouns f1",
+    "a": "What pronouns do you use?",
+    "b": "What is your gender?"
+   },
+   {
+    "label": "start remote f1",
+    "a": "Can you start immediately?",
+    "b": "Can you work remotely?"
+   }
+  ]
+ }
 }

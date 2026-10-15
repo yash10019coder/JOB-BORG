@@ -36,6 +36,7 @@ class CandidateStatsTests(_Base):
         self.assertAlmostEqual(stats.accept_rate, 2 / 5)
 
     def test_clicking_through_cannot_raise_the_number(self):
+        """QR3."""
         for _ in range(10):
             self.shown(equal=True, accepted=True)
         stats = candidate_stats(self.profile)[Tier.T2_FACTUAL]
@@ -76,6 +77,7 @@ def User_profile(name):
 
 class LearnerExclusionTests(_Base):
     def test_an_accepted_candidate_is_not_a_vote(self):
+        """QR3."""
         first = self.observe(HEARD, "LinkedIn", "Acme")
         self.observe(HEARD, "LinkedIn", "Beta")
         AnswerObservation.objects.filter(pk=first.pk).update(candidate_accepted=True)
@@ -97,6 +99,7 @@ class LearnerExclusionTests(_Base):
 
 class ReportTests(_Base):
     def test_the_report_prints_counts_and_no_question_text_or_values(self):
+        """QR5."""
         obs = self.observe(HEARD, "SecretValue", "Acme")
         AnswerObservation.objects.filter(pk=obs.pk).update(
             candidate_question_key=CAND_KEY, candidate_equal=True

@@ -29,10 +29,10 @@ Rules (cited by tests; see docs/plans/2026-10-06-002-question-matching-rules.md)
        which case the riskier tier governs (the classifier knows fewer wordings
        than the intent table does).
 * QM8  ``numbers``: differing digit strings veto ("at least 18" / "at least 21").
-* QM8b ``named_terms``: a capitalised term in one question that appears nowhere
+* QM12 ``named_terms``: a capitalised term in one question that appears nowhere
        in the other (Python / Java, Canadian / British) vetoes the pair, so one
        swapped name never merges two questions.
-* QM8c ``intent``: two different recognised intents veto.
+* QM13 ``intent``: two different recognised intents veto.
 * QM9  ``strict_tier``: for T0/T1 (and unknown) pairs, equal meaningful words,
        or the same intent with only that intent's interchangeable wording
        differing; anything else is no match.

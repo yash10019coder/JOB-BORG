@@ -342,6 +342,8 @@ flowchart TD
 
 **Verification:** The suite fails if a guard is removed (checked by deleting one locally during development), and the command output is reproducible.
 
+**Built (2026-10-16):** `question_match_eval` command (threshold sweep, JSON output, non-zero on a false merge or an empty or malformed fixture), `test_question_match_eval.py`, the rules doc with a coverage guard (`QM1-QM13`, `QC1-QC7`, `QR1-QR5`), and `QUESTION_CANDIDATES_ENABLED` now defaults to on in `base.py` (pinned off in `config/settings/test.py` so unrelated suites see drafts exactly as before). The fixture has three halves: `tuning`, `held_out` (consulted while fixing the first-run gaps, so not clean) and `fresh` (written afterwards and run once before any further change). Result at the shipped threshold 0.5: recall 33/34 and zero false merges across 34 reworded and 46 near-miss pairs; the sweep from 0.3 to 0.5 gives the same result and 0.6 to 0.8 lose two more reworded pairs. The one `fresh` miss ("Would you consider relocating for this role?" / "Are you open to relocation?") is left as is: it fails closed and tuning on it would spend the only untouched set.
+
 ---
 
 ## System-Wide Impact

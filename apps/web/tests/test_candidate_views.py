@@ -109,6 +109,7 @@ class InvariantTests(_Base):
         return out
 
     def test_a_candidate_never_changes_value_review_confirmation_or_outcome(self):
+        """QR1."""
         pairs = self.pairs()
         questions = [(p["b"], TEXT, ()) for p in pairs]
         for p in pairs:
@@ -192,6 +193,7 @@ class AcceptTests(_Base):
         self.assertEqual(second.answers[HEARD_NEW]["value"], "LinkedIn")
 
     def test_accepting_a_legal_or_commercial_candidate_leaves_it_held_for_confirmation(self):
+        """QR2."""
         write_answer(self.profile, NOTICE_OLD, "4 weeks", "user")
         draft = self.draft(self.job_in(), (NOTICE_NEW, TEXT, ()))
         key = draft.answers[NOTICE_NEW]["candidates"][0]["question_key"]
@@ -223,6 +225,7 @@ class AcceptTests(_Base):
         self.assertTrue(self.fresh(draft).answers[NOTICE_NEW]["needs_confirmation"])
 
     def test_editing_an_accepted_value_makes_it_the_users_own(self):
+        """QR3."""
         write_answer(self.profile, HEARD_OLD, "LinkedIn", "user")
         draft = self.draft(self.job_in(), (HEARD_NEW, TEXT, ()))
         key = draft.answers[HEARD_NEW]["candidates"][0]["question_key"]
@@ -296,6 +299,7 @@ class AcceptTests(_Base):
 
 class SendTests(_Base):
     def test_candidates_are_not_kept_on_a_sent_draft_or_in_the_snapshot(self):
+        """QR4."""
         write_answer(self.profile, HEARD_OLD, "LinkedIn", "user")
         draft = self.draft(self.job_in(), (HEARD_NEW, TEXT, ()), ("Essay", TEXTAREA, ()))
         key = draft.answers[HEARD_NEW]["candidates"][0]["question_key"]

@@ -41,6 +41,7 @@ class CandidateTests(TestCase):
         self.assertEqual(found[0].source, "user")
 
     def test_a_value_that_does_not_fit_the_live_options_is_text_only(self):
+        """QC6."""
         self.store(NOTICE, "4 weeks")
         found = find_candidates(self.profile, "Notice period?", options=("Immediately", "1 month"))
         self.assertEqual(found[0].value, "4 weeks")
@@ -61,10 +62,12 @@ class CandidateTests(TestCase):
             self.assertEqual(find_candidates(self.profile, "Notice period?"), [])
 
     def test_the_exact_question_is_not_a_candidate(self):
+        """QC2."""
         self.store(NOTICE, "4 weeks")
         self.assertEqual(find_candidates(self.profile, "what is your notice period"), [])
 
     def test_expired_legacy_and_textless_rows_are_skipped(self):
+        """QC2."""
         row = self.store(NOTICE, "4 weeks")
         AnswerBank.objects.filter(pk=row.pk).update(expires_at=timezone.now() - timedelta(days=1))
         AnswerBank.objects.create(
@@ -78,6 +81,7 @@ class CandidateTests(TestCase):
         self.assertEqual(find_candidates(self.profile, "Notice period?"), [])
 
     def test_learned_rows_are_ignored_while_learning_is_off(self):
+        """QC3."""
         self.store(NOTICE, "4 weeks", source="learned")
         self.assertEqual(len(find_candidates(self.profile, "Notice period?")), 1)
         self.profile.learning_enabled = False
@@ -85,6 +89,7 @@ class CandidateTests(TestCase):
         self.assertEqual(find_candidates(self.profile, "Notice period?"), [])
 
     def test_the_limit_caps_results_and_user_rows_rank_above_learned(self):
+        """QC5."""
         self.store("Notice period (weeks)?", "6", source="learned")
         self.store("How much notice do you need to give your current employer?", "4")
         self.store("What is your notice period at present?", "2", source="imported")
@@ -94,6 +99,7 @@ class CandidateTests(TestCase):
         self.assertEqual(len(find_candidates(self.profile, NOTICE, limit=0)), 0)
 
     def test_a_locked_user_row_outranks_an_unlocked_one(self):
+        """QC5."""
         self.store("Notice period?", "1", is_locked=True)
         self.store("How much notice do you need to give?", "2")
         found = find_candidates(self.profile, NOTICE)
@@ -121,11 +127,13 @@ class IsolationTests(TestCase):
         self.bob = User.objects.create_user(username="bob", password="pw").profile
 
     def test_another_profiles_rows_are_never_returned(self):
+        """QC1."""
         write_answer(self.bob, NOTICE, "4 weeks", "user")
         self.assertEqual(find_candidates(self.alice, "Notice period?"), [])
         self.assertEqual(len(find_candidates(self.bob, "Notice period?")), 1)
 
     def test_a_mixed_preload_still_returns_only_the_askers_rows(self):
+        """QC1."""
         write_answer(self.alice, "Notice period (weeks)?", "6", "user")
         write_answer(self.bob, NOTICE, "4 weeks", "user")
         mixed = {**load_bank_rows(self.alice), **load_bank_rows(self.bob)}
@@ -144,6 +152,7 @@ class RegionTests(TestCase):
         self.assertTrue(self.us_region and self.in_region)
 
     def test_a_relocation_answer_saved_for_one_region_is_not_offered_in_another(self):
+        """QC4."""
         write_answer(self.profile, RELOCATE, "Yes", "user", scope_region=self.us_region)
         reworded = "Would you be open to relocation?"
         self.assertEqual(len(find_candidates(self.profile, reworded, self.us)), 1)
@@ -169,6 +178,7 @@ class ReadOnlyTests(TestCase):
         write_answer(self.profile, NOTICE, "4 weeks", "user")
 
     def test_no_query_beyond_the_preload_and_nothing_is_written(self):
+        """QC7."""
         rows = load_bank_rows(self.profile)
         before = list(AnswerBank.objects.values_list("pk", "value", "updated_at", "source"))
         with self.assertNumQueries(0):
