@@ -25,6 +25,7 @@ from apps.accounts.models import AnswerBank, AnswerObservation
 from apps.accounts.regions import REGION_LABELS
 from apps.accounts.services import typed_facts
 from apps.accounts.services.answer_resolver import normalize_question_key, write_answer
+from apps.accounts.services.learning import _fold
 from apps.accounts.tiering import Tier, classify_tier
 from apps.auto_apply.greenhouse_form.field_mapping import FILE, TEXTAREA
 from apps.auto_apply.services.confirmation import is_blank_answer_value
@@ -139,7 +140,13 @@ def remember_reviewed_answers(draft, edits):
                 edit.value,
                 AnswerBank.Source.USER,
                 options=entry.get("options") or (),
-                source_detail={"origin": "review", "draft_id": draft.pk},
+                source_detail={
+                    "origin": "review",
+                    "draft_id": draft.pk,
+                    # Taken from an earlier question's answer rather than typed:
+                    # kept out of candidate precision so it cannot raise its own score.
+                    **({"via_candidate": True} if entry.get("candidate_accepted") else {}),
+                },
                 # Ticking "Always use this answer" on a legal/commercial
                 # question is the explicit per-question decision; lock it.
                 is_locked=tier in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL),
@@ -154,6 +161,15 @@ def remember_reviewed_answers(draft, edits):
     return saved
 
 
+def _shown_candidate(entry):
+    """The candidate this answer was reviewed against: the accepted one, else the first shown."""
+    shown = [c for c in entry.get("candidates") or [] if isinstance(c, dict)]
+    if entry.get("candidate_accepted"):
+        key = entry.get("candidate_question_key")
+        return next((c for c in shown if c.get("question_key") == key), None)
+    return shown[0] if shown else None
+
+
 def record_observations(draft):
     """Record what is being submitted for each non-standard, non-file answer."""
     job = draft.job
@@ -164,6 +180,7 @@ def record_observations(draft):
         if not can_remember_or_observe(entry) or is_blank_answer_value(entry.get("value")):
             continue
         provenance = entry.get("provenance") or {}
+        candidate = _shown_candidate(entry)
         rows.append(
             AnswerObservation(
                 profile=draft.user.profile,
@@ -180,6 +197,12 @@ def record_observations(draft):
                 user_edited=bool(entry.get("user_edited")),
                 remember_declined=bool(entry.get("remember_declined")),
                 learned_value=entry.get("learned_value"),
+                candidate_question_key=(candidate or {}).get("question_key", ""),
+                candidate_equal=(
+                    None if candidate is None
+                    else _fold(entry["value"]) == _fold(candidate.get("value"))
+                ),
+                candidate_accepted=bool(entry.get("candidate_accepted")) and candidate is not None,
                 job_id=draft.job_id,
                 draft_id=draft.pk,
                 employer_name=employer or "",

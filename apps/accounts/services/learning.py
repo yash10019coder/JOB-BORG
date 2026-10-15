@@ -101,6 +101,9 @@ def _eligible_observations(profile):
             remember_declined=False,
             job_id__isnull=False,
         )
+        # A value taken from an earlier question's answer is not the user's own
+        # authorship: it must never count as a vote (Phase 4b, plan R6).
+        .exclude(candidate_accepted=True)
         .exclude(field_type__in=_NOT_LEARNABLE_FIELD_TYPES)
         .order_by("-created_at", "-id")
     )

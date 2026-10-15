@@ -21,6 +21,8 @@ from django.views.decorators.http import require_POST
 
 from apps.accounts.models import EmailInboxCredential, Profile
 from apps.accounts.services.panel_cache import invalidate_questions_panel
+from apps.accounts.services.question_candidates import find_candidates
+from apps.accounts.tiering import Tier, classify_tier
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
@@ -481,6 +483,9 @@ def auto_apply_queue(request):
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
             display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job)
+            display_entry["candidates"] = (
+                _display_candidates(label, entry) if is_blank_answer_value(entry.get("value")) else []
+            )
             field = _answer_edit_field(entry, fields.get(label, {}))
             if field is not None:
                 value = entry.get("value", "")
@@ -532,6 +537,43 @@ def auto_apply_queue(request):
     return render(request, "web/auto_apply_queue.html", ctx)
 
 
+def _display_candidates(label, entry):
+    """Candidates for the review row: what to show and whether it can be taken.
+
+    ``held`` says taking one still leaves the answer waiting for the user's
+    confirmation (any legal or commercial question).
+    """
+    held = classify_tier(label) in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL)
+    shown = []
+    for candidate in entry.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        shown.append({
+            "question_key": candidate.get("question_key", ""),
+            "question_text": candidate.get("question_text", ""),
+            "value": candidate.get("value"),
+            "source": candidate.get("source", ""),
+            "can_accept": candidate.get("mapped_value") is not None,
+            "held": held,
+        })
+    return shown
+
+
+def _accepted_candidate(draft, label, entry, snapshot, question_key):
+    """The candidate the user chose, re-derived from the draft owner's own saved
+    answers, or ``None``.
+
+    ``question_key`` only selects among candidates the server computes for this
+    user now; a key that is not one of them (another profile's, a stale one, a
+    made-up one) selects nothing, and nothing from the request is stored.
+    """
+    options = snapshot.get("options") or entry.get("options") or []
+    for candidate in find_candidates(draft.user.profile, label, draft.job, options=options):
+        if candidate.question_key == question_key and candidate.mapped_value is not None:
+            return candidate
+    return None
+
+
 @login_required
 @require_POST
 def edit_auto_apply_draft(request, pk):
@@ -563,6 +605,7 @@ def edit_auto_apply_draft(request, pk):
         # silently failing the lookup below and dropping the whole field's
         # edit with no error shown.
         label = request.POST[f"label__{index}"].replace("\r\n", "\n")
+        accept_key = request.POST.get(f"accept__{index}", "")
         value_field = f"value__{index}"
         confirm_field = f"confirm__{index}"
         remember_field = f"remember__{index}"
@@ -586,6 +629,19 @@ def edit_auto_apply_draft(request, pk):
             # POST -- collect it and keep validating/saving the rest.
             invalid_labels.append(label)
             continue
+        accepted = None
+        if accept_key and is_blank_answer_value(answers[label].get("value")):
+            # "Use this answer" on a candidate: the value is the stored answer
+            # of an earlier question, re-derived here, then validated like a
+            # typed one. Anything that does not validate is simply not applied.
+            accepted = _accepted_candidate(
+                draft, label, answers[label], fields.get(label, {}), accept_key
+            )
+            if accepted is not None:
+                try:
+                    cleaned = field.clean(accepted.mapped_value)
+                except forms.ValidationError:
+                    accepted = None
         edits.append(
             answer_memory.ReviewEdit(
                 label=label,
@@ -595,11 +651,32 @@ def edit_auto_apply_draft(request, pk):
                 everywhere=everywhere_field in request.POST,
             )
         )
-        if cleaned != answers[label].get("value"):
+        if accepted is not None:
+            # Taken from an earlier question's answer, not typed: it is NOT
+            # the user's own authorship (the learner and the precision figure
+            # both ignore it), and a legal or commercial one stays held until
+            # the user ticks the per-field confirmation, like any other answer
+            # that did not come from their own typing.
+            answers[label]["candidate_accepted"] = True
+            answers[label]["candidate_question_key"] = accepted.question_key
+            answers[label].pop("user_edited", None)
+            if classify_tier(label) in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL):
+                answers[label]["needs_confirmation"] = True
+                answers[label]["provenance"] = {
+                    "origin": "answer_candidate",
+                    "source": accepted.source,
+                    "locked": False,
+                    "confidence": accepted.score,
+                    "detail": {"question_key": accepted.question_key},
+                }
+                answers[label]["tier"] = classify_tier(label)
+        elif cleaned != answers[label].get("value"):
             # The user typed or changed this value (as opposed to re-posting
             # what drafting put there): the only reliable sign that an answer
             # is theirs, since `user_confirmed` is set by any save.
             answers[label]["user_edited"] = True
+            # Changing an accepted candidate makes it their own answer.
+            answers[label].pop("candidate_accepted", None)
         offered = answer_memory.remember_ui(label, answers[label], draft.job)
         if offered:
             # An unticked, pre-ticked box is an explicit "do not remember this":
@@ -767,6 +844,13 @@ def send_auto_apply_draft(request, pk):
         # What is being submitted, recorded in the same transaction as the
         # transition so a lost race records nothing.
         answer_memory.record_observations(draft)
+        # Candidates are review-time suggestions: they are not submitted and
+        # are not kept on a sent draft.
+        stripped = {
+            label: ({k: v for k, v in entry.items() if k != "candidates"} if isinstance(entry, dict) else entry)
+            for label, entry in (draft.answers or {}).items()
+        }
+        AutoApplyDraft.objects.filter(pk=pk).update(answers=stripped)
         # Learn from what was just recorded, but only once it is committed:
         # a worker must never run before the observations are visible.
         profile_id = draft.user.profile.pk

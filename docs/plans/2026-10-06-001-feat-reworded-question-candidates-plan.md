@@ -261,6 +261,12 @@ flowchart TD
 
 **Verification:** Existing drafting, review and submit-gate tests pass unmodified; the new invariant test passes.
 
+**Built (2026-10-16), with these deviations from the text above:**
+- Candidates are a `candidates` list (up to 3) on the entry, not a single `candidate` block.
+- The accept is not a separate endpoint: the review form's "Use this answer" button posts the whole form to the existing `edit_auto_apply_draft` with `accept__<i>=<question_key>`, so other unsaved edits are kept and the same ownership check and field validation apply. The key only selects among candidates the server re-derives from the owner's own answers; anything else is ignored. A hidden first "Save answers" button keeps Enter from triggering an accept.
+- A legal or commercial (T0/T1) question's accepted value is **held**: `needs_confirmation` with provenance origin `answer_candidate`, so the existing per-field confirm tick and send gate apply, and the bulk "confirm remembered answers" button does not cover it. This keeps NFR2 (no unconfirmed embedding-sourced T0/T1) intact while the fill itself is still one click. A factual (T2) accept is simply filled.
+- Candidates are dropped from `draft.answers` when the draft is sent, and are not in the submit snapshot.
+
 ---
 
 ### U4. Record candidates on observations and report precision
@@ -298,6 +304,8 @@ flowchart TD
 - Migration: applies on a database holding existing observations and `makemigrations --check` is clean.
 
 **Verification:** Existing learner and shadow tests pass unchanged apart from the one added filter case; the report command has no side effects.
+
+**Built (2026-10-16):** migration `0016_answerobservation_candidate_fields`; `record_observations` stores `candidate_question_key`, `candidate_equal`, `candidate_accepted`; the learner skips `candidate_accepted` observations (already excluded in practice because an accept does not set `user_edited`; the explicit exclusion is a belt-and-braces guard); `shadow_metrics.candidate_stats` and a section in `learning_report`. A row saved with "Always use this answer" after an accept carries `source_detail.via_candidate`, which excludes candidates drawn from it from the precision denominator.
 
 ---
 
