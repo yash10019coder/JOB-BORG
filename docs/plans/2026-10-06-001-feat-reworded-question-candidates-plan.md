@@ -214,6 +214,8 @@ flowchart TD
 
 **Verification:** A test asserts no query beyond the pool load when `bank_rows` is supplied; no test or code path mutates AnswerBank.
 
+**Built (2026-10-16):** `apps/accounts/services/question_candidates.py` (`find_candidates`) with 21 tests, plus the three `QUESTION_CANDIDATE*` settings in `config/settings/base.py` (feature off by default). It imports a few private helpers from `answer_resolver` (`_is_expired`, `_map_to_options`, `_employer_name`) to stay consistent with the resolver instead of copying them.
+
 ---
 
 ### U3. Attach candidates to draft entries and show them in review
