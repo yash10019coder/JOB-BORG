@@ -82,6 +82,11 @@ class ResolvedAnswer:
     answer: str | list[str] | None
     needs_review: bool
     reason: str
+    # Set only for answers that came out of ``resolve_answer`` (AnswerBank):
+    # a T0/T1 value not yet confirmed by the user, plus where it came from.
+    needs_confirmation: bool = False
+    provenance: dict | None = None
+    tier: str = ""
 
 
 # Reasons a ResolvedAnswer can carry -- kept as plain strings (not an enum)

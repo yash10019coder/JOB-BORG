@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from .models import EmailInboxCredential, Profile
+from .services import profile_fields
+from .models import AnswerBank, AnswerBankHistory, EmailInboxCredential, Profile
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -36,6 +37,11 @@ class ProfileAdmin(admin.ModelAdmin):
         divergent clear-path that bypasses `full_clean()`/the explicit-
         trigger convention `set_resume()` exists to centralize.
         """
+        # Staff edits are user-authored changes for provenance purposes.
+        profile_fields.record_user_edits(
+            obj,
+            {f: form.initial[f] for f in profile_fields.COVERED_FIELDS if f in form.initial},
+        )
         if "resume" in form.changed_data:
             # Save every other field first (this also creates the row on the
             # add view), then apply the resume change through set_resume() --
@@ -60,3 +66,27 @@ class EmailInboxCredentialAdmin(admin.ModelAdmin):
     # ciphertext shouldn't render at all (contrast ProfileAdmin's
     # `readonly_fields = ("resume_text",)`, which is fine to display).
     exclude = ("app_password_encrypted",)
+
+
+@admin.register(AnswerBank)
+class AnswerBankAdmin(admin.ModelAdmin):
+    list_display = ("profile", "question_key", "source", "risk_tier", "is_locked", "updated_at")
+    list_filter = ("source", "risk_tier", "is_locked")
+    search_fields = ("question_key", "profile__user__username")
+
+
+@admin.register(AnswerBankHistory)
+class AnswerBankHistoryAdmin(admin.ModelAdmin):
+    """Audit trail: browsable, never editable from the admin."""
+
+    list_display = ("profile", "question_key", "source", "superseded_by_source", "superseded_at")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

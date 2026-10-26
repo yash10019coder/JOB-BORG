@@ -25,6 +25,7 @@ from apps.auto_apply.llm.base import (
     ResolvedAnswer,
     resolve_answers,
 )
+from apps.accounts.services.answer_resolver import resolve_answer
 from apps.auto_apply.llm.categories import QuestionCategory, classify
 from apps.auto_apply.models import ExplicitAnswer
 
@@ -39,6 +40,7 @@ EXPLICIT_ANSWER_REASON = "explicit_answer"
 # is real and usable but was never confirmed by the user as *this* question's
 # answer, so it surfaces in the review queue rather than being sent silently.
 PROFILE_DERIVED_REASON = "profile_derived"
+ANSWER_BANK_REASON = "answer_bank"
 
 # Which ExplicitAnswer.Category values satisfy a question classified into a
 # given QuestionCategory (categories.py). Only categories with a real
@@ -138,25 +140,39 @@ def resolve_field_answers(
         answer.category: answer for answer in ExplicitAnswer.objects.filter(user=user)
     }
 
+    def legacy_lookup(question_text):
+        """The old ExplicitAnswer table, handed to the resolver as its last
+        resort so `apps.accounts` never imports `apps.auto_apply`."""
+        category = classify(question_text)
+        for candidate_category in _explicit_categories_for(question_text, category):
+            if candidate_category in explicit_by_category:
+                return explicit_by_category[candidate_category].answer_text
+        return None
+
     resolved: dict[str, ResolvedAnswer] = {}
     remaining: list[Question] = []
 
     for question in questions:
         category = classify(question.text)
-        explicit = None
-        for candidate_category in _explicit_categories_for(question.text, category):
-            if candidate_category in explicit_by_category:
-                explicit = explicit_by_category[candidate_category]
-                break
+        found = resolve_answer(
+            profile, question.text, options=question.options, legacy_lookup=legacy_lookup
+        )
 
-        if explicit is not None:
+        if found is not None:
+            from_bank = found.provenance.get("origin") == "answer_bank"
             resolved[question.id] = _enforce_option_constraint(
                 ResolvedAnswer(
                     question_id=question.id,
                     category=category,
-                    answer=explicit.answer_text,
-                    needs_review=False,
-                    reason=EXPLICIT_ANSWER_REASON,
+                    answer=found.value,
+                    # Legacy ExplicitAnswers are user-authored: confirmed,
+                    # exactly as before. An unconfirmed T0/T1 bank value must
+                    # be reviewed before it can be sent.
+                    needs_review=found.needs_confirmation,
+                    reason=ANSWER_BANK_REASON if from_bank else EXPLICIT_ANSWER_REASON,
+                    needs_confirmation=found.needs_confirmation,
+                    provenance=found.provenance if from_bank else None,
+                    tier=found.tier if from_bank else "",
                 ),
                 question,
             )

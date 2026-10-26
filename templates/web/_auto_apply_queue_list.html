@@ -50,6 +50,8 @@
                         {{ label }}
                         {% if label in draft.blocking_fields %}
                         <span class="tag" style="background:#fee2e2; color:#991b1b;" aria-label="This question must be answered before the application can be sent">Answer required</span>
+                        {% elif entry.needs_confirmation %}
+                        <span class="tag" style="background:#fef3c7; color:#92400e;" aria-label="This answer was not entered by you and must be confirmed before sending">Needs your confirmation</span>
                         {% elif entry.needs_review %}
                         <span class="tag" style="background:#fef3c7; color:#92400e;" aria-label="Needs review, please confirm this answer">Needs review</span>
                         {% endif %}
@@ -61,6 +63,14 @@
                     {{ entry.control }}
                     {% else %}
                     <p>{{ entry.value }}</p>
+                    {% endif %}
+                    {% if entry.needs_confirmation and draft.status == "drafted" %}
+                    <p>
+                        <label>
+                            <input type="checkbox" name="confirm__{{ forloop.counter0 }}">
+                            I confirm this answer is correct
+                        </label>
+                    </p>
                     {% endif %}
                 </div>
                 {% endfor %}

@@ -1206,3 +1206,184 @@ class ReviewFindingViewTests(AutoApplyViewsTestCase):
         self._draft(self.alice, job, status=AutoApplyDraft.Status.FAILED, reason_code=AutoApplyDraft.ReasonCode.SUBMISSION_UNCONFIRMED)
         self._client_for(self.alice).post(reverse("trigger_auto_apply", args=[job.pk]))
         task.delay.assert_not_called()
+
+
+UNCONFIRMED_AUTH_ANSWERS = {
+    "Work authorization?": {
+        "value": "Yes", "needs_review": True, "needs_confirmation": True,
+        "required": True, "category": "work_authorization", "reason": "answer_bank",
+        "tier": "t0_legal",
+        "provenance": {"origin": "answer_bank", "source": "learned", "locked": False},
+    },
+}
+
+
+class UnconfirmedAnswerGateTests(AutoApplyViewsTestCase):
+    """A learned/imported T0/T1 answer is held until the user explicitly
+    confirms it (Profile Overhaul Phase 1)."""
+
+    def _unconfirmed_draft(self):
+        import copy
+
+        return self._draft(
+            self.alice, self._job(), answers=copy.deepcopy(UNCONFIRMED_AUTH_ANSWERS)
+        )
+
+    def _edit(self, draft, **post):
+        data = {"label__0": "Work authorization?", "value__0": "Yes"}
+        data.update(post)
+        return self._client_for(self.alice).post(
+            reverse("edit_auto_apply_draft", args=[draft.id]), data
+        )
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_send_is_refused_while_an_answer_is_unconfirmed(self, mock_task):
+        draft = self._unconfirmed_draft()
+
+        response = self._client_for(self.alice).post(
+            reverse("send_auto_apply_draft", args=[draft.id]), follow=True
+        )
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        self.assertIsNone(draft.submitted_answers_snapshot)
+        mock_task.delay.assert_not_called()
+        self.assertContains(response, "Confirm these answer(s) before sending")
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_plain_save_does_not_confirm_and_send_stays_refused(self, mock_task):
+        draft = self._unconfirmed_draft()
+
+        self._edit(draft)  # saves the same value, no confirm checkbox
+
+        draft.refresh_from_db()
+        entry = draft.answers["Work authorization?"]
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertTrue(entry["needs_review"])
+        self.assertFalse(entry["user_confirmed"])
+        self._client_for(self.alice).post(reverse("send_auto_apply_draft", args=[draft.id]))
+        mock_task.delay.assert_not_called()
+
+    def test_editing_the_value_without_the_checkbox_is_still_unconfirmed(self):
+        draft = self._unconfirmed_draft()
+
+        self._edit(draft, value__0="No")
+
+        draft.refresh_from_db()
+        entry = draft.answers["Work authorization?"]
+        self.assertEqual(entry["value"], "No")
+        self.assertTrue(entry["needs_confirmation"])
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_explicit_confirm_then_send_succeeds_and_records_the_snapshot(self, mock_task):
+        draft = self._unconfirmed_draft()
+
+        self._edit(draft, confirm__0="on")
+
+        draft.refresh_from_db()
+        entry = draft.answers["Work authorization?"]
+        self.assertFalse(entry["needs_confirmation"])
+        self.assertFalse(entry["needs_review"])
+        self.assertTrue(entry["user_confirmed"])
+        self.assertEqual(entry["provenance"]["source"], "user")
+        self.assertEqual(entry["confirmed_from"]["source"], "learned")
+
+        self._client_for(self.alice).post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        mock_task.delay.assert_called_once_with(draft.id)
+        recorded = draft.submitted_answers_snapshot["answers"]["Work authorization?"]
+        self.assertEqual(recorded["value"], "Yes")
+        self.assertEqual(recorded["tier"], "t0_legal")
+        self.assertEqual(recorded["provenance"]["source"], "user")
+        self.assertEqual(recorded["confirmed_from"]["source"], "learned")
+
+    def test_confirm_checkbox_on_a_blank_value_does_not_confirm(self):
+        draft = self._unconfirmed_draft()
+
+        self._edit(draft, value__0="", confirm__0="on")
+
+        draft.refresh_from_db()
+        self.assertTrue(draft.answers["Work authorization?"]["needs_confirmation"])
+
+    def test_queue_shows_the_confirm_control_for_an_unconfirmed_answer(self):
+        self._unconfirmed_draft()
+
+        response = self._client_for(self.alice).get(reverse("auto_apply_queue"))
+
+        self.assertContains(response, "Needs your confirmation")
+        self.assertContains(response, 'name="confirm__0"')
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_drafts_without_flagged_answers_send_exactly_as_before(self, mock_task):
+        draft = self._draft(
+            self.alice, self._job(),
+            answers={"Why us?": {"value": "x", "needs_review": False}},
+        )
+
+        self._client_for(self.alice).post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        self.assertIn("Why us?", draft.submitted_answers_snapshot["answers"])
+
+
+class LearnedAnswerEndToEndTests(AutoApplyViewsTestCase):
+    """Real drafting -> review queue -> send, with no hand-built answers: a
+    learned T0 answer must be held until the user confirms it."""
+
+    QUESTION = "Are you legally authorized to work in the United States?"
+
+    @mock.patch("apps.web.views.submit_auto_apply_draft")
+    def test_learned_work_authorization_is_held_until_confirmed(self, mock_task):
+        from apps.accounts.services.answer_resolver import write_answer
+        from apps.auto_apply.greenhouse_form.field_mapping import (
+            SINGLE_SELECT, FormField, FormSchema,
+        )
+        from apps.auto_apply.services.drafting import draft_for
+        from apps.auto_apply.tests.test_drafting_service import (
+            STANDARD_ONLY_SCHEMA, FakeFormClient, FakeLLMClient,
+        )
+
+        self.alice.email = "alice@example.com"
+        self.alice.save()
+        profile = self.alice.profile
+        profile.full_name = "Alice Smith"
+        profile.phone = "555-1234"
+        profile.linkedin_url = "https://linkedin.com/in/alice"
+        profile.resume_text = "Alice Smith. Engineer."
+        profile.save()
+        write_answer(profile, self.QUESTION, "Yes", "learned", options=("Yes", "No"))
+        schema = FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (FormField(self.QUESTION, SINGLE_SELECT, True, ("Yes", "No")),)
+        )
+        job = self._job()
+
+        draft = draft_for(
+            self.alice, job, form_client=FakeFormClient(schema=schema),
+            llm_client=FakeLLMClient(),
+        )
+        client = self._client_for(self.alice)
+        index = list(draft.answers).index(self.QUESTION)
+
+        client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+        mock_task.delay.assert_not_called()
+
+        # The review form posts every answer, indexed from 0, like the template.
+        posted = {}
+        for i, (label, entry) in enumerate(draft.answers.items()):
+            posted[f"label__{i}"] = label
+            posted[f"value__{i}"] = entry["value"]
+        posted[f"confirm__{index}"] = "on"
+        client.post(reverse("edit_auto_apply_draft", args=[draft.id]), posted)
+        client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        recorded = draft.submitted_answers_snapshot["answers"][self.QUESTION]
+        self.assertEqual(recorded["confirmed_from"]["source"], "learned")
+        self.assertEqual(recorded["provenance"]["source"], "user")

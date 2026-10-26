@@ -509,6 +509,47 @@ class SubmitAutoApplyDraftFailureTests(SubmitAutoApplyDraftTaskTestCase):
         )
 
 
+class SubmitAutoApplyDraftUnconfirmedAnswerTests(SubmitAutoApplyDraftTaskTestCase):
+    """Defence in depth: the task refuses a SENDING draft that still holds an
+    unconfirmed learned/imported T0/T1 answer, even if it never went through
+    the send view."""
+
+    UNCONFIRMED = {
+        "First Name": {"value": "Alice", "needs_review": False},
+        "Work authorization?": {
+            "value": "Yes", "needs_review": True, "needs_confirmation": True,
+        },
+    }
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_unconfirmed_answer_is_never_submitted(self, mock_client_cls):
+        draft = self._make_draft(answers=self.UNCONFIRMED)
+
+        result = submit_auto_apply_draft(draft.pk)
+
+        draft.refresh_from_db()
+        self.assertEqual(result, draft.pk)
+        self.assertEqual(draft.status, AutoApplyDraft.Status.FAILED)
+        self.assertEqual(draft.reason_code, AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS)
+        self.assertIn("Work authorization?", draft.error_message)
+        mock_client_cls.assert_not_called()
+        self.assertFalse(JobApplication.objects.filter(user=self.user).exists())
+
+    @patch("apps.auto_apply.tasks.GreenhouseFormClient")
+    def test_a_confirmed_answer_is_submitted_normally(self, mock_client_cls):
+        mock_client_cls.return_value.submit.return_value = SubmissionResult(success=True)
+        answers = {
+            label: dict(entry, needs_confirmation=False, needs_review=False)
+            for label, entry in self.UNCONFIRMED.items()
+        }
+        draft = self._make_draft(answers=answers)
+
+        submit_auto_apply_draft(draft.pk)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.APPLIED)
+
+
 class SubmitAutoApplyDraftDefensiveNoOpTests(SubmitAutoApplyDraftTaskTestCase):
     @patch("apps.auto_apply.tasks.GreenhouseFormClient")
     def test_draft_not_sending_is_a_defensive_noop(self, mock_client_cls):

@@ -510,3 +510,98 @@ class ProfileDerivedSalaryFallbackTests(TestCase):
         self.assertIsNone(resolved.answer)
         self.assertTrue(resolved.needs_review)
         self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+
+class AnswerBankResolutionTests(TestCase):
+    """Phase 1 of the Profile Overhaul: `resolve_field_answers` consults the
+    `AnswerBank` (via `resolve_answer`) ahead of the legacy ExplicitAnswer
+    table, and an unconfirmed T0/T1 bank value is held for the user."""
+
+    def setUp(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        self.write_answer = write_answer
+        self.user = User.objects.create_user(
+            username="dana", password="pw", email="dana@example.com"
+        )
+        self.profile = self.user.profile
+        self.profile.resume_text = "Dana Kim."
+        self.profile.save()
+
+    def _resolve(self, question, llm=None):
+        return resolve_field_answers(
+            self.user, [question], self.profile.resume_text, self.profile,
+            llm or FakeLLMClient(),
+        )[0]
+
+    def test_user_answer_bank_row_beats_the_legacy_explicit_answer(self):
+        ExplicitAnswer.objects.create(
+            user=self.user,
+            category=ExplicitAnswer.Category.SPONSORSHIP,
+            answer_text="Yes",
+        )
+        text = "Will you now or in the future require visa sponsorship?"
+        self.write_answer(self.profile, text, "No", "user", is_locked=True)
+
+        resolved = self._resolve(Question(id=text, text=text))
+
+        self.assertEqual(resolved.answer, "No")
+        self.assertEqual(resolved.reason, "answer_bank")
+        self.assertFalse(resolved.needs_review)
+        self.assertFalse(resolved.needs_confirmation)
+        self.assertEqual(resolved.provenance["source"], "user")
+
+    def test_learned_t0_value_is_prefilled_but_held_and_never_reaches_the_llm(self):
+        text = "Are you legally authorized to work in the United States?"
+        self.write_answer(self.profile, text, "Yes", "learned")
+        llm = FakeLLMClient()
+
+        resolved = self._resolve(Question(id=text, text=text), llm)
+
+        self.assertEqual(resolved.answer, "Yes")
+        self.assertTrue(resolved.needs_review)
+        self.assertTrue(resolved.needs_confirmation)
+        self.assertEqual(resolved.tier, "t0_legal")
+        self.assertEqual(resolved.provenance["source"], "learned")
+        self.assertEqual(llm.calls, [])
+
+    def test_bank_value_outside_the_options_is_blanked_for_review(self):
+        text = "Are you legally authorized to work in the United States?"
+        self.write_answer(
+            self.profile, text, "Probably", "user", options=("Yes", "No")
+        )
+        question = Question(
+            id=text, text=text, field_type="single_select", options=("Yes", "No")
+        )
+
+        resolved = self._resolve(question)
+
+        self.assertIsNone(resolved.answer)
+        self.assertTrue(resolved.needs_review)
+        self.assertEqual(resolved.reason, ResolutionReason.INVALID_OPTION)
+
+    def test_without_a_bank_row_the_legacy_path_is_unchanged(self):
+        ExplicitAnswer.objects.create(
+            user=self.user,
+            category=ExplicitAnswer.Category.SPONSORSHIP,
+            answer_text="No",
+        )
+        text = "Will you now or in the future require visa sponsorship?"
+
+        resolved = self._resolve(Question(id=text, text=text))
+
+        self.assertEqual(resolved.reason, "explicit_answer")
+        self.assertFalse(resolved.needs_review)
+        self.assertIsNone(resolved.provenance)
+
+    def test_a_profile_less_call_still_resolves_legacy_answers(self):
+        ExplicitAnswer.objects.create(
+            user=self.user,
+            category=ExplicitAnswer.Category.SPONSORSHIP,
+            answer_text="No",
+        )
+        text = "Will you now or in the future require visa sponsorship?"
+        resolved = resolve_field_answers(
+            self.user, [Question(id=text, text=text)], "", None, FakeLLMClient()
+        )[0]
+        self.assertEqual(resolved.answer, "No")
