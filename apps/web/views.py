@@ -477,7 +477,7 @@ def auto_apply_queue(request):
                 continue
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
-            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job)
+            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job, draft.user.profile)
             field = _answer_edit_field(entry, fields.get(label, {}))
             if field is not None:
                 value = entry.get("value", "")

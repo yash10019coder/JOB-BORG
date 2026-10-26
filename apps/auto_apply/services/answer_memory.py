@@ -56,9 +56,26 @@ def can_remember(entry):
     return entry.get("category") != STANDARD_CATEGORY
 
 
-def remember_ui(label, entry, job):
+def settings_owned(profile, label, entry, job):
+    """Is this answered from the user's per-country settings, not from memory?
+
+    Work authorization and sponsorship come from ``Profile`` facts. A saved
+    answer to one that names no country would carry no country in its key, so
+    it would then answer every country (a wrong, unconfirmed T0 answer for a
+    job in a country the settings say nothing about). A question that names
+    exactly one country has that country in its key, so remembering it is safe.
+    """
+    if question_semantics.blocks_llm(label):
+        return True
+    options = tuple((entry or {}).get("options") or ())
+    if profile is None or typed_facts.resolve(profile, label, options=options, job=job) is None:
+        return False
+    return question_semantics.country_mentions(label).single is None
+
+
+def remember_ui(label, entry, job, profile=None):
     """What the review queue offers for this answer, or ``None``."""
-    if not can_remember(entry):
+    if not can_remember(entry) or settings_owned(profile, label, entry, job):
         return None
     tier = classify_tier(label)
     region = typed_facts.job_region(job)
@@ -116,6 +133,8 @@ def remember_reviewed_answers(draft, edits):
             continue
         entry = (draft.answers or {}).get(edit.label)
         if not can_remember(entry) or entry.get("needs_confirmation"):
+            continue
+        if settings_owned(profile, edit.label, entry, job):
             continue
         if not _deliberate(edit):
             continue

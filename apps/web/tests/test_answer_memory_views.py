@@ -22,6 +22,7 @@ HEARD = "How did you hear about us?"
 AUTH = "Are you legally authorized to work in the United States?"
 RELOCATE = "Are you willing to relocate?"
 ESSAY = "Why do you want to work at Acme?"
+SPONSOR = "Will you now or in the future require visa sponsorship?"
 
 
 class _MemoryBase(AutoApplyViewsTestCase):
@@ -160,6 +161,18 @@ class RememberOnReviewTests(_MemoryBase):
         entry = second.answers[AUTH]
         self.assertEqual(entry["value"], "Yes")
         self.assertFalse(entry["needs_confirmation"])
+
+    def test_a_country_free_settings_question_is_never_remembered_for_every_country(self):
+        """Sponsorship names no country, so a saved answer would answer them all."""
+        draft = self.draft(self.job_in("US"), (SPONSOR, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {SPONSOR: "No"}, remember={SPONSOR})
+        self.assertIsNone(self.row(SPONSOR))
+        self.assertNotIn(
+            "Always use this answer", self.client.get(reverse("auto_apply_queue")).content.decode()
+        )
+
+        india = self.draft(self.job_in("India"), (SPONSOR, SINGLE_SELECT, ("Yes", "No")))
+        self.assertFalse(india.answers[SPONSOR]["value"])
 
     def test_confirming_a_learned_answer_with_always_use_replaces_it_with_a_locked_user_row(self):
         write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))

@@ -328,11 +328,18 @@ class AnswersSettingsForm(forms.ModelForm):
         except forms.ValidationError as exc:
             self.add_error(None, exc)
         cleaned_data.setdefault("citizenship_countries", [])
-        salary_by_region = {}
+        # A region's <select> always posts a value, so an absent one means the
+        # client did not send it: keep what is stored rather than clearing it.
+        salary_by_region = dict((self.instance.salary_by_region or {}) if self.instance else {})
         for region_key in REGION_KEYS:
-            value = cleaned_data.get(f"salary_region_{region_key}") or ""
+            field_name = f"salary_region_{region_key}"
+            if field_name not in self.data:
+                continue
+            value = cleaned_data.get(field_name) or ""
             if value:
                 salary_by_region[region_key] = value
+            else:
+                salary_by_region.pop(region_key, None)
         cleaned_data["salary_by_region"] = salary_by_region
         cleaned_data.setdefault("visa_status_by_country", {})
         return cleaned_data
