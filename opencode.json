@@ -1,4 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git"]
+  "plugin": ["compound-engineering@git+https://github.com/EveryInc/compound-engineering-plugin.git"],
+  "lsp": true
 }

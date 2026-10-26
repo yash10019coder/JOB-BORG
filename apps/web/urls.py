@@ -9,6 +9,7 @@ urlpatterns = [
     path("accounts/logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("accounts/signup/", views.signup, name="signup"),
     path("profile/", views.profile, name="profile"),
+    path("profile/explicit-answers/", views.explicit_answers, name="explicit_answers"),
     # Recommendations list + save/dismiss/mark-applied actions (U12).
     path("", views.recommendations, name="recommendations"),
     path("jobs/<int:job_id>/action/", views.job_action, name="job_action"),
