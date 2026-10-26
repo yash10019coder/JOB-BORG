@@ -267,6 +267,23 @@ def _legacy_conflict(profile, fact, bank_rows):
     return {"origin": lkey, "answer_bool": boolean}
 
 
+def _legacy_boolean_applies(lkey, question_text, job):
+    """May a backfilled yes/no authorization or sponsorship row answer this?
+
+    The legacy codes were US visa statuses (``yes_h1b``, ``yes_green_card``,
+    ``no_need_sponsorship``) and carry no country, so they speak only for the
+    US: never for another country, and never for "without restriction" (an
+    H-1B is employer-bound). Anything else stays blank for review -- these are
+    T0 answers and the legacy path does not hold them for confirmation.
+    """
+    mentions = qs.country_mentions(question_text)
+    if mentions.ambiguous or (mentions.unresolved and not mentions.single):
+        return False
+    if (mentions.single or typed_facts.job_alpha3(job)) != "USA":
+        return False
+    return not (lkey == LEGACY_WORK_AUTHORIZATION and qs.has_restriction_qualifier(question_text))
+
+
 def _legacy_row(profile, question_text, job, options, bank_rows, computed_tier, now):
     lkey = _legacy_key(question_text)
     if lkey is None:
@@ -282,6 +299,8 @@ def _legacy_row(profile, question_text, job, options, bank_rows, computed_tier, 
             return None
         value = _map_to_options(row.value, options)
     elif detail.get("answer_bool") is not None:
+        if not _legacy_boolean_applies(lkey, question_text, job):
+            return None
         value = qs.pick_yes_no(options, bool(detail["answer_bool"]))
     elif detail.get("free_text"):
         value = _map_to_options(row.value, options)

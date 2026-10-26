@@ -482,7 +482,7 @@ def auto_apply_queue(request):
                 continue
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
-            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job)
+            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job, draft.user.profile)
             display_entry["candidates"] = (
                 _display_candidates(label, entry) if is_blank_answer_value(entry.get("value")) else []
             )
