@@ -136,6 +136,7 @@ def validate_salary_by_region(data: dict) -> dict:
     
     cleaned = {}
     for region, band_key in data.items():
-        if region in SALARY_BANDS_BY_REGION and is_valid_band_key(region, band_key):
+        # The blank "— Select —" key is in every band list but is not a selection.
+        if band_key and region in SALARY_BANDS_BY_REGION and is_valid_band_key(region, band_key):
             cleaned[region] = band_key
     return cleaned

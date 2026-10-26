@@ -220,6 +220,24 @@ class PrecedenceAndSuggestionTests(_Base):
         learn_for_profile(self.profile)
         self.assertEqual(self.learned(NOTICE).value, "1 month")
 
+    def test_a_contradicted_learned_row_is_withdrawn_even_when_the_new_value_is_rejected(self):
+        """Newest answers say "B", but B was rejected before: the learned "A"
+        must still stop prefilling, not stay because B cannot be learned."""
+        for employer in ("Acme", "Beta"):
+            self.observe(NOTICE, "B", employer, tier=Tier.T1_COMMERCIAL)
+        learn_for_profile(self.profile)
+        AnswerBank.objects.all().delete()
+        ProfileSuggestion.objects.update(status="rejected")
+        write_answer(self.profile, NOTICE, "A", "learned")
+
+        report = learn_for_profile(self.profile)
+
+        self.assertIsNone(self.learned(NOTICE))
+        self.assertEqual(len(report.withdrawn), 1)
+        self.assertTrue(
+            AnswerBankHistory.objects.filter(value="A", superseded_by_source="learner_withdraw").exists()
+        )
+
     def test_an_expired_suggestion_is_revived_when_the_consensus_returns(self):
         self.observe(NOTICE, "2 weeks", "Acme", tier=Tier.T1_COMMERCIAL)
         self.observe(NOTICE, "2 weeks", "Beta", tier=Tier.T1_COMMERCIAL)
