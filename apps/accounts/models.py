@@ -89,7 +89,9 @@ _AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[str, str]] = {
     "permanent_resident": ("yes_green_card", "no"),
     "work_permit": ("yes_authorized", "no"),
     "requires_sponsorship": ("no_need_sponsorship", "other"),
-    "not_authorized": ("no_sponsorship_needed", "no"),
+    # Not authorized means sponsorship *would* be needed, so the sponsorship
+    # answer is left unresolved for review rather than reported as "no".
+    "not_authorized": ("no_need_sponsorship", ""),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
     "h1b": ("yes_h1b", ""),
     "opt": ("yes_opt", ""),

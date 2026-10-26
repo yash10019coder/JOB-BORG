@@ -80,7 +80,7 @@ def signup(request):
     return render(request, "registration/signup.html", {"form": form})
 
 
-def _profile_form_context(request, form):
+def _profile_form_context(request, form, explicit_answers_form=None):
     """Template context shared by the profile and explicit-answers views.
 
     Both render `web/profile_form.html`, and the per-country authorization
@@ -92,7 +92,9 @@ def _profile_form_context(request, form):
     profile_obj = request.user.profile
     return {
         "form": form,
-        "explicit_answers_form": ExplicitAnswersForm(user=request.user),
+        # A bound form (invalid POST) is passed through so the submitted values
+        # and errors survive the re-render.
+        "explicit_answers_form": explicit_answers_form or ExplicitAnswersForm(user=request.user),
         "country_choices": country_choices(),
         "visa_status_choices": Profile.VisaStatus.choices,
         # One [alpha3, status] pair per stored row, so the repeater can
@@ -138,7 +140,9 @@ def explicit_answers(request):
     return render(
         request,
         "web/profile_form.html",
-        _profile_form_context(request, ProfileForm(instance=request.user.profile)),
+        _profile_form_context(
+            request, ProfileForm(instance=request.user.profile), explicit_answers_form=form
+        ),
     )
 
 
