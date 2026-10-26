@@ -1,0 +1,50 @@
+SARAH CHEN
+sarah.chen@email.com | +1 (555) 123-4567
+LinkedIn: https://linkedin.com/in/sarahchen
+GitHub: https://github.com/sarahchen
+Location: San Francisco, CA, USA
+
+SUMMARY
+Frontend Engineer with 5 years building scalable React/TypeScript applications. Led migration from legacy jQuery to modern React architecture, reducing bundle size 40%. Passionate about performance, accessibility, and developer experience.
+
+SKILLS
+Languages: TypeScript, JavaScript, HTML/CSS, Python, Go
+Frontend: React, Next.js, Redux, Tailwind CSS, Styled Components, Webpack, Vite
+Testing: Jest, React Testing Library, Cypress, Playwright
+DevOps: Docker, GitHub Actions, Vercel, AWS Amplify
+Tools: Git, Figma, Storybook, ESLint, Prettier
+
+EXPERIENCE
+Stripe — Senior Frontend Engineer (Jan 2022 – Present)
+San Francisco, CA
+• Led Dashboard redesign serving 1M+ merchants, improved LCP from 3.2s → 1.1s
+• Built reusable component library (50+ components) adopted by 15 teams
+• Implemented real-time collaboration features using WebRTC and Yjs
+• Mentored 3 junior engineers, established code review standards
+• Reduced bundle size 40% via code splitting and tree shaking
+
+Airbnb — Frontend Engineer (Mar 2019 – Dec 2021)
+San Francisco, CA
+• Migrated search results page from jQuery to React, 30% faster TTFB
+• Built A/B testing framework for frontend experiments
+• Improved accessibility score from 65 → 98 (WCAG 2.1 AA)
+• Contributed to internal design system (20+ components)
+
+EDUCATION
+Stanford University
+B.S. Computer Science, Minor in Human-Computer Interaction
+2015 – 2019
+
+PROJECTS
+Design System CLI (TypeScript, Node.js)
+https://github.com/sarahchen/design-system-cli
+• CLI tool for generating consistent React components from Figma tokens
+
+Accessibility Auditor (React, TypeScript, axe-core)
+https://github.com/sarahchen/a11y-auditor
+• Automated accessibility testing in CI/CD pipeline
+
+ACHIEVEMENTS
+• Speaker at React Conf 2023: "Building Accessible Design Systems"
+• Open source contributor to React Testing Library
+• 200+ GitHub stars across projects
