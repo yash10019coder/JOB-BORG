@@ -692,6 +692,18 @@ class LegacyRowTests(_Base):
         ):
             self.assertIsNone(resolve_answer(self.profile, text, _job("US")), text)
 
+    def test_a_us_visa_row_never_answers_another_country(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_WORK_AUTHORIZATION, "Yes", answer_bool=True)
+        _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "No", answer_bool=False)
+        self.assertIsNone(resolve_answer(self.profile, "Are you authorized to work in Germany?", _job("US")))
+        self.assertIsNone(resolve_answer(self.profile, self.SPONSOR_Q, _job("India")))
+        self.assertIsNotNone(resolve_answer(self.profile, self.SPONSOR_Q, _job("US")))
+
+    def test_a_legacy_authorization_row_never_answers_without_restriction(self):
+        _legacy_row(self.profile, answer_resolver.LEGACY_WORK_AUTHORIZATION, "Yes", answer_bool=True)
+        question = "Are you authorized to work in the United States without restrictions?"
+        self.assertIsNone(resolve_answer(self.profile, question, _job("US")))
+
     def test_an_other_answer_never_resolves(self):
         _legacy_row(self.profile, answer_resolver.LEGACY_SPONSORSHIP, "Other", answer_bool=None)
         self.assertIsNone(resolve_answer(self.profile, self.SPONSOR_Q, _job("US")))

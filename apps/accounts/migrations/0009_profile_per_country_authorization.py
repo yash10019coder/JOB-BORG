@@ -61,14 +61,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name="profile",
-            name="citizenship",
-        ),
-        migrations.RemoveField(
-            model_name="profile",
-            name="visa_status",
-        ),
         migrations.AddField(
             model_name="profile",
             name="citizenship_countries",
@@ -87,5 +79,15 @@ class Migration(migrations.Migration):
                 help_text='Per-country work authorization, e.g. {"IND": "citizen"}.',
             ),
         ),
+        # The data step must read the old column, so the old columns are dropped
+        # only after it has run.
         migrations.RunPython(carry_forward_authorization, noop_reverse),
+        migrations.RemoveField(
+            model_name="profile",
+            name="citizenship",
+        ),
+        migrations.RemoveField(
+            model_name="profile",
+            name="visa_status",
+        ),
     ]
