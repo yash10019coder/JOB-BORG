@@ -677,7 +677,7 @@ def edit_auto_apply_draft(request, pk):
             answers[label]["user_edited"] = True
             # Changing an accepted candidate makes it their own answer.
             answers[label].pop("candidate_accepted", None)
-        offered = answer_memory.remember_ui(label, answers[label], draft.job)
+        offered = answer_memory.remember_ui(label, answers[label], draft.job, draft.user.profile)
         if offered:
             # An unticked, pre-ticked box is an explicit "do not remember this":
             # the consensus learner must not learn it either.
