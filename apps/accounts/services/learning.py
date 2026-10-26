@@ -231,7 +231,14 @@ def learn_for_profile(profile, *, dry_run=False, now=None):
             report.skip("already_learned")
             continue
         if _suppressed(profile, winner, scope):
-            report.skip("suppressed_by_user")
+            # The user's newest answers contradict the learned row, so it must
+            # stop prefilling even though the new consensus is not learned.
+            if learned_existing is not None:
+                if not dry_run:
+                    delete_answer(learned_existing, deleted_by="learner_withdraw")
+                report.withdrawn.append(key)
+            else:
+                report.skip("suppressed_by_user")
             continue
         if would_refuse(existing, AnswerBank.Source.LEARNED, now):
             report.skip("user_answer_exists")
