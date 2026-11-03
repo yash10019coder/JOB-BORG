@@ -213,7 +213,16 @@ def sweep_learning():
     stale = ProfileSuggestion.objects.filter(
         status=ProfileSuggestion.Status.PENDING, created_at__lt=now - suggestion_ttl()
     ).values_list("profile_id", flat=True)
-    profile_ids = sorted(set(recent) | set(stale))[: settings.LEARNING_SWEEP_BATCH_SIZE]
+    all_ids = sorted(set(recent) | set(stale))
+    profile_ids = all_ids[: settings.LEARNING_SWEEP_BATCH_SIZE]
+    # The cap bounds this task's own work, but profiles past it must not be
+    # silently skipped every night (the lowest ids would always win): hand each
+    # to its own idempotent task instead.
+    for overflow_id in all_ids[settings.LEARNING_SWEEP_BATCH_SIZE :]:
+        try:
+            learn_for_profile_task.delay(overflow_id)
+        except Exception:  # noqa: BLE001 -- a broker hiccup must not abort the batch
+            logger.exception("sweep_learning: could not enqueue profile %s", overflow_id)
 
     from .models import Profile
 
@@ -225,4 +234,4 @@ def sweep_learning():
         except Exception:  # noqa: BLE001 -- one profile must not stop the batch
             logger.exception("sweep_learning: profile %s failed", profile.pk)
             failed += 1
-    return {"profiles": done, "failed": failed}
+    return {"profiles": done, "failed": failed, "deferred": max(len(all_ids) - len(profile_ids), 0)}

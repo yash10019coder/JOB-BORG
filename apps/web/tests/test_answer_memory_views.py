@@ -473,6 +473,16 @@ class LearningTriggerTests(_MemoryBase):
                 callback()
         task.delay.assert_called_once_with(self.profile.pk)
 
+    def test_a_broker_failure_dispatching_the_learner_does_not_block_the_send(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        with mock.patch("apps.web.views.learn_for_profile_task") as task, \
+                mock.patch("apps.web.views.submit_auto_apply_draft") as submit:
+            task.delay.side_effect = ConnectionError("broker down")
+            with self.assertLogs(level="ERROR"), self.captureOnCommitCallbacks(execute=True):
+                self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        submit.delay.assert_called_once_with(draft.id)
+
     def test_a_refused_send_schedules_nothing(self):
         write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
         draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))

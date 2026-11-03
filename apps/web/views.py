@@ -867,7 +867,9 @@ def send_auto_apply_draft(request, pk):
         # Learn from what was just recorded, but only once it is committed:
         # a worker must never run before the observations are visible.
         profile_id = draft.user.profile.pk
-        transaction.on_commit(lambda: learn_for_profile_task.delay(profile_id))
+        # robust=True: a broker error here must not escape the view and skip
+        # submit_auto_apply_draft below, which would leave the draft in SENDING.
+        transaction.on_commit(lambda: learn_for_profile_task.delay(profile_id), robust=True)
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")

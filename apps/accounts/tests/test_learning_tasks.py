@@ -94,6 +94,15 @@ class SweepTests(TestCase):
         with self.settings(LEARNING_SWEEP_BATCH_SIZE=1):
             self.assertEqual(tasks.sweep_learning()["profiles"], 1)
 
+    def test_profiles_past_the_batch_cap_are_handed_to_their_own_task(self):
+        self._evidence(self.alice)
+        self._evidence(self.bob)
+        with self.settings(LEARNING_SWEEP_BATCH_SIZE=1), \
+                mock.patch.object(tasks.learn_for_profile_task, "delay") as delay:
+            result = tasks.sweep_learning()
+        self.assertEqual((result["profiles"], result["deferred"]), (1, 1))
+        delay.assert_called_once()
+
     def test_stale_suggestions_are_expired_by_the_sweep(self):
         ProfileSuggestion.objects.create(
             profile=self.bob, question_key="q", value="x", value_fingerprint="f", tier="t1_commercial"
