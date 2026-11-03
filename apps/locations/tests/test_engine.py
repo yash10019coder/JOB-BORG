@@ -229,6 +229,34 @@ class NormalizeLocationTests(SimpleTestCase):
         self.assertEqual(result["country"], "AQ")
 
 
+class CountryHelpersWithoutDatasetTests(SimpleTestCase):
+    """_try_load_index returns None (it never raises), and the public country
+    helpers honour the module's never-raise contract when it does."""
+
+    def setUp(self):
+        # These helpers are lru_cached, so clear around the patch to neither
+        # see another test's result nor leave an empty one behind.
+        for cached in (engine.country_records, engine.country_alpha2_map):
+            if hasattr(cached, "cache_clear"):
+                cached.cache_clear()
+                self.addCleanup(cached.cache_clear)
+        patcher = mock.patch.object(engine, "_try_load_index", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_country_records_is_empty(self):
+        self.assertEqual(engine.country_records(), [])
+
+    def test_country_alpha2_map_is_empty(self):
+        self.assertEqual(engine.country_alpha2_map(), {})
+
+    def test_country_label_falls_back_to_the_canonical_name(self):
+        self.assertEqual(engine._country_label("Zzzland"), "Zzzland")
+
+    def test_alpha3_for_country_is_none(self):
+        self.assertIsNone(engine.alpha3_for_country("Germany"))
+
+
 class LoadIndexTests(SimpleTestCase):
     def test_missing_version_raises_location_data_error(self):
         with self.assertRaises(LocationDataError):
