@@ -29,36 +29,12 @@
 
 {% if query and page_obj and page_obj.object_list %}
 <p class="muted">
-    Showing results for &quot;{{ query }}&quot;.
+    Showing results for "{{ query }}".
     <a href="{% querystring q=None page=None %}">Clear search</a>
 </p>
 {% endif %}
 
-{% if page_obj and page_obj.object_list %}
-    {% for match in page_obj %}
-        {% include "web/_job_card.html" with match=match show_all=show_all query=query %}
-    {% endfor %}
-
-    {% if page_obj.has_other_pages %}
-    <nav class="muted">
-        {% if page_obj.has_previous %}<a href="{% querystring page=page_obj.previous_page_number %}">&larr; Prev</a>{% endif %}
-        <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
-        {% if page_obj.has_next %}<a href="{% querystring page=page_obj.next_page_number %}">Next &rarr;</a>{% endif %}
-    </nav>
-    {% endif %}
-{% elif query %}
-    <p class="muted">
-        No matches found for &quot;{{ query }}&quot;.
-        {% if not show_all %}Try <a href="{% querystring all=1 %}">showing all matches</a> with this search, or{% endif %}
-        <a href="{% querystring q=None page=None %}">clear the search</a>.
-    </p>
-{% else %}
-    <p class="muted">
-        {% if show_all %}
-            No scored jobs yet. <a href="{% url 'profile' %}">Set your profile criteria</a> and check back after the next ingestion cycle.
-        {% else %}
-            No recommendations above the threshold yet. Try <a href="?all=1">showing all matches</a>, or <a href="{% url 'profile' %}">refine your profile</a>.
-        {% endif %}
-    </p>
-{% endif %}
+<div id="recommendations-list">
+    {% include "web/_recommendations_list.html" %}
+</div>
 {% endblock %}
