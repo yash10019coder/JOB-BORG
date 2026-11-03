@@ -206,6 +206,23 @@ class AcceptTests(_Base):
         self.assertEqual(entry["provenance"]["origin"], "answer_candidate")
         self.assertIn(NOTICE_NEW, unconfirmed_fields(self.fresh(draft).answers))
 
+    def test_a_candidate_stored_at_a_higher_tier_than_its_wording_stays_held(self):
+        """The reworded question reads as factual, but the saved answer was
+        stored at a legal tier (``min_tier``); accepting it must still wait for
+        the per-field confirmation, not set ``user_confirmed``."""
+        write_answer(self.profile, HEARD_OLD, "LinkedIn", "user", min_tier=Tier.T0_LEGAL)
+        draft = self.draft(self.job_in(), (HEARD_NEW, TEXT, ()))
+        self.assertEqual(classify_tier(HEARD_NEW), Tier.T2_FACTUAL)
+        shown = draft.answers[HEARD_NEW]["candidates"][0]
+        self.assertEqual(shown["tier"], Tier.T0_LEGAL)
+        self.accept(draft, HEARD_NEW, shown["question_key"])
+        entry = self.fresh(draft).answers[HEARD_NEW]
+        self.assertEqual(entry["value"], "LinkedIn")
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertFalse(entry["user_confirmed"])
+        self.assertEqual(entry["tier"], Tier.T0_LEGAL)
+        self.assertIn(HEARD_NEW, unconfirmed_fields(self.fresh(draft).answers))
+
     def test_a_held_candidate_cannot_be_sent_until_confirmed(self):
         write_answer(self.profile, NOTICE_OLD, "4 weeks", "user")
         draft = self.draft(self.job_in(), (NOTICE_NEW, TEXT, ()))

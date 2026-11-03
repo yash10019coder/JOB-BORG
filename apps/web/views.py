@@ -22,7 +22,7 @@ from django.views.decorators.http import require_POST
 from apps.accounts.models import EmailInboxCredential, Profile
 from apps.accounts.services.panel_cache import invalidate_questions_panel
 from apps.accounts.services.question_candidates import find_candidates
-from apps.accounts.tiering import Tier, classify_tier
+from apps.accounts.tiering import Tier, classify_tier, higher_tier
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
@@ -537,13 +537,23 @@ def auto_apply_queue(request):
     return render(request, "web/auto_apply_queue.html", ctx)
 
 
+def _effective_tier(label, candidate_tier):
+    """Riskier of the question's own tier and the tier stored with the
+    candidate's answer. ``write_answer`` can persist a higher ``min_tier`` than
+    the wording alone implies, so the label alone under-holds. An unrecognised
+    stored tier fails closed to legal."""
+    own = classify_tier(label)
+    known = (Tier.T0_LEGAL, Tier.T1_COMMERCIAL, Tier.T2_FACTUAL)
+    stored = candidate_tier if candidate_tier in known else Tier.T0_LEGAL
+    return higher_tier(own, stored)
+
+
 def _display_candidates(label, entry):
     """Candidates for the review row: what to show and whether it can be taken.
 
     ``held`` says taking one still leaves the answer waiting for the user's
     confirmation (any legal or commercial question).
     """
-    held = classify_tier(label) in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL)
     shown = []
     for candidate in entry.get("candidates") or []:
         if not isinstance(candidate, dict):
@@ -554,7 +564,9 @@ def _display_candidates(label, entry):
             "value": candidate.get("value"),
             "source": candidate.get("source", ""),
             "can_accept": candidate.get("mapped_value") is not None,
-            "held": held,
+            "held": _effective_tier(label, candidate.get("tier")) in (
+                Tier.T0_LEGAL, Tier.T1_COMMERCIAL
+            ),
         })
     return shown
 
@@ -660,7 +672,8 @@ def edit_auto_apply_draft(request, pk):
             answers[label]["candidate_accepted"] = True
             answers[label]["candidate_question_key"] = accepted.question_key
             answers[label].pop("user_edited", None)
-            if classify_tier(label) in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL):
+            effective_tier = _effective_tier(label, accepted.tier)
+            if effective_tier in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL):
                 answers[label]["needs_confirmation"] = True
                 answers[label]["provenance"] = {
                     "origin": "answer_candidate",
@@ -669,7 +682,7 @@ def edit_auto_apply_draft(request, pk):
                     "confidence": accepted.score,
                     "detail": {"question_key": accepted.question_key},
                 }
-                answers[label]["tier"] = classify_tier(label)
+                answers[label]["tier"] = effective_tier
         elif cleaned != answers[label].get("value"):
             # The user typed or changed this value (as opposed to re-posting
             # what drafting put there): the only reliable sign that an answer
