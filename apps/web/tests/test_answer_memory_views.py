@@ -479,7 +479,7 @@ class LearningTriggerTests(_MemoryBase):
         with mock.patch("apps.web.views.learn_for_profile_task") as task, \
                 mock.patch("apps.web.views.submit_auto_apply_draft") as submit:
             task.delay.side_effect = ConnectionError("broker down")
-            with self.assertLogs(level="ERROR"), self.captureOnCommitCallbacks(execute=True):
+            with self.assertLogs("django.test", level="ERROR"), self.captureOnCommitCallbacks(execute=True):
                 self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
         submit.delay.assert_called_once_with(draft.id)
 
