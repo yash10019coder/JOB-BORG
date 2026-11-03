@@ -5,6 +5,7 @@ is a OneToOne extension holding everything the matching fan-out reads.
 """
 import os
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -20,6 +21,21 @@ def resume_upload_path(instance, filename):
     regardless of which storage backend (local/S3) is active."""
     extension = os.path.splitext(filename)[1].lower()
     return f"resumes/{instance.user_id}/{uuid.uuid4().hex}{extension}"
+
+
+def import_upload_path(instance, filename):
+    """Import uploads are deliberately not under ``resumes/``: an import source
+    (a resume, a LinkedIn export) is deleted as soon as it is read and must never
+    be mistaken for, or replace, the user's saved resume. The user's filename is
+    discarded (rule D7)."""
+    extension = os.path.splitext(filename)[1].lower()
+    return f"imports/{instance.profile.user_id}/{uuid.uuid4().hex}{extension}"
+
+
+def default_import_expiry():
+    return timezone.now() + timedelta(
+        hours=getattr(settings, "PROFILE_IMPORT_TTL_HOURS", 24)
+    )
 
 
 def validate_resume_file(file):
@@ -70,35 +86,35 @@ def validate_resume_file(file):
         raise ValidationError(f"Unsupported resume content type '{content_type}'.")
 
 
-# Profile.VisaStatus value -> (work_authorization option key, sponsorship option
-# key), as consumed by `Profile.authorization_for_country` and
-# `drafting.py`. The keys match `apps.web.forms.WORK_AUTH_CHOICES` /
-# `SPONSORSHIP_CHOICES`, and every one is re-validated against the live
-# Greenhouse form's actual options before it is used for a draft.
-#
-# An empty sponsorship key ("") means *deliberately unknown*, and is the
-# point of this table: a US visa status tells us the applicant is authorized
-# in the US but says nothing reliable about whether they will require
-# sponsorship (someone extending from F-1 onto a new H-1B did; a green card
-# holder did not). Inferring one from the other would be a guess, and
-# `drafting.py` leaves such a field blank + needs_review instead -- the same
-# "a confidently wrong resolution is worse than an unresolved one" rule
-# `apps.locations.engine` follows.
-_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[str, str]] = {
-    "citizen": ("yes_authorized", "no"),
-    "permanent_resident": ("yes_green_card", "no"),
-    "work_permit": ("yes_authorized", "no"),
-    "requires_sponsorship": ("no_need_sponsorship", "other"),
-    # Not authorized means sponsorship *would* be needed, so the sponsorship
-    # answer is left unresolved for review rather than reported as "no".
-    "not_authorized": ("no_need_sponsorship", ""),
+# Profile.VisaStatus value -> (authorized, needs_sponsorship), as consumed by
+# `Profile.authorization_for_country`. Each element is True / False, or None
+# meaning *deliberately unknown* -- which is the point of this table: a US
+# visa status tells us the applicant is authorized in the US but says nothing
+# reliable about whether they will *require sponsorship* (someone extending
+# from F-1 onto a new H-1B did; a green card holder did not). Inferring one
+# from the other would be a guess, so the answer stays unknown and the draft
+# leaves the field blank + needs_review -- the same "a confidently wrong
+# resolution is worse than an unresolved one" rule `apps.locations.engine`
+# follows. Mapping these onto a live form's option labels is the job of
+# `apps.accounts.question_semantics`, not this table.
+_AUTHORIZATION_BY_VISA_STATUS: dict[str, tuple[bool | None, bool | None]] = {
+    "citizen": (True, False),
+    "permanent_resident": (True, False),
+    "work_permit": (True, False),
+    # Needs sponsorship, but authorization is unknown: H-1B transferees also
+    # choose this, and they are authorized to work for their current employer.
+    "requires_sponsorship": (None, True),
+    # Not authorized says nothing about whether sponsorship would be needed.
+    "not_authorized": (False, None),
+    # Both are known: not authorized now, and sponsorship would be needed.
+    "not_authorized_needs_sponsorship": (False, True),
     # US/AU statuses: authorized yes, sponsorship unknown -- see above.
-    "h1b": ("yes_h1b", ""),
-    "opt": ("yes_opt", ""),
-    "o1": ("yes_o1", ""),
-    "tn": ("yes_tn", ""),
-    "e3": ("yes_e3", ""),
-    "other": ("other", ""),
+    "h1b": (True, None),
+    "opt": (True, None),
+    "o1": (True, None),
+    "tn": (True, None),
+    "e3": (True, None),
+    "other": (None, None),
 }
 
 
@@ -128,6 +144,16 @@ class Profile(models.Model):
     portfolio_url = models.URLField(max_length=255, blank=True, default="")
     current_employer = models.CharField(max_length=255, blank=True, default="")
 
+    # Where the applicant lives and works, for "Country" / "City" / "Address" /
+    # "Time zone" questions. These are form-filling facts, not matching
+    # criteria (`target_locations` is that), so matching never reads them.
+    # `location_country` is ISO 3166-1 alpha-3, like every other country on
+    # this model; `working_timezone` is an IANA name ("Asia/Kolkata").
+    location_city = models.CharField(max_length=255, blank=True, default="")
+    location_country = models.CharField(max_length=3, blank=True, default="")
+    mailing_address = models.TextField(blank=True, default="")
+    working_timezone = models.CharField(max_length=64, blank=True, default="")
+
     # Resume -- standard-field source for auto-apply drafting (see
     # docs/plans/2026-08-02-001-feat-auto-apply-greenhouse-slice-plan.md U1).
     # `resume_text` is populated asynchronously by the `parse_resume` Celery
@@ -154,7 +180,7 @@ class Profile(models.Model):
     target_locations = models.JSONField(default=list, blank=True)
     # Structured mirror of target_locations, one entry per raw string, each
     # shaped {"raw": str, "city": str|None, "region": str|None,
-    # "country": str|None, "resolved": bool} — computed by ProfileForm via
+    # "country": str|None, "resolved": bool} — computed by ProfileSearchForm via
     # apps.locations.engine.normalize_location whenever target_locations
     # changes. target_locations itself stays untouched (raw, user-typed) so
     # the CSV form field round-trips exactly what the user entered.
@@ -179,7 +205,7 @@ class Profile(models.Model):
     #   visa_status_by_country: {"IND": "citizen", "DEU": "requires_sponsorship"}
     #   citizenship_countries:  ["IND"]  (dual citizens list several)
     #
-    # Keys are ISO 3166-1 alpha-3 (see apps.web.regions for why alpha-3 and
+    # Keys are ISO 3166-1 alpha-3 (see apps.accounts.regions for why alpha-3 and
     # not alpha-2/the engine's canonical name).
     class VisaStatus(models.TextChoices):
         # Country-agnostic, and the only statuses a non-US applicant should
@@ -187,8 +213,17 @@ class Profile(models.Model):
         CITIZEN = "citizen", "Citizen"
         PERMANENT_RESIDENT = "permanent_resident", "Permanent resident / Green card"
         WORK_PERMIT = "work_permit", "Work permit held (no sponsorship needed)"
-        REQUIRES_SPONSORSHIP = "requires_sponsorship", "Will require visa sponsorship"
-        NOT_AUTHORIZED = "not_authorized", "Not authorized to work"
+        REQUIRES_SPONSORSHIP = (
+            "requires_sponsorship",
+            "Will require visa sponsorship (current authorization not stated)",
+        )
+        NOT_AUTHORIZED = "not_authorized", "Not authorized to work (sponsorship not stated)"
+        # The common case for someone outside the country applying to its jobs:
+        # not authorized there today, and would need the employer to sponsor.
+        NOT_AUTHORIZED_NEEDS_SPONSORSHIP = (
+            "not_authorized_needs_sponsorship",
+            "Not authorized to work yet, will require sponsorship",
+        )
         # US-specific, with the country named in the label so the value is
         # never ambiguous about where it applies.
         H1B = "h1b", "H-1B (US)"
@@ -226,6 +261,29 @@ class Profile(models.Model):
         default="USD",
     )
 
+    # Who wrote each covered field, so an importer or the learner can never
+    # silently overwrite what the user typed. Shape:
+    #   {"phone": {"source": "user", "locked": false,
+    #              "updated_at": "<iso8601>", "detail": ""}, ...}
+    # Per-key entries are used for the dict/list authorization fields, e.g.
+    # "visa_status_by_country.USA". A missing entry on a non-empty value means
+    # "user" (legacy data). Only `apps.accounts.services.profile_fields`
+    # should write this -- see FR7.10 in
+    # docs/plans/2026-10-03-2300-consolidated-requirements.md.
+    field_provenance = models.JSONField(default=dict, blank=True)
+
+    # Phase 3: when False the consensus learner writes nothing and learned
+    # answers are not used to prefill. Not a matching input, so it must be saved
+    # with ``update_fields`` (see apps.matching.signals).
+    learning_enabled = models.BooleanField(default=True)
+
+    # Phase 4: opt-in to sending resume text to an LLM provider for import
+    # (FR9.10). Unchecked by default; the Celery task re-reads these right before
+    # any LLM call, and a bump of ``PROFILE_IMPORT_CONSENT_VERSION`` requires the
+    # user to consent again.
+    llm_import_consent_at = models.DateTimeField(null=True, blank=True)
+    llm_import_consent_version = models.CharField(max_length=16, blank=True, default="")
+
     remote_pref = models.CharField(
         max_length=16,
         choices=RemotePref.choices,
@@ -239,27 +297,21 @@ class Profile(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def authorization_for_country(self, country):
-        """``(work_authorization, sponsorship)`` option keys for `country`, or
-        ``None`` if this profile says nothing about it.
+        """``(authorized, needs_sponsorship)`` for `country`, or ``None`` if
+        this profile says nothing about it.
 
-        `country` may be given in any form :func:`apps.web.regions.region_for_country`
+        `country` may be given in any form :func:`apps.accounts.regions.region_for_country`
         accepts (alpha-3, alpha-2, or the locations engine's canonical name),
         because the caller usually has the last of those off a
-        ``Job.target_locations_normalized`` entry.
+        ``Job.location_country``.
 
-        Both returned values are option keys drawn from the auto-apply form
-        vocabularies (``WORK_AUTH_CHOICES`` / ``SPONSORSHIP_CHOICES``); either
-        may be ``""`` meaning *deliberately unknown*. That is the important
-        part of the contract: a US work visa tells us the applicant is
-        authorized in the US, but says nothing reliable about whether they
-        will *require sponsorship* (an H-1B holder renewing from F-1 did, a
-        green-card holder did not), so a per-country visa status alone must
-        not produce a sponsorship answer. ``drafting.py`` leaves such a field
-        blank and needs_review rather than guessing.
+        Each element is ``True``, ``False`` or ``None`` meaning *deliberately
+        unknown* (see ``_AUTHORIZATION_BY_VISA_STATUS``): a per-country visa
+        status alone must not produce a sponsorship answer.
 
-        Returns ``None`` -- not a blank pair -- when the profile has no entry
-        for the country at all, so callers can tell "nothing known" apart from
-        "known to require sponsorship".
+        Returns ``None`` -- not ``(None, None)`` -- when the profile has no
+        entry for the country at all, so callers can tell "nothing known"
+        apart from "known, but deliberately undecided".
         """
         from apps.locations.engine import alpha3_for_country
 
@@ -269,7 +321,7 @@ class Profile(models.Model):
         if alpha3 in set(self.citizenship_countries or []):
             # Citizenship is authoritative for its own country: no
             # sponsorship is ever needed at home.
-            return ("yes_authorized", "no")
+            return (True, False)
         status = (self.visa_status_by_country or {}).get(alpha3)
         if status is None:
             return None
@@ -441,3 +493,412 @@ class EmailInboxCredential(models.Model):
 
     def __str__(self):
         return f"EmailInboxCredential<{self.user.username}>"
+
+
+class AnswerBank(models.Model):
+    """One answer to one normalized application question, with provenance.
+
+    Typed Profile facts (visa/citizenship/salary) are consulted before this
+    table; see `apps.accounts.services.answer_resolver.resolve_answer`.
+    Precedence is user-locked > user-set > learned > imported: a lower
+    writer may never overwrite a higher one (it can only propose).
+    """
+
+    class Source(models.TextChoices):
+        USER = "user", "User"
+        LEARNED = "learned", "Learned"
+        IMPORTED = "imported", "Imported"
+
+    # Values mirror `apps.accounts.tiering.Tier`.
+    class RiskTier(models.TextChoices):
+        T0_LEGAL = "t0_legal", "T0 - legal attestation"
+        T1_COMMERCIAL = "t1_commercial", "T1 - commercial"
+        T2_FACTUAL = "t2_factual", "T2 - factual"
+
+    class Category(models.TextChoices):
+        EXPERIENCE = "experience", "Experience"
+        TECHNOLOGIES = "technologies", "Technologies"
+        RELOCATION = "relocation", "Relocation"
+        PROJECTS = "projects", "Projects"
+        EDUCATION = "education", "Education"
+        AVAILABILITY = "availability", "Availability"
+        COMPLIANCE = "compliance", "Compliance"
+        OTHER = "other", "Other"
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_bank",
+    )
+    question_key = models.CharField(max_length=255)
+    # Region key (`apps.accounts.regions.REGION_KEYS`) this answer is limited
+    # to, or "" for "everywhere". Location-sensitive answers (relocation,
+    # on-site, a named country) are stored per region so one saved for a US
+    # job is never reused for an India job.
+    scope_region = models.CharField(max_length=8, blank=True, default="")
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    category = models.CharField(
+        max_length=32, choices=Category.choices, default=Category.OTHER
+    )
+    risk_tier = models.CharField(max_length=16, choices=RiskTier.choices)
+    source = models.CharField(max_length=16, choices=Source.choices)
+    # e.g. {"origin": "resume_llm"} or {"draft_ids": [1, 2, 3]}.
+    source_detail = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    is_locked = models.BooleanField(default=False)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "question_key", "scope_region"],
+                name="uniq_answerbank_profile_question_key_scope",
+            ),
+            # A lock is a user decision; automation must never hold one.
+            models.CheckConstraint(
+                condition=~models.Q(
+                    source__in=["learned", "imported"], is_locked=True
+                ),
+                name="chk_answerbank_locked_only_user",
+            ),
+        ]
+
+    def __str__(self):
+        scope = f"@{self.scope_region}" if self.scope_region else ""
+        return f"AnswerBank<{self.profile_id}:{self.question_key}{scope}:{self.source}>"
+
+
+class AnswerBankHistory(models.Model):
+    """Append-only record of a value an `AnswerBank` row used to hold.
+
+    Keyed by (profile, question_key) rather than a FK to the row so history
+    survives the row being deleted or replaced.
+    """
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_bank_history",
+    )
+    question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
+    value = models.JSONField()
+    risk_tier = models.CharField(max_length=16)
+    source = models.CharField(max_length=16)
+    source_detail = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    was_locked = models.BooleanField(default=False)
+    superseded_by_source = models.CharField(max_length=16, blank=True, default="")
+    superseded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["profile", "question_key"], name="abh_profile_question_idx"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValueError("AnswerBankHistory is append-only; it cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"AnswerBankHistory<{self.profile_id}:{self.question_key}>"
+
+
+class AnswerObservation(models.Model):
+    """What the user actually submitted for one question on one application.
+
+    Written when a draft is sent, from the exact values in
+    ``AutoApplyDraft.submitted_answers_snapshot``. It is the ground truth the
+    learning loop counts over ("same answer across distinct jobs") and the
+    (user, job, question) unit shadow-mode precision is measured on.
+
+    ``job_id`` / ``draft_id`` are plain integers, not foreign keys: this app
+    sits below ``jobs`` and ``auto_apply`` and must not depend on them, and an
+    observation should outlive a discarded draft. Append-only.
+    """
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="answer_observations",
+    )
+    question_key = models.CharField(max_length=255)
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    tier = models.CharField(max_length=16)
+    field_type = models.CharField(max_length=32, blank=True, default="")
+    # Where the submitted value came from (provenance of the draft entry).
+    provenance_source = models.CharField(max_length=16, blank=True, default="")
+    provenance_origin = models.CharField(max_length=64, blank=True, default="")
+    # The user saved the review form with this answer (any save sets it; it is
+    # NOT evidence the user wrote the value -- see ``user_edited``).
+    user_confirmed = models.BooleanField(default=False)
+    # The user typed or changed this value (the signal the learner counts).
+    user_edited = models.BooleanField(default=False)
+    # The remember box was offered pre-ticked and the user unticked it.
+    remember_declined = models.BooleanField(default=False)
+    # The learned answer that was prefilled for this question, if any: lets
+    # shadow metrics compare "what the learner would have filled" with ``value``.
+    learned_value = models.JSONField(null=True, blank=True)
+    # Reworded-question candidate (Phase 4b): the earlier question's key shown
+    # beside this blank field, whether the submitted value equalled its answer
+    # (None when no candidate was shown), and whether the value was taken with
+    # the one-click accept rather than typed. The candidate's own value is not
+    # copied here: it already lives in the AnswerBank row ``candidate_question_key``.
+    candidate_question_key = models.CharField(max_length=255, blank=True, default="")
+    candidate_equal = models.BooleanField(null=True, blank=True)
+    candidate_accepted = models.BooleanField(default=False)
+    job_id = models.BigIntegerField(null=True, blank=True)
+    draft_id = models.BigIntegerField(null=True, blank=True)
+    employer_name = models.CharField(max_length=255, blank=True, default="")
+    job_region = models.CharField(max_length=8, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["profile", "question_key"], name="aobs_profile_question_idx"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValueError("AnswerObservation is append-only; it cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"AnswerObservation<{self.profile_id}:{self.question_key}>"
+
+
+class ProfileSuggestion(models.Model):
+    """A learned answer offered to the user for promotion to their own.
+
+    Written by the consensus learner for legal/commercial (T0/T1) answers. A
+    ``rejected`` row also records "do not propose this value again" (keyed by
+    ``value_fingerprint``), including when the user forgets a learned answer.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+
+    profile = models.ForeignKey(
+        Profile,
+        on_delete=models.CASCADE,
+        related_name="suggestions",
+    )
+    question_key = models.CharField(max_length=255)
+    scope_region = models.CharField(max_length=8, blank=True, default="")
+    question_text = models.TextField(blank=True, default="")
+    value = models.JSONField()
+    value_fingerprint = models.CharField(max_length=40)
+    tier = models.CharField(max_length=16)
+    evidence = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    learner_version = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "question_key", "scope_region", "value_fingerprint"],
+                name="uniq_profilesuggestion_profile_key_scope_value",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "status"], name="psugg_profile_status_idx"),
+        ]
+
+    def __str__(self):
+        return f"ProfileSuggestion<{self.profile_id}:{self.question_key}:{self.status}>"
+
+
+class ImportJob(models.Model):
+    """One run of the profile importer: a resume / LinkedIn PDF, or GitHub.
+
+    The job holds *proposals*, never the resume text: ``payload`` carries the
+    proposed values with short evidence snippets, lives for ``expires_at`` (24 h
+    by default) and is cleared on apply, discard or expiry. The uploaded file is
+    deleted as soon as it has been read. Looked up by ``public_id`` (never the
+    Celery task id) and always through the owning profile.
+    """
+
+    class Kind(models.TextChoices):
+        DOCUMENT = "document", "Document"
+        GITHUB = "github", "GitHub"
+
+    class SourceKind(models.TextChoices):
+        RESUME = "resume", "Resume upload"
+        LINKEDIN_PDF = "linkedin_pdf", "LinkedIn PDF"
+        CURRENT_RESUME = "current_resume", "Saved resume"
+        GITHUB = "github", "GitHub"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        READY = "ready", "Ready for review"
+        APPLIED = "applied", "Applied"
+        DISCARDED = "discarded", "Discarded"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    class Extractor(models.TextChoices):
+        RULE = "rule", "Rules"
+        LLM = "llm", "LLM"
+
+    IN_FLIGHT = (Status.PENDING, Status.RUNNING)
+
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="import_jobs"
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    source_kind = models.CharField(max_length=16, choices=SourceKind.choices)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    extractor = models.CharField(
+        max_length=8, choices=Extractor.choices, default=Extractor.RULE
+    )
+    # A short machine code (``pdf_encrypted``, ``no_text_found`` ...), never
+    # exception text, which could carry resume content.
+    error_code = models.CharField(max_length=40, blank=True, default="")
+    source_file = models.FileField(upload_to=import_upload_path, null=True, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(default=default_import_expiry)
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # At most one pending/running job per profile: the database-level
+            # guard against concurrent imports.
+            models.UniqueConstraint(
+                fields=["profile"],
+                condition=models.Q(status__in=["pending", "running"]),
+                name="uniq_importjob_one_inflight_per_profile",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "expires_at"], name="importjob_status_exp_idx"),
+        ]
+
+    def __str__(self):
+        return f"ImportJob<{self.public_id}:{self.status}>"
+
+
+class ResumeEntry(models.Model):
+    """One reviewed experience or project from an import, with its own skills.
+
+    Persisted (unlike an import job's payload) so years per skill can be
+    computed and shown. Dates are month precision, stored as the first of the
+    month; ``precision`` records when only the year was known. ``source`` says
+    whether the user edited the entry on the review page. Re-importing never
+    deletes entries.
+    """
+
+    class Kind(models.TextChoices):
+        EXPERIENCE = "experience", "Experience"
+        PROJECT = "project", "Project"
+
+    class Source(models.TextChoices):
+        IMPORTED = "imported", "Imported"
+        USER = "user", "User"
+
+    class Precision(models.TextChoices):
+        MONTH = "month", "Month"
+        YEAR = "year", "Year"
+
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="resume_entries"
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    title = models.CharField(max_length=255)
+    organization = models.CharField(max_length=255, blank=True, default="")
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    is_current = models.BooleanField(default=False)
+    precision = models.CharField(
+        max_length=8, choices=Precision.choices, default=Precision.MONTH
+    )
+    # Canonical skill names, grounded in the entry's own text when imported.
+    skills = models.JSONField(default=list, blank=True)
+    # A project's short description and its https link (GitHub import); shown
+    # as plain text, never as markup.
+    description = models.TextField(blank=True, default="")
+    url = models.URLField(max_length=255, blank=True, default="")
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.IMPORTED
+    )
+    # casefold(organization|title|YYYY-MM of start): identifies "the same entry"
+    # across re-imports so they update instead of duplicating.
+    natural_key = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_current", "-start_date", "title"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "kind", "natural_key"],
+                name="uniq_resumeentry_profile_kind_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["profile", "kind"], name="resumeentry_profile_kind_idx"),
+        ]
+
+    def __str__(self):
+        return f"ResumeEntry<{self.profile_id}:{self.kind}:{self.title}>"
+
+
+class ProfileSkill(models.Model):
+    """A skill on the profile as a whole, with the evidence that supports it.
+
+    Unlike the skills listed on a ``ResumeEntry`` (which belong to one job or
+    project), this is the user's overall list. ``evidence`` describes where the
+    import saw the skill (repo count, first/last seen); it is shown to the user
+    and never added to job-based years. Re-importing merges or refreshes the
+    evidence and never deletes: removing a skill sets ``dismissed`` so the next
+    import shows it unticked instead of proposing it as new.
+    """
+
+    class Origin(models.TextChoices):
+        GITHUB = "github", "GitHub"
+
+    profile = models.ForeignKey(
+        Profile, on_delete=models.CASCADE, related_name="profile_skills"
+    )
+    name = models.CharField(max_length=40)
+    key = models.CharField(max_length=40)  # casefolded name
+    origin = models.CharField(max_length=16, choices=Origin.choices)
+    evidence = models.JSONField(default=dict, blank=True)
+    dismissed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "key"], name="uniq_profileskill_profile_key"
+            ),
+        ]
+
+    def __str__(self):
+        return f"ProfileSkill<{self.profile_id}:{self.name}>"

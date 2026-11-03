@@ -1,0 +1,55 @@
+DR. MARCUS JOHNSON
+marcus.johnson@email.com | +44 20 7946 0123
+LinkedIn: https://linkedin.com/in/marcusjohnson
+GitHub: https://github.com/marcusjohnson
+Location: London, UK
+
+SUMMARY
+Machine Learning Engineer / Data Scientist with 6 years experience in NLP, recommendation systems, and MLOps. PhD in Computer Science. Published 8 papers at top venues (NeurIPS, ICML, ACL). Built production ML systems serving 100M+ predictions/day.
+
+SKILLS
+Languages: Python, SQL, R, Java, C++
+ML/DL: PyTorch, TensorFlow, Hugging Face, scikit-learn, XGBoost, LightGBM
+NLP: Transformers, BERT, GPT, spaCy, NLTK, sentence-transformers
+MLOps: MLflow, Kubeflow, Airflow, Docker, Kubernetes, Prometheus, Grafana
+Data: Spark, Kafka, Redis, PostgreSQL, ClickHouse, Delta Lake
+Cloud: AWS (SageMaker, EMR, Lambda), GCP (Vertex AI, BigQuery)
+
+EXPERIENCE
+DeepMind — Research Engineer (Sep 2021 – Present)
+London, UK
+• Developed large language model fine-tuning pipeline (7B params), 15% improvement on benchmarks
+• Built distributed training infrastructure on 128 GPUs, 3x throughput improvement
+• Designed evaluation framework for RLHF, adopted across 5 research teams
+• Published 3 papers at NeurIPS/ICML on efficient transformer training
+
+Spotify — Senior ML Engineer (Jul 2018 – Aug 2021)
+Stockholm, Sweden (Remote from London)
+• Built real-time recommendation system serving 100M+ predictions/day, 12% CTR improvement
+• Designed feature store (Feast) for 500+ features across 20 teams
+• Implemented A/B testing platform for ML models, 200+ experiments/year
+• Migrated batch pipelines to streaming (Kafka + Flink), 90% latency reduction
+
+EDUCATION
+University of Oxford
+PhD Computer Science (Natural Language Processing)
+2014 – 2018
+Thesis: "Efficient Transformer Architectures for Low-Resource Languages"
+
+Imperial College London
+MSc Machine Learning, Distinction
+2013 – 2014
+
+PROJECTS
+LLM Fine-tuning Framework (Python, PyTorch, DeepSpeed)
+https://github.com/marcusjohnson/llm-finetune
+• LoRA/QLoRA implementation with multi-GPU support
+
+Feature Store for RecSys (Python, Feast, Redis)
+https://github.com/marcusjohnson/recsys-featurestore
+• Low-latency feature serving for recommendation models
+
+ACHIEVEMENTS
+• 8 papers at NeurIPS, ICML, ACL (3 first-author)
+• Google PhD Fellowship 2016
+• Kaggle Grandmaster (Top 50 globally)

@@ -243,9 +243,9 @@ class AuthProfileTests(TestCase):
             )
         self.assertRedirects(resp, reverse("recommendations"), fetch_redirect_response=False)
         mock_set_resume.assert_called_once()
+        # Contact details are Answers-tab fields now: posting them here changes nothing.
         profile = User.objects.get(username="grace").profile
-        self.assertEqual(profile.phone, "+1 555-0100")
-        self.assertEqual(profile.linkedin_url, "https://linkedin.com/in/grace")
+        self.assertEqual((profile.phone, profile.linkedin_url), ("", ""))
 
     def test_user_cannot_edit_another_users_profile(self):
         alice = User.objects.create_user(username="alice", password="pw")

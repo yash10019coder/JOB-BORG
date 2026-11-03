@@ -24,6 +24,25 @@ from .prefilter import passes_prefilter
 from .scoring import score_job
 
 
+# Profile columns that can change who matches what. A save that touches only
+# other columns (contact details, authorization, answers, provenance) cannot
+# change any match, so it must not trigger a rematch. Keep in sync with
+# `profile_snapshot` (a test enforces the subset) and `is_active`.
+MATCHING_PROFILE_FIELDS = frozenset(
+    {
+        "target_titles",
+        "target_tags",
+        "target_locations",
+        "target_locations_normalized",
+        "target_locations_alias_version",
+        "excluded_employers",
+        "min_salary",
+        "remote_pref",
+        "is_active",
+    }
+)
+
+
 def profile_snapshot(profile):
     return {
         "target_titles": profile.target_titles,

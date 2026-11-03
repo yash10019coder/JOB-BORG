@@ -15,9 +15,11 @@ structure) independent of content type.
 """
 import logging
 import os
+from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -128,3 +130,108 @@ def parse_resume(profile_id):
 
     profile.resume_text = extract_resume_text(profile.resume)
     profile.save(update_fields=["resume_text", "updated_at"])
+
+
+@shared_task(
+    name="apps.accounts.run_document_import",
+    time_limit=settings.PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS,
+    soft_time_limit=settings.PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS,
+)
+def run_document_import(public_id):
+    """Extract import proposals from one uploaded document (or the saved resume).
+
+    Takes the job's public id (never a profile or file path). Idempotent: a job
+    that is no longer pending is left alone. Writes only to the ``ImportJob``;
+    the user's review decides what reaches the profile.
+    """
+    from .importing.service import run_job
+
+    job = run_job(public_id)
+    return job.status if job is not None else None
+
+
+@shared_task(
+    name="apps.accounts.run_github_import",
+    time_limit=settings.PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS,
+    soft_time_limit=settings.PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS,
+)
+def run_github_import(public_id, username):
+    """Fetch a public GitHub profile and keep the proposals for review.
+
+    The username was validated before this job existed and is validated again
+    by the client's URL building; the job id is the only handle on the job.
+    """
+    from .importing.service import run_github_job
+
+    job = run_github_job(public_id, username)
+    return job.status if job is not None else None
+
+
+@shared_task(name="apps.accounts.sweep_import_jobs")
+def sweep_import_jobs():
+    """Expire unreviewed proposals, fail stuck jobs, delete old rows."""
+    from .importing.service import sweep
+
+    return sweep()
+
+
+@shared_task(name="apps.accounts.learn_for_profile")
+def learn_for_profile_task(profile_id):
+    """Run the consensus learner for one profile (idempotent).
+
+    Enqueued from the send view once the application's observations are
+    committed, and reused by the nightly sweep.
+    """
+    from .models import Profile
+    from .services.learning import learn_for_profile
+
+    try:
+        profile = Profile.objects.get(pk=profile_id)
+    except Profile.DoesNotExist:
+        logger.warning("learn_for_profile: profile %s no longer exists", profile_id)
+        return None
+    report = learn_for_profile(profile)
+    return {
+        "written": len(report.written),
+        "withdrawn": len(report.withdrawn),
+        "suggested": len(report.suggested),
+        "expired": report.expired,
+    }
+
+
+@shared_task(name="apps.accounts.sweep_learning")
+def sweep_learning():
+    """Nightly safety net: learn for profiles with recent evidence, and expire
+    stale suggestions. A failing profile is logged and never aborts the batch."""
+    from .models import AnswerObservation, ProfileSuggestion
+    from .services.learning import learn_for_profile, suggestion_ttl
+
+    now = timezone.now()
+    recent = AnswerObservation.objects.filter(
+        user_edited=True, created_at__gte=now - timedelta(hours=25)
+    ).values_list("profile_id", flat=True)
+    stale = ProfileSuggestion.objects.filter(
+        status=ProfileSuggestion.Status.PENDING, created_at__lt=now - suggestion_ttl()
+    ).values_list("profile_id", flat=True)
+    all_ids = sorted(set(recent) | set(stale))
+    profile_ids = all_ids[: settings.LEARNING_SWEEP_BATCH_SIZE]
+    # The cap bounds this task's own work, but profiles past it must not be
+    # silently skipped every night (the lowest ids would always win): hand each
+    # to its own idempotent task instead.
+    for overflow_id in all_ids[settings.LEARNING_SWEEP_BATCH_SIZE :]:
+        try:
+            learn_for_profile_task.delay(overflow_id)
+        except Exception:  # noqa: BLE001 -- a broker hiccup must not abort the batch
+            logger.exception("sweep_learning: could not enqueue profile %s", overflow_id)
+
+    from .models import Profile
+
+    done = failed = 0
+    for profile in Profile.objects.filter(pk__in=profile_ids):
+        try:
+            learn_for_profile(profile)
+            done += 1
+        except Exception:  # noqa: BLE001 -- one profile must not stop the batch
+            logger.exception("sweep_learning: profile %s failed", profile.pk)
+            failed += 1
+    return {"profiles": done, "failed": failed, "deferred": max(len(all_ids) - len(profile_ids), 0)}

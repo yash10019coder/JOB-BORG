@@ -22,13 +22,16 @@ import re
 from django.conf import settings
 from django.db import IntegrityError, transaction
 
+from apps.accounts.services.answer_resolver import load_bank_rows
+from apps.accounts.services.panel_cache import invalidate_questions_panel
+from apps.accounts.services.question_candidates import find_candidates
 from apps.auto_apply.greenhouse_form.client import GreenhouseFormClient
 from apps.auto_apply.greenhouse_form.exceptions import (
     GreenhouseFormError,
     GreenhouseFormSchemaMismatch,
 )
 from apps.auto_apply.greenhouse_form.field_mapping import (
-    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT, FormField, schema_to_dict,
+    CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXT, TEXTAREA, FormField, schema_to_dict,
 )
 from apps.auto_apply.llm import base as llm_base
 from apps.auto_apply.llm.base import Question
@@ -36,13 +39,7 @@ from apps.auto_apply.models import AutoApplyDraft
 from apps.jobs.models import JobSource
 
 from . import answer_resolution
-from apps.web.salary_bands import (
-    DEFAULT_SALARY_BANDS,
-    SALARY_BANDS_BY_REGION,
-    _get_salary_band_label,
-    validate_salary_by_region,
-)
-from apps.web.regions import region_for_country
+from .confirmation import is_blank_answer_value
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +262,7 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
         for f in custom_fields
     ]
     resolved = answer_resolution.resolve_field_answers(
-        user, questions, resume_text, profile, llm_client
+        user, questions, resume_text, profile, llm_client, job=job
     )
     fields_by_label = {f.label: f for f in custom_fields}
 
@@ -325,46 +322,25 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
             "options": form_field.options,
                 "options_complete": form_field.options_complete,
         }
+        if resolved_answer.provenance is not None:
+            # Only AnswerBank-sourced answers carry these, so drafts built
+            # from the legacy/LLM paths keep their exact prior shape.
+            entry = answers_payload[form_field.label]
+            entry["needs_confirmation"] = resolved_answer.needs_confirmation
+            entry["provenance"] = resolved_answer.provenance
+            entry["tier"] = resolved_answer.tier
+            provenance = resolved_answer.provenance
+            if (
+                provenance.get("origin") == "answer_bank"
+                and provenance.get("source") == "learned"
+                and not invalid_option
+            ):
+                # What the learner prefilled, kept even if the user changes it:
+                # the shadow metrics compare it with what was submitted.
+                entry["learned_value"] = value
 
     _carry_forward_confirmed_answers(user, job, answers_payload)
-
-    # -- Salary region resolution from Profile.salary_by_region ---------------
-    if profile and profile.salary_by_region:
-        # Validate the stored salary_by_region first
-        cleaned_salary_by_region = validate_salary_by_region(profile.salary_by_region)
-
-        # Get job's country from normalized location
-        job_country = ""
-        if job.target_locations_normalized:
-            # target_locations_normalized is a list of {"raw": ..., "country": ...}
-            for loc in job.target_locations_normalized:
-                if loc.get("country"):
-                    job_country = loc["country"]
-                    break
-        job_region = region_for_country(job_country)
-
-        if job_region and job_region in cleaned_salary_by_region:
-            band_key = cleaned_salary_by_region[job_region]
-            label = _get_salary_band_label(job_region, band_key)
-
-            # Find the salary_expectation question in answers_payload and override
-            for q_label, entry in answers_payload.items():
-                if entry.get("category") == "salary_expectation":
-                    # Do not override user-confirmed answers
-                    if entry.get("user_confirmed"):
-                        continue
-                    # For option-bearing fields, validate the band key against form options
-                    field_options = entry.get("options") or []
-                    if field_options and label not in field_options:
-                        # Band key not in current form's options - keep existing answer with needs_review
-                        entry["needs_review"] = True
-                        entry["reason"] = "profile_derived_region_invalid_option"
-                        continue
-                    # Valid override
-                    entry["value"] = label
-                    entry["needs_review"] = False
-                    entry["reason"] = "profile_derived_region"
-                    break
+    _attach_candidates(profile, job, answers_payload)
 
     if unanswerable_required:
         # Only blank *standard* (Profile-derived) required fields land here
@@ -393,10 +369,57 @@ def draft_for(user, job, *, form_client=None, llm_client=None) -> AutoApplyDraft
     )
 
 
-def _is_blank(value) -> bool:
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
+def candidate_to_dict(candidate) -> dict:
+    """The JSON stored beside a blank entry (a candidate is never its value)."""
+    return {
+        "question_key": candidate.question_key,
+        "scope_region": candidate.scope_region,
+        "question_text": candidate.question_text,
+        "value": candidate.value,
+        "mapped_value": candidate.mapped_value,
+        "score": candidate.score,
+        "via": candidate.via,
+        "intent": candidate.intent,
+        "source": candidate.source,
+        "tier": candidate.tier,
+        "is_locked": candidate.is_locked,
+    }
+
+
+def _attach_candidates(profile, job, answers_payload) -> None:
+    """Show a reworded question's earlier answers beside a blank field.
+
+    Adds a ``candidates`` list to entries that are still blank and not
+    answered from typed settings or a saved answer. It never touches
+    ``value``, ``needs_review``, ``needs_confirmation`` or ``provenance`` (the
+    invariant in the plan's R2), and any failure just means no candidates: the
+    draft is built exactly as it would be without them. Candidate text and
+    values are never logged.
+    """
+    if profile is None:
+        return
+    try:
+        bank_rows = load_bank_rows(profile)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("candidates: could not load saved answers")
+        return
+    for label, entry in answers_payload.items():
+        if (
+            entry.get("category") == "standard"
+            or entry.get("field_type") in (FILE, TEXTAREA)
+            or entry.get("provenance") is not None
+            or not is_blank_answer_value(entry.get("value"))
+        ):
+            continue
+        try:
+            found = find_candidates(
+                profile, label, job, options=entry.get("options") or (), bank_rows=bank_rows
+            )
+        except Exception:
+            logger.warning("candidates: matching failed for one question; continuing without")
+            continue
+        if found:
+            entry["candidates"] = [candidate_to_dict(c) for c in found]
 
 
 def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
@@ -439,7 +462,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         return
 
     for label, entry in answers_payload.items():
-        if not entry.get("needs_review") or not _is_blank(entry.get("value")):
+        if not entry.get("needs_review") or not is_blank_answer_value(entry.get("value")):
             continue
         prior_entry = (previous.answers or {}).get(label)
         if not isinstance(prior_entry, dict) or not prior_entry.get("user_confirmed"):
@@ -447,7 +470,7 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         if prior_entry.get("field_type") != entry.get("field_type"):
             continue
         prior_value = prior_entry.get("value")
-        if _is_blank(prior_value):
+        if is_blank_answer_value(prior_value):
             continue
         # Re-validate against the *current* schema's options before
         # reusing a confirmed value. SINGLE_SELECT/MULTI_SELECT/
@@ -467,6 +490,12 @@ def _carry_forward_confirmed_answers(user, job, answers_payload) -> None:
         entry["value"] = prior_value
         entry["needs_review"] = False
         entry["reason"] = "carried_forward_from_previous_draft"
+        # The user typed this on the earlier attempt: keep saying so, or the
+        # consensus learner would discard exactly the self-ID answers a retry
+        # carries forward (see apps.accounts.services.learning).
+        for flag in ("user_edited", "remember_declined"):
+            if prior_entry.get(flag):
+                entry[flag] = True
 
 
 def _persist_draft(
@@ -487,7 +516,7 @@ def _persist_draft(
     """
     try:
         with transaction.atomic():
-            return AutoApplyDraft.objects.create(
+            draft = AutoApplyDraft.objects.create(
                 user=user,
                 job=job,
                 status=status,
@@ -496,6 +525,9 @@ def _persist_draft(
                 reason_code=reason_code,
                 form_schema_snapshot=form_schema_snapshot,
             )
+            # The questions panel is built from recent drafts.
+            invalidate_questions_panel(user.pk)
+            return draft
     except IntegrityError:
         logger.info(
             "draft_for(user=%s, job=%s): an active draft already exists; "

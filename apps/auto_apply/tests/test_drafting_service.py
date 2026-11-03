@@ -23,6 +23,8 @@ from apps.auto_apply.greenhouse_form.field_mapping import (
 )
 from apps.auto_apply.llm.base import QuestionAnswer
 from apps.auto_apply.models import AutoApplyDraft, ExplicitAnswer
+from apps.accounts.models import AnswerBank
+from apps.auto_apply.tests.legacy_seed import seed_explicit_answer
 from apps.auto_apply.services.drafting import draft_for
 from apps.employers.models import Employer
 from apps.jobs.models import Job
@@ -234,7 +236,7 @@ class ExplicitAnswerCoveredTests(DraftingServiceTestCase):
         # question is now validated against the field's real options
         # exactly like an LLM answer (see answer_resolution's
         # _enforce_option_constraint), so the fixture must be a real option.
-        ExplicitAnswer.objects.create(
+        seed_explicit_answer(
             user=self.user,
             category=ExplicitAnswer.Category.SPONSORSHIP,
             answer_text="No",
@@ -519,6 +521,42 @@ class CarryForwardConfirmedAnswerTests(DraftingServiceTestCase):
         self.assertEqual(entry["value"], "Male")
         self.assertFalse(entry["needs_review"])
         self.assertEqual(entry["reason"], "carried_forward_from_previous_draft")
+
+    def test_carry_forward_keeps_the_marker_that_the_user_typed_the_answer(self):
+        schema = self._gender_schema()
+        first = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first.answers["Gender"].update(
+            {"value": "Male", "needs_review": False, "user_confirmed": True, "user_edited": True}
+        )
+        first.status = AutoApplyDraft.Status.FAILED
+        first.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
+        first.save()
+        retry = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertTrue(retry.answers["Gender"]["user_edited"])
+
+    def test_carry_forward_does_not_invent_an_edit_marker(self):
+        schema = self._gender_schema()
+        first = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        first.answers["Gender"].update(
+            {"value": "Male", "needs_review": False, "user_confirmed": True}
+        )
+        first.status = AutoApplyDraft.Status.FAILED
+        first.reason_code = AutoApplyDraft.ReasonCode.SUBMISSION_FAILED
+        first.save()
+        retry = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient(),
+        )
+        self.assertNotIn("user_edited", retry.answers["Gender"])
 
     def test_confirmed_answer_not_reused_when_no_longer_a_valid_option(self):
         schema = self._gender_schema()
@@ -936,7 +974,8 @@ class DraftingBoundaryTests(DraftingServiceTestCase):
         for saved, question in ((ExplicitAnswer.Category.WORK_AUTHORIZATION, "Require sponsorship?"), (ExplicitAnswer.Category.SPONSORSHIP, "Authorized to work?")):
             with self.subTest(saved=saved):
                 ExplicitAnswer.objects.all().delete()
-                ExplicitAnswer.objects.create(user=self.user, category=saved, answer_text="Yes")
+                AnswerBank.objects.all().delete()  # the previous subtest's backfilled row
+                seed_explicit_answer(user=self.user, category=saved, answer_text="Yes")
                 client = FakeLLMClient()
                 answer = resolve_field_answers(self.user, [Question("q", question)], "", self.profile, client)[0]
                 self.assertIsNone(answer.answer)
@@ -948,3 +987,126 @@ class DraftingBoundaryTests(DraftingServiceTestCase):
         client = FakeFormClient(STANDARD_ONLY_SCHEMA)
         self.assertIsNone(draft_for(self.user, self.job, form_client=client, llm_client=FakeLLMClient()))
         self.assertEqual(client.inspect_calls, [])
+
+
+class AnswerBankDraftingTests(DraftingServiceTestCase):
+    """A drafted answer that came from the AnswerBank carries its
+    provenance; one that did not keeps exactly its pre-AnswerBank shape."""
+
+    QUESTION = "Are you legally authorized to work in the United States?"
+
+    def _schema(self):
+        return FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (
+                FormField(
+                    label=self.QUESTION,
+                    field_type=SINGLE_SELECT,
+                    required=True,
+                    options=("Yes", "No"),
+                ),
+            )
+        )
+
+    def test_unconfirmed_bank_answer_is_flagged_with_provenance_and_skips_the_llm(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        write_answer(self.profile, self.QUESTION, "Yes", "learned", options=("Yes", "No"))
+        llm_client = FakeLLMClient()
+
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=llm_client,
+        )
+
+        entry = draft.answers[self.QUESTION]
+        self.assertEqual(entry["value"], "Yes")
+        self.assertTrue(entry["needs_review"])
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertEqual(entry["tier"], "t0_legal")
+        self.assertEqual(entry["provenance"]["source"], "learned")
+        self.assertEqual(llm_client.calls, [])
+
+    def test_user_bank_answer_needs_no_confirmation(self):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        write_answer(self.profile, self.QUESTION, "Yes", "user", options=("Yes", "No"))
+
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
+        )
+
+        entry = draft.answers[self.QUESTION]
+        self.assertFalse(entry["needs_review"])
+        self.assertFalse(entry["needs_confirmation"])
+
+    def test_answers_without_a_bank_row_keep_the_old_entry_shape(self):
+        seed_explicit_answer(
+            user=self.user,
+            category=ExplicitAnswer.Category.WORK_AUTHORIZATION,
+            answer_text="Yes",
+        )
+        draft = draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
+        )
+        entry = draft.answers[self.QUESTION]
+        for key in ("needs_confirmation", "provenance", "tier"):
+            self.assertNotIn(key, entry)
+
+
+class RegionalSalaryDraftTests(DraftingServiceTestCase):
+    """The profile's salary band answers a salary question straight from the
+    resolver, using the job's own country (`Job.location_country`)."""
+
+    QUESTION = "What is your desired salary?"
+
+    def _schema(self):
+        return FormSchema(
+            fields=STANDARD_ONLY_SCHEMA.fields
+            + (FormField(label=self.QUESTION, field_type=TEXT, required=True),)
+        )
+
+    def _draft(self, country="US", band_region="US", learned=True):
+        from apps.accounts.services.answer_resolver import write_answer
+
+        self.job.location_country = country
+        self.job.save()
+        self.profile.salary_by_region = {band_region: "75-100k"} if band_region else {}
+        self.profile.save()
+        if learned:
+            write_answer(self.profile, self.QUESTION, "learned value", "learned")
+        return draft_for(
+            self.user, self.job,
+            form_client=FakeFormClient(schema=self._schema()), llm_client=FakeLLMClient(),
+        )
+
+    def test_profile_band_beats_a_learned_answer_and_records_its_provenance(self):
+        entry = self._draft().answers[self.QUESTION]
+
+        self.assertEqual(entry["value"], "$75,000 – $100,000")
+        self.assertEqual(entry["reason"], "profile_fact")
+        self.assertFalse(entry["needs_review"])
+        self.assertFalse(entry["needs_confirmation"])
+        self.assertEqual(entry["provenance"]["origin"], "profile.salary_by_region.US")
+        self.assertEqual(entry["provenance"]["source"], "user")
+        self.assertEqual(entry["provenance"]["detail"], {"region": "US", "band": "75-100k"})
+
+    def test_a_job_with_no_country_does_not_crash_and_leaves_the_field_for_review(self):
+        entry = self._draft(country="", learned=False).answers[self.QUESTION]
+
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_a_job_in_a_region_without_a_band_is_not_given_another_regions_band(self):
+        entry = self._draft(country="India", learned=False).answers[self.QUESTION]
+
+        self.assertEqual(entry["value"], "")
+        self.assertTrue(entry["needs_review"])
+
+    def test_a_draft_with_no_band_and_no_bank_row_keeps_its_old_shape(self):
+        entry = self._draft(band_region=None, learned=False).answers[self.QUESTION]
+
+        for key in ("needs_confirmation", "provenance", "tier"):
+            self.assertNotIn(key, entry)

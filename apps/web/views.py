@@ -20,18 +20,30 @@ from django.utils.http import urlencode
 from django.views.decorators.http import require_POST
 
 from apps.accounts.models import EmailInboxCredential, Profile
+from apps.accounts.services.panel_cache import invalidate_questions_panel
+from apps.accounts.services.question_candidates import find_candidates
+from apps.accounts.tiering import Tier, classify_tier, higher_tier
 from apps.applications.models import JobApplication
 from apps.auto_apply.greenhouse_form.field_mapping import (
     CHECKBOX_GROUP, COMBOBOX_SELECT, FILE, MULTI_SELECT, SINGLE_SELECT, TEXTAREA,
 )
 from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.services import answer_memory
+from apps.auto_apply.services.confirmation import (
+    bank_held_labels,
+    build_submit_snapshot,
+    confirm_entry,
+    is_blank_answer_value,
+    unconfirmed_fields,
+)
+from apps.accounts.tasks import learn_for_profile_task
 from apps.auto_apply.tasks import draft_auto_apply, submit_auto_apply_draft
 from apps.jobs.models import JOB_SEARCH_CONFIG, Job, JobSource
 from apps.matching.constants import MatchStatus
 from apps.matching.models import UserJobMatch
-from apps.web.regions import country_choices
+from apps.accounts.regions import country_choices
 
-from .forms import EmailInboxCredentialForm, ProfileForm, ExplicitAnswersForm
+from .forms import EmailInboxCredentialForm
 
 
 RECOMMENDATIONS_PER_PAGE = 20
@@ -77,72 +89,6 @@ def signup(request):
     else:
         form = UserCreationForm()
     return render(request, "registration/signup.html", {"form": form})
-
-
-def _profile_form_context(request, form, explicit_answers_form=None):
-    """Template context shared by the profile and explicit-answers views.
-
-    Both render `web/profile_form.html`, and the per-country authorization
-    repeater needs the country list and status vocabulary in both. Salary
-    bands no longer go through here: they are now real per-region
-    `<select>` fields on `ProfileForm`, so there is no JSON blob to hand the
-    template and no client-side state to reconcile.
-    """
-    profile_obj = request.user.profile
-    return {
-        "form": form,
-        # A bound form (invalid POST) is passed through so the submitted values
-        # and errors survive the re-render.
-        "explicit_answers_form": explicit_answers_form or ExplicitAnswersForm(user=request.user),
-        "country_choices": country_choices(),
-        "visa_status_choices": Profile.VisaStatus.choices,
-        # One [alpha3, status] pair per stored row, so the repeater can
-        # re-render what's already saved. JSON-encoded here rather than in
-        # the template to keep quoting/escaping correct.
-        "visa_rows_json": json.dumps(
-            [
-                [alpha3, status]
-                for alpha3, status in (profile_obj.visa_status_by_country or {}).items()
-            ]
-        ),
-    }
-
-
-@login_required
-def profile(request):
-    instance = request.user.profile  # always the requesting user's own profile
-    if request.method == "POST":
-        form = ProfileForm(request.POST, request.FILES, instance=instance)
-        if form.is_valid():
-            form.save()  # Profile post-save signal -> debounced rematch
-            return redirect("recommendations")
-    else:
-        form = ProfileForm(instance=instance)
-    return render(request, "web/profile_form.html", _profile_form_context(request, form))
-
-
-@login_required
-def explicit_answers(request):
-    """Self-service UI for saved ExplicitAnswer values (work auth, sponsorship, salary)."""
-    if request.method == "POST":
-        form = ExplicitAnswersForm(request.POST, user=request.user)
-        if form.is_valid():
-            form.save()
-            # `salary_by_region` and the per-country authorization rows are
-            # Profile fields now, edited by the profile form above; the
-            # explicit-answers form saves only the free-text answer rows, so
-            # it cannot clobber the Profile-owned structured values.
-            messages.info(request, "Saved answers updated.")
-            return redirect("profile")
-    else:
-        form = ExplicitAnswersForm(user=request.user)
-    return render(
-        request,
-        "web/profile_form.html",
-        _profile_form_context(
-            request, ProfileForm(instance=request.user.profile), explicit_answers_form=form
-        ),
-    )
 
 
 # --- Recommendations ------------------------------------------------------
@@ -241,6 +187,10 @@ _REASON_CODE_MESSAGES = {
     AutoApplyDraft.ReasonCode.SCHEMA_MISMATCH: (
         "This application has a question we couldn't fill in automatically."
     ),
+    AutoApplyDraft.ReasonCode.UNCONFIRMED_ANSWERS: (
+        "This application was held back because some answers had not been "
+        "confirmed. Retry it to review and confirm them."
+    ),
     AutoApplyDraft.ReasonCode.FORM_LOAD_FAILED: (
         "We couldn't load this employer's application form."
     ),
@@ -301,15 +251,6 @@ def _snapshot_fields(draft):
     }
 
 
-def _is_blank_answer_value(value) -> bool:
-    """A list/tuple value (multi-select, checkbox group) is blank when every
-    item is blank -- `str(["  "])` is a non-empty string and would otherwise
-    read as "answered"."""
-    if isinstance(value, (list, tuple)):
-        return not any(str(item or "").strip() for item in value)
-    return not str(value or "").strip()
-
-
 def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
     """Use snapshot requirements only when the answer has no explicit flag.
 
@@ -326,7 +267,7 @@ def _blocking_required_fields(answers, form_schema_snapshot=None) -> list[str]:
         for label, entry in (answers or {}).items()
         if isinstance(entry, dict)
         and entry.get("required", fields.get(label, {}).get("required", False))
-        and _is_blank_answer_value(entry.get("value"))
+        and is_blank_answer_value(entry.get("value"))
     )
 
 
@@ -541,6 +482,10 @@ def auto_apply_queue(request):
                 continue
             display_entry = dict(entry)
             display_entry["control_id"] = f"draft_{draft.pk}_value__{index}"
+            display_entry["remember"] = answer_memory.remember_ui(label, entry, draft.job, draft.user.profile)
+            display_entry["candidates"] = (
+                _display_candidates(label, entry) if is_blank_answer_value(entry.get("value")) else []
+            )
             field = _answer_edit_field(entry, fields.get(label, {}))
             if field is not None:
                 value = entry.get("value", "")
@@ -554,6 +499,7 @@ def auto_apply_queue(request):
                 needs_review_count += 1
         draft.display_answers = display_answers
         draft.needs_review_count = needs_review_count
+        draft.held_bank_count = len(bank_held_labels(draft.answers))
 
     # Group same-job repeat attempts (e.g. several FAILED retries before a
     # fix landed) under one card instead of one redundant top-level card
@@ -591,6 +537,55 @@ def auto_apply_queue(request):
     return render(request, "web/auto_apply_queue.html", ctx)
 
 
+def _effective_tier(label, candidate_tier):
+    """Riskier of the question's own tier and the tier stored with the
+    candidate's answer. ``write_answer`` can persist a higher ``min_tier`` than
+    the wording alone implies, so the label alone under-holds. An unrecognised
+    stored tier fails closed to legal."""
+    own = classify_tier(label)
+    known = (Tier.T0_LEGAL, Tier.T1_COMMERCIAL, Tier.T2_FACTUAL)
+    stored = candidate_tier if candidate_tier in known else Tier.T0_LEGAL
+    return higher_tier(own, stored)
+
+
+def _display_candidates(label, entry):
+    """Candidates for the review row: what to show and whether it can be taken.
+
+    ``held`` says taking one still leaves the answer waiting for the user's
+    confirmation (any legal or commercial question).
+    """
+    shown = []
+    for candidate in entry.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        shown.append({
+            "question_key": candidate.get("question_key", ""),
+            "question_text": candidate.get("question_text", ""),
+            "value": candidate.get("value"),
+            "source": candidate.get("source", ""),
+            "can_accept": candidate.get("mapped_value") is not None,
+            "held": _effective_tier(label, candidate.get("tier")) in (
+                Tier.T0_LEGAL, Tier.T1_COMMERCIAL
+            ),
+        })
+    return shown
+
+
+def _accepted_candidate(draft, label, entry, snapshot, question_key):
+    """The candidate the user chose, re-derived from the draft owner's own saved
+    answers, or ``None``.
+
+    ``question_key`` only selects among candidates the server computes for this
+    user now; a key that is not one of them (another profile's, a stale one, a
+    made-up one) selects nothing, and nothing from the request is stored.
+    """
+    options = snapshot.get("options") or entry.get("options") or []
+    for candidate in find_candidates(draft.user.profile, label, draft.job, options=options):
+        if candidate.question_key == question_key and candidate.mapped_value is not None:
+            return candidate
+    return None
+
+
 @login_required
 @require_POST
 def edit_auto_apply_draft(request, pk):
@@ -611,6 +606,7 @@ def edit_auto_apply_draft(request, pk):
     answers = {label: dict(entry) for label, entry in (draft.answers or {}).items()}
     fields = _snapshot_fields(draft)
     invalid_labels = []
+    edits = []
     index = 0
     while f"label__{index}" in request.POST:
         # Browsers normalize a lone "\n" in a submitted field's value to
@@ -621,7 +617,11 @@ def edit_auto_apply_draft(request, pk):
         # silently failing the lookup below and dropping the whole field's
         # edit with no error shown.
         label = request.POST[f"label__{index}"].replace("\r\n", "\n")
+        accept_key = request.POST.get(f"accept__{index}", "")
         value_field = f"value__{index}"
+        confirm_field = f"confirm__{index}"
+        remember_field = f"remember__{index}"
+        everywhere_field = f"everywhere__{index}"
         index += 1
         if label not in answers:
             continue
@@ -641,11 +641,77 @@ def edit_auto_apply_draft(request, pk):
             # POST -- collect it and keep validating/saving the rest.
             invalid_labels.append(label)
             continue
+        accepted = None
+        if accept_key and is_blank_answer_value(answers[label].get("value")):
+            # "Use this answer" on a candidate: the value is the stored answer
+            # of an earlier question, re-derived here, then validated like a
+            # typed one. Anything that does not validate is simply not applied.
+            accepted = _accepted_candidate(
+                draft, label, answers[label], fields.get(label, {}), accept_key
+            )
+            if accepted is not None:
+                try:
+                    cleaned = field.clean(accepted.mapped_value)
+                except forms.ValidationError:
+                    accepted = None
+        edits.append(
+            answer_memory.ReviewEdit(
+                label=label,
+                value=cleaned,
+                old=dict(answers[label]),
+                remember=remember_field in request.POST,
+                everywhere=everywhere_field in request.POST,
+            )
+        )
+        if accepted is not None:
+            # Taken from an earlier question's answer, not typed: it is NOT
+            # the user's own authorship (the learner and the precision figure
+            # both ignore it), and a legal or commercial one stays held until
+            # the user ticks the per-field confirmation, like any other answer
+            # that did not come from their own typing.
+            answers[label]["candidate_accepted"] = True
+            answers[label]["candidate_question_key"] = accepted.question_key
+            answers[label].pop("user_edited", None)
+            effective_tier = _effective_tier(label, accepted.tier)
+            if effective_tier in (Tier.T0_LEGAL, Tier.T1_COMMERCIAL):
+                answers[label]["needs_confirmation"] = True
+                answers[label]["provenance"] = {
+                    "origin": "answer_candidate",
+                    "source": accepted.source,
+                    "locked": False,
+                    "confidence": accepted.score,
+                    "detail": {"question_key": accepted.question_key},
+                }
+                answers[label]["tier"] = effective_tier
+        elif cleaned != answers[label].get("value"):
+            # The user typed or changed this value (as opposed to re-posting
+            # what drafting put there): the only reliable sign that an answer
+            # is theirs, since `user_confirmed` is set by any save.
+            answers[label]["user_edited"] = True
+            # Changing an accepted candidate makes it their own answer.
+            answers[label].pop("candidate_accepted", None)
+        offered = answer_memory.remember_ui(label, answers[label], draft.job, draft.user.profile)
+        if offered:
+            # An unticked, pre-ticked box is an explicit "do not remember this":
+            # the consensus learner must not learn it either.
+            answers[label]["remember_declined"] = bool(
+                offered["checked"] and remember_field not in request.POST
+            )
         answers[label]["value"] = cleaned
+        if answers[label].get("needs_confirmation"):
+            # A learned/imported legal or commercial answer is only ever
+            # confirmed by an explicit, per-field action -- saving the form
+            # (which re-posts every value) must not count as one.
+            if confirm_field in request.POST and not is_blank_answer_value(cleaned):
+                confirm_entry(answers[label])
+            else:
+                answers[label]["needs_review"] = True
+                answers[label]["user_confirmed"] = False
+            continue
         # A blank answer keeps its "needs review" hint regardless of
         # required-ness, so an optional placeholder doesn't quietly lose its
         # flag the moment the queue is re-rendered/saved.
-        answers[label]["needs_review"] = _is_blank_answer_value(cleaned)
+        answers[label]["needs_review"] = is_blank_answer_value(cleaned)
         # Explicit provenance marker: `needs_review=False` alone doesn't
         # prove a human looked at this answer -- a confident LLM guess also
         # gets `needs_review=False` (see answer_resolution/llm/base.py) with
@@ -653,12 +719,51 @@ def edit_auto_apply_draft(request, pk):
         # actually reviewing/confirming the value, which is what
         # drafting._carry_forward_confirmed_answers() requires before
         # reusing an answer on a later retry (CodeRabbit finding on PR #99).
-        answers[label]["user_confirmed"] = not _is_blank_answer_value(cleaned)
+        answers[label]["user_confirmed"] = not is_blank_answer_value(cleaned)
 
     draft.answers = answers
     draft.save(update_fields=["answers", "updated_at"])
+    remembered = answer_memory.remember_reviewed_answers(draft, edits)
+    if remembered:
+        messages.info(
+            request,
+            f"Remembered {remembered} answer{'s' if remembered != 1 else ''} "
+            "for similar questions. Manage them under Profile \u2192 Auto-apply answers.",
+        )
     for label in invalid_labels:
         messages.error(request, f"Choose a valid answer for {label}.")
+    return _auto_apply_queue_redirect(request)
+
+
+@login_required
+@require_POST
+def confirm_learned_answers(request, pk):
+    """Confirm, in one action, every held answer that came from the user's
+    stored answers (learned or imported) on a `DRAFTED` draft.
+
+    LLM guesses, blank fields and typed-settings values are never touched, and
+    nothing is promoted to the user's own answers: this only clears the
+    per-field hold, through the same transition as confirming each by hand.
+    Ownership+status scoped like the other draft actions (404 otherwise).
+    """
+    draft = get_object_or_404(
+        AutoApplyDraft, pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED
+    )
+    answers = {label: dict(entry) if isinstance(entry, dict) else entry
+               for label, entry in (draft.answers or {}).items()}
+    labels = bank_held_labels(answers)
+    for label in labels:
+        confirm_entry(answers[label], origin="draft_review_bulk")
+    if labels:
+        draft.answers = answers
+        draft.save(update_fields=["answers", "updated_at"])
+        messages.info(
+            request,
+            f"Confirmed {len(labels)} remembered answer{'s' if len(labels) != 1 else ''}. "
+            "Check them before you send.",
+        )
+    else:
+        messages.info(request, "No remembered answers to confirm on this draft.")
     return _auto_apply_queue_redirect(request)
 
 
@@ -671,6 +776,7 @@ def discard_auto_apply_draft(request, pk):
     ).delete()
     if not deleted:
         raise Http404("Draft not found or not discardable.")
+    invalidate_questions_panel(request.user.pk)
     messages.info(request, "Draft discarded. You can draft this application again from recommendations.")
     return _auto_apply_queue_redirect(request)
 
@@ -713,6 +819,14 @@ def send_auto_apply_draft(request, pk):
         )
         return _auto_apply_queue_redirect(request)
 
+    unconfirmed = unconfirmed_fields(draft.answers)
+    if unconfirmed:
+        messages.error(
+            request,
+            "Confirm these answer(s) before sending: " + "; ".join(unconfirmed),
+        )
+        return _auto_apply_queue_redirect(request)
+
     # A blank, optional needs_review placeholder (R5's "float unanswerable
     # questions to review instead of excluding the draft") isn't actually
     # sent to the form and has nothing to confirm, so it doesn't block --
@@ -729,12 +843,33 @@ def send_auto_apply_draft(request, pk):
     # `.update()` bypasses `auto_now`, so bump `updated_at` explicitly: the stale
     # sweep keys off it, and a draft that sat in the queue before Send would
     # otherwise look "stuck in SENDING" the moment it is sent.
-    updated = AutoApplyDraft.objects.filter(
-        pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
-        answers=draft.answers,
-    ).update(status=AutoApplyDraft.Status.SENDING, updated_at=timezone.now())
-    if not updated:
-        raise Http404("Draft not found or not sendable.")
+    with transaction.atomic():
+        updated = AutoApplyDraft.objects.filter(
+            pk=pk, user=request.user, status=AutoApplyDraft.Status.DRAFTED,
+            answers=draft.answers,
+        ).update(
+            status=AutoApplyDraft.Status.SENDING,
+            updated_at=timezone.now(),
+            submitted_answers_snapshot=build_submit_snapshot(draft.answers),
+        )
+        if not updated:
+            raise Http404("Draft not found or not sendable.")
+        # What is being submitted, recorded in the same transaction as the
+        # transition so a lost race records nothing.
+        answer_memory.record_observations(draft)
+        # Candidates are review-time suggestions: they are not submitted and
+        # are not kept on a sent draft.
+        stripped = {
+            label: ({k: v for k, v in entry.items() if k != "candidates"} if isinstance(entry, dict) else entry)
+            for label, entry in (draft.answers or {}).items()
+        }
+        AutoApplyDraft.objects.filter(pk=pk).update(answers=stripped)
+        # Learn from what was just recorded, but only once it is committed:
+        # a worker must never run before the observations are visible.
+        profile_id = draft.user.profile.pk
+        # robust=True: a broker error here must not escape the view and skip
+        # submit_auto_apply_draft below, which would leave the draft in SENDING.
+        transaction.on_commit(lambda: learn_for_profile_task.delay(profile_id), robust=True)
 
     submit_auto_apply_draft.delay(pk)
     messages.info(request, "Sending your application…")

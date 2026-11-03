@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Quick-fill — JobBorg{% endblock %}
+{% block content %}
+<h1>Save an answer</h1>
+{% include "web/_profile_tabs.html" %}
+<div class="card">
+    <p class="muted">Asked on {{ draft.job.title }} at {{ draft.job.employer.name }}</p>
+    <h2>{{ label }}</h2>
+
+    {% if errors %}
+    <ul class="errorlist">{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    <form method="post" action="{% url 'quick_fill' %}">
+        {% csrf_token %}
+        <input type="hidden" name="draft" value="{{ draft.pk }}">
+        <input type="hidden" name="field" value="{{ field_index }}">
+
+        {% if prefill %}
+        <p class="muted">Proposed from this application ({{ prefill_source }}). Edit it if it isn't right.</p>
+        {% endif %}
+        <label for="quick-fill-value">Your answer</label>
+        {% if options and field_type == "single_select" or options and field_type == "combobox_select" %}
+        <select id="quick-fill-value" name="value">
+            <option value="">— Choose —</option>
+            {% for option in options %}<option value="{{ option }}"{% if option == prefill %} selected{% endif %}>{{ option }}</option>{% endfor %}
+        </select>
+        {% elif options %}
+        <select id="quick-fill-value" name="value" multiple size="6">
+            {% for option in options %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+        </select>
+        {% else %}
+        <input id="quick-fill-value" type="text" name="value" value="{{ prefill }}" maxlength="2000">
+        {% endif %}
+
+        {% if sensitive %}
+        <p class="muted">This answer depends on where the job is. It will be saved for {% if region_label %}<strong>{{ region_label }}</strong> jobs only{% else %}this job's region (unknown){% endif %}.</p>
+        <label><input type="checkbox" name="everywhere"> Use it for jobs in any region</label>
+        {% endif %}
+
+        {% if existing %}
+        <div class="notice">
+            You already have an answer to this question: <strong>{{ existing.value }}</strong>
+            <span class="muted">(source: {{ existing.source }}{% if existing.is_locked %}, locked{% endif %}).</span>
+            <label><input type="checkbox" name="overwrite"> Replace it with this answer</label>
+        </div>
+        {% endif %}
+
+        {% if needs_confirm_box %}
+        <div class="notice">
+            This is a legal or commercial question and the proposed answer was not entered by you.
+            <label><input type="checkbox" name="confirm_value"> I confirm this answer is correct and should be used on future applications</label>
+        </div>
+        {% endif %}
+
+        <p>
+            <button type="submit">Save answer</button>
+            <a href="{% url 'profile_answers' %}#panel">Cancel</a>
+        </p>
+    </form>
+</div>
+{% endblock %}

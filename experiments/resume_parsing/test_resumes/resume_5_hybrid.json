@@ -1,0 +1,56 @@
+{
+  "name": null,
+  "contact": {
+    "email": "priya.sharma@email.com",
+    "phone": "+91 98765 43210",
+    "linkedin": "https://linkedin.com/in/priyasharma",
+    "github": "https://github.com/priyasharma",
+    "location": "Pune, India"
+  },
+  "summary": null,
+  "skills": [
+    "Aws",
+    "C",
+    "Docker",
+    "Ec2",
+    "Fastapi",
+    "Git",
+    "Github Actions",
+    "Java",
+    "Javascript",
+    "Junit",
+    "Lambda",
+    "Mockito",
+    "Mongodb",
+    "Mysql",
+    "Postgresql",
+    "Python",
+    "Rds",
+    "React",
+    "Redis",
+    "S3",
+    "Spring",
+    "Spring Boot",
+    "Sql",
+    "Xgboost"
+  ],
+  "experience": [],
+  "education": [
+    {
+      "degree": "EDUCATIONIndianInstituteofTechnology,BombayB.TechComputerScience",
+      "dates": "and Engineering, CGPA: 8.9/10 2020 \u2013 2024 Relevant Coursework: Distributed"
+    }
+  ],
+  "projects": [
+    {
+      "name": "PROJECTS E-Commerce Backend (Java, Spring Boot, PostgreSQL)"
+    },
+    {
+      "url": "https://github.com/priyasharma/ecommerce-backend \u2022 REST API with JWT"
+    },
+    {
+      "url": "TaskManager(Python,FastAPI,React,PostgreSQL)https://github.com/priyasharma/task-",
+      "tech_stack": "manager \u2022 Full-stack app with real-time updates via WebSockets"
+    }
+  ]
+}

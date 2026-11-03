@@ -1,0 +1,91 @@
+{
+  "name": null,
+  "contact": {
+    "email": "alex.rodriguez@email.com",
+    "phone": "+52 55 1234 5678",
+    "linkedin": "https://linkedin.com/in/alexrodriguezGitHub",
+    "github": "https://github.com/alexrodriguez",
+    "location": "Mexico City, Mexico"
+  },
+  "summary": null,
+  "skills": [
+    "Aks",
+    "Alertmanager",
+    "Argo",
+    "Argocd",
+    "Aws",
+    "Backstage",
+    "Bash",
+    "Cert-Manager",
+    "Ci/Cd",
+    "Cloud Run",
+    "Cloud Sql",
+    "Cloudfront",
+    "Cosign",
+    "Crossplane",
+    "Eks",
+    "Falco",
+    "Flux",
+    "Gatekeeper",
+    "Gcp",
+    "Github Actions",
+    "Gke",
+    "Go",
+    "Grafana",
+    "Helm",
+    "Iam",
+    "Istio",
+    "Jaeger",
+    "Jenkins",
+    "K8S",
+    "Kubecost",
+    "Kubernetes",
+    "Kyverno",
+    "Linkerd",
+    "Loki",
+    "Opa",
+    "Prometheus",
+    "Pulumi",
+    "Python",
+    "Rds",
+    "S3",
+    "Sql",
+    "Tempo",
+    "Terraform",
+    "Terragrunt",
+    "Trivy",
+    "Vault"
+  ],
+  "experience": [
+    {
+      "company": "EXPERIENCE Datadog",
+      "role": "Platform Engineer",
+      "dates": "Feb 2022 \u2013 Present",
+      "location": "Remote",
+      "bullets": [
+        "Created developer portal (Backstage) with 200+ service templates \u2022 Reduced"
+      ]
+    },
+    {
+      "company": "Uber",
+      "role": "DevOps Engineer",
+      "dates": "Jun 2019 \u2013 Jan 2022",
+      "location": "San Francisco, CA \u2022 Migrated",
+      "bullets": []
+    }
+  ],
+  "education": [
+    {
+      "degree": "EDUCATION Tecnol\u00f3gico de Monterrey B.S. Computer Systems Engineering",
+      "dates": "2015 \u2013 2019"
+    }
+  ],
+  "projects": [
+    {
+      "url": "PROJECTSGitOpsPlatformStarter(Go,Terraform,ArgoCD)https://github.com/alexrodriguez/gitops-"
+    },
+    {
+      "url": "KubernetesCostOptimizer(Python,Prometheus,Kubecost)https://github.com/alexrodriguez/k8s-"
+    }
+  ]
+}

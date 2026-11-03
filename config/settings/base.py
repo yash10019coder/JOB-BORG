@@ -216,6 +216,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.auto_apply.sweep_stale_auto_apply_drafts",
         "schedule": crontab(minute="*/5"),  # same cadence as location-alias-sweep
     },
+    "import-job-sweep": {
+        "task": "apps.accounts.sweep_import_jobs",
+        "schedule": crontab(minute="*/15"),  # expire proposals, fail stuck jobs, drop old rows
+    },
+    "learning-sweep-nightly": {
+        "task": "apps.accounts.sweep_learning",
+        "schedule": crontab(minute=30, hour=3),  # off-peak; the send path learns incrementally
+    },
 }
 
 # Dedicated Celery queue for Playwright submission tasks (U7 / D1)
@@ -234,6 +242,55 @@ REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
 # Debounce delay (seconds) collapsing rapid successive profile saves into one
 # rematch execution (U10).
 REMATCH_DEBOUNCE_SECONDS = env.int("REMATCH_DEBOUNCE_SECONDS", default=10)
+# Consensus learner (Phase 3): distinct employers that must give the same
+# authored answer before it is learned, profiles per nightly sweep, and how
+# long a pending suggestion stays open.
+LEARNING_MIN_DISTINCT_EMPLOYERS = env.int("LEARNING_MIN_DISTINCT_EMPLOYERS", default=2)
+LEARNING_SWEEP_BATCH_SIZE = env.int("LEARNING_SWEEP_BATCH_SIZE", default=200)
+LEARNING_SUGGESTION_TTL_DAYS = env.int("LEARNING_SUGGESTION_TTL_DAYS", default=90)
+# Reworded-question candidates (Phase 4b): an earlier answered question shown to
+# the reviewer next to a differently worded one. Propose-only; off until the
+# `manage.py question_match_eval` evaluates the threshold; set the env var to
+# false to switch the feature off without a deploy.
+QUESTION_CANDIDATES_ENABLED = env.bool("QUESTION_CANDIDATES_ENABLED", default=True)
+QUESTION_CANDIDATE_MIN_SCORE = env.float("QUESTION_CANDIDATE_MIN_SCORE", default=0.5)
+QUESTION_CANDIDATE_MAX = env.int("QUESTION_CANDIDATE_MAX", default=3)
+# Profile import (Phase 4): how long a finished-but-unreviewed import keeps its
+# proposals before the sweep clears them.
+PROFILE_IMPORT_TTL_HOURS = env.int("PROFILE_IMPORT_TTL_HOURS", default=24)
+# Import limits (rules D2/D3/N5): a smaller file cap than the 10 MB resume
+# upload, a page cap, and a cap on the text the rules (and later the LLM) see.
+PROFILE_IMPORT_MAX_PDF_BYTES = env.int("PROFILE_IMPORT_MAX_PDF_BYTES", default=5 * 1024 * 1024)
+PROFILE_IMPORT_MAX_PAGES = env.int("PROFILE_IMPORT_MAX_PAGES", default=10)
+PROFILE_IMPORT_MAX_TEXT_CHARS = env.int("PROFILE_IMPORT_MAX_TEXT_CHARS", default=40_000)
+# Abuse and housekeeping (rules A1-A2, P1): imports per user per hour, how long a
+# job may sit pending/running before the sweep fails it, and how long finished
+# rows are kept.
+PROFILE_IMPORT_RATE_PER_HOUR = env.int("PROFILE_IMPORT_RATE_PER_HOUR", default=10)
+PROFILE_IMPORT_STUCK_MINUTES = env.int("PROFILE_IMPORT_STUCK_MINUTES", default=30)
+PROFILE_IMPORT_ROW_RETENTION_DAYS = env.int("PROFILE_IMPORT_ROW_RETENTION_DAYS", default=30)
+PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_TIME_LIMIT_SECONDS", default=120)
+PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS = env.int("PROFILE_IMPORT_TASK_SOFT_TIME_LIMIT_SECONDS", default=90)
+# AI-assisted import (rules L1-L9). OFF unless an operator lists a provider they
+# trust not to retain resume text: an empty allowlist means rules only, and the
+# consent control is not even shown. The provider must also be one of
+# apps/accounts/llm_providers.PROVIDER_CONFIGS and have its API key set.
+PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS = env.list("PROFILE_IMPORT_LLM_ALLOWED_PROVIDERS", default=[])
+PROFILE_IMPORT_LLM_PROVIDER = env("PROFILE_IMPORT_LLM_PROVIDER", default="")
+# Bump to require every user to consent again (e.g. the provider or what is sent changes).
+PROFILE_IMPORT_CONSENT_VERSION = env("PROFILE_IMPORT_CONSENT_VERSION", default="2026-10")
+PROFILE_IMPORT_LLM_MAX_CHARS = env.int("PROFILE_IMPORT_LLM_MAX_CHARS", default=12_000)
+PROFILE_IMPORT_LLM_DAILY_CAP = env.int("PROFILE_IMPORT_LLM_DAILY_CAP", default=5)
+PROFILE_IMPORT_LLM_TIMEOUT_SECONDS = env.int("PROFILE_IMPORT_LLM_TIMEOUT_SECONDS", default=30)
+# Optional GitHub token (no scopes, public read only) to lift the unauthenticated 60
+# requests/hour/IP limit. Recommended: without it the GitHub import runs in light mode
+# (no dependency files or pinned repos) and every user shares the 60 calls.
+GITHUB_API_TOKEN = env("GITHUB_API_TOKEN", default="")
+# Gap between one user's GitHub imports, and the remaining-quota levels below which new
+# imports drop to light mode (with a token) or are refused (rule GHX1).
+PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS = env.int("PROFILE_IMPORT_GITHUB_COOLDOWN_SECONDS", default=300)
+PROFILE_IMPORT_GITHUB_QUOTA_LOW_WITH_TOKEN = env.int("PROFILE_IMPORT_GITHUB_QUOTA_LOW_WITH_TOKEN", default=500)
+PROFILE_IMPORT_GITHUB_QUOTA_LOW_ANONYMOUS = env.int("PROFILE_IMPORT_GITHUB_QUOTA_LOW_ANONYMOUS", default=15)
 # Upsert batch size for the matching fan-out.
 MATCH_BULK_BATCH_SIZE = env.int("MATCH_BULK_BATCH_SIZE", default=500)
 # Batch bound for the location backfill/sweep (shared by both).

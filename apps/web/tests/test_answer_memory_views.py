@@ -1,0 +1,646 @@
+"""Remember-on-review and observation capture, end to end through the real
+drafting service and the review/send views."""
+from unittest import mock
+
+from django.urls import reverse
+
+from apps.accounts.models import AnswerBank, AnswerObservation, ProfileSuggestion
+from apps.accounts.services.answer_resolver import write_answer
+from apps.auto_apply.greenhouse_form.field_mapping import (
+    FILE, SINGLE_SELECT, TEXT, TEXTAREA, FormField, FormSchema,
+)
+from apps.auto_apply.models import AutoApplyDraft
+from apps.auto_apply.services.drafting import draft_for
+from apps.auto_apply.tests.test_drafting_service import (
+    STANDARD_ONLY_SCHEMA, FakeFormClient, FakeLLMClient,
+)
+from apps.employers.models import Employer
+from apps.jobs.models import Job
+from apps.web.tests.test_auto_apply_views import AutoApplyViewsTestCase
+
+HEARD = "How did you hear about us?"
+AUTH = "Are you legally authorized to work in the United States?"
+RELOCATE = "Are you willing to relocate?"
+ESSAY = "Why do you want to work at Acme?"
+SPONSOR = "Will you now or in the future require visa sponsorship?"
+
+
+class _MemoryBase(AutoApplyViewsTestCase):
+    def setUp(self):
+        super().setUp()
+        self.alice.email = "alice@example.com"
+        self.alice.save()
+        self.profile = self.alice.profile
+        self.profile.full_name = "Alice Smith"
+        self.profile.phone = "555-1234"
+        self.profile.linkedin_url = "https://linkedin.com/in/alice"
+        self.profile.resume_text = "Alice Smith. Engineer."
+        self.profile.save()
+        self.client = self._client_for(self.alice)
+
+    def job_in(self, country="US", employer=None):
+        job = self._job()
+        job.location_country = country
+        if employer is not None:
+            job.employer = employer
+        job.save()
+        return job
+
+    def draft(self, job, *questions):
+        fields = [
+            FormField(label, field_type, True, options)
+            for label, field_type, options in questions
+        ]
+        schema = FormSchema(fields=STANDARD_ONLY_SCHEMA.fields + tuple(fields))
+        return draft_for(
+            self.alice, job, form_client=FakeFormClient(schema=schema), llm_client=FakeLLMClient()
+        )
+
+    def review(self, draft, values=None, remember=(), everywhere=(), confirm=()):
+        """Post the whole review form the way the template does."""
+        values = values or {}
+        posted = {}
+        for i, (label, entry) in enumerate(draft.answers.items()):
+            posted[f"label__{i}"] = label
+            if entry.get("field_type") == FILE:
+                continue
+            posted[f"value__{i}"] = values.get(label, entry["value"])
+            if label in remember:
+                posted[f"remember__{i}"] = "on"
+            if label in everywhere:
+                posted[f"everywhere__{i}"] = "on"
+            if label in confirm:
+                posted[f"confirm__{i}"] = "on"
+        return self.client.post(reverse("edit_auto_apply_draft", args=[draft.id]), posted)
+
+    def row(self, key_text, scope=""):
+        from apps.accounts.services.answer_resolver import normalize_question_key
+
+        return AnswerBank.objects.filter(
+            profile=self.profile, question_key=normalize_question_key(key_text), scope_region=scope
+        ).first()
+
+
+class RememberOnReviewTests(_MemoryBase):
+    def test_a_ticked_t2_answer_is_saved_as_the_users_and_fills_the_next_application(self):
+        first = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(first, {HEARD: "LinkedIn"}, remember={HEARD})
+
+        row = self.row(HEARD)
+        self.assertEqual((row.value, row.source, row.is_locked), ("LinkedIn", "user", False))
+        self.assertEqual(row.source_detail["origin"], "review")
+        self.assertEqual(row.source_detail["draft_id"], first.pk)
+
+        beta = Employer.objects.create(name="Beta", slug="beta")
+        second = self.draft(self.job_in(employer=beta), (HEARD, TEXT, ()))
+        entry = second.answers[HEARD]
+        self.assertEqual(entry["value"], "LinkedIn")
+        self.assertFalse(entry["needs_review"])
+        self.assertEqual(entry["provenance"]["source"], "user")
+
+    def test_unticked_writes_nothing(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+    def test_resaving_an_unreviewed_guess_does_not_remember_it(self):
+        """A plain Save re-posts every value; an LLM guess must not become 'yours'."""
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        # Pretend the LLM guessed it.
+        draft.answers[HEARD].update({"value": "A job board", "needs_review": True, "reason": "ok"})
+        draft.save()
+        self.review(draft, remember={HEARD})  # value unchanged
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+    def test_a_guess_saved_once_and_saved_again_is_still_not_remembered(self):
+        """Any save marks a value confirmed, so a second click must not
+        promote an LLM guess to the user's own answer."""
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        draft.answers[HEARD].update({"value": "A job board", "needs_review": True, "reason": "ok"})
+        draft.save()
+        for _ in range(2):
+            draft.refresh_from_db()
+            self.review(draft, remember={HEARD})
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+    def test_a_value_the_user_typed_earlier_is_remembered_when_they_tick_later(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})  # typed and saved, not remembered
+        self.assertEqual(AnswerBank.objects.count(), 0)
+        draft.refresh_from_db()
+        self.review(draft, remember={HEARD})  # later: tick remember, no change
+        self.assertEqual(self.row(HEARD).value, "LinkedIn")
+
+    def test_saving_twice_with_remember_does_not_duplicate_history(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, remember={HEARD})
+        draft.refresh_from_db()
+        self.review(draft, remember={HEARD})
+        self.assertEqual(AnswerBank.objects.count(), 1)
+        from apps.accounts.models import AnswerBankHistory
+
+        self.assertEqual(AnswerBankHistory.objects.count(), 0)
+
+    def test_a_blank_value_is_never_remembered(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: ""}, remember={HEARD})
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+    def test_a_legal_answer_is_remembered_only_when_ticked_and_is_then_locked(self):
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {AUTH: "Yes"})
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+        self.review(draft, {AUTH: "Yes"}, remember={AUTH})
+        row = self.row(AUTH)
+        self.assertEqual((row.value, row.source, row.is_locked, row.risk_tier),
+                         ("Yes", "user", True, "t0_legal"))
+
+        second = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        # Draft is a duplicate-active for the same user/job? different job, fine.
+        entry = second.answers[AUTH]
+        self.assertEqual(entry["value"], "Yes")
+        self.assertFalse(entry["needs_confirmation"])
+
+    def test_a_country_free_settings_question_is_never_remembered_for_every_country(self):
+        """Sponsorship names no country, so a saved answer would answer them all."""
+        draft = self.draft(self.job_in("US"), (SPONSOR, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {SPONSOR: "No"}, remember={SPONSOR})
+        self.assertIsNone(self.row(SPONSOR))
+        self.assertNotIn(
+            "Always use this answer", self.client.get(reverse("auto_apply_queue")).content.decode()
+        )
+
+        india = self.draft(self.job_in("India"), (SPONSOR, SINGLE_SELECT, ("Yes", "No")))
+        self.assertFalse(india.answers[SPONSOR]["value"])
+
+    def test_confirming_a_learned_answer_with_always_use_replaces_it_with_a_locked_user_row(self):
+        write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.assertTrue(draft.answers[AUTH]["needs_confirmation"])
+
+        self.review(draft, remember={AUTH}, confirm={AUTH})
+        row = self.row(AUTH)
+        self.assertEqual((row.source, row.is_locked), ("user", True))
+
+    def test_a_held_answer_that_is_not_confirmed_is_never_remembered(self):
+        write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, remember={AUTH})  # ticked remember but not confirm
+        row = self.row(AUTH)
+        self.assertEqual(row.source, "learned")
+
+    def test_a_failed_remember_never_loses_the_edit(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        with mock.patch(
+            "apps.auto_apply.services.answer_memory.write_answer", side_effect=RuntimeError("boom")
+        ):
+            self.review(draft, {HEARD: "LinkedIn"}, remember={HEARD})
+        draft.refresh_from_db()
+        self.assertEqual(draft.answers[HEARD]["value"], "LinkedIn")
+
+    def test_a_message_says_what_was_remembered(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        response = self.client.post(
+            reverse("edit_auto_apply_draft", args=[draft.id]),
+            {"label__0": "First Name", "label__5": HEARD,
+             **{f"label__{i}": label for i, label in enumerate(draft.answers)},
+             **{f"value__{list(draft.answers).index(HEARD)}": "LinkedIn",
+                f"remember__{list(draft.answers).index(HEARD)}": "on"}},
+            follow=True,
+        )
+        self.assertContains(response, "Remembered 1 answer")
+
+    def test_file_standard_and_textarea_answers_are_never_remembered(self):
+        draft = self.draft(self.job_in(), (ESSAY, TEXTAREA, ()))
+        everything = set(draft.answers)
+        self.review(draft, {ESSAY: "Because I love it"}, remember=everything)
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+    def test_the_remembered_row_belongs_to_the_reviewer_only(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, remember={HEARD})
+        self.assertEqual(AnswerBank.objects.filter(profile=self.bob.profile).count(), 0)
+
+    def test_the_employer_name_is_stripped_from_the_remembered_key(self):
+        question = "What excites you about working at Acme?"
+        draft = self.draft(self.job_in(), (question, TEXT, ()))
+        self.review(draft, {question: "The mission"}, remember={question})
+        beta = Employer.objects.create(name="Beta", slug="beta")
+        second = self.draft(
+            self.job_in(employer=beta), ("What excites you about working at Beta?", TEXT, ())
+        )
+        self.assertEqual(second.answers["What excites you about working at Beta?"]["value"], "The mission")
+
+
+class LocationSensitiveMemoryTests(_MemoryBase):
+    def test_a_relocation_answer_is_saved_for_the_jobs_region_only(self):
+        draft = self.draft(self.job_in("US"), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {RELOCATE: "Yes"}, remember={RELOCATE})
+        self.assertIsNotNone(self.row(RELOCATE, "US"))
+        self.assertIsNone(self.row(RELOCATE, ""))
+
+        india = self.draft(self.job_in("India"), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        self.assertEqual(india.answers[RELOCATE]["value"], "")
+        self.assertTrue(india.answers[RELOCATE]["needs_review"])
+        us_again = self.draft(self.job_in("US"), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        self.assertEqual(us_again.answers[RELOCATE]["value"], "Yes")
+
+    def test_marking_it_any_region_fills_every_job(self):
+        draft = self.draft(self.job_in("US"), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {RELOCATE: "Yes"}, remember={RELOCATE}, everywhere={RELOCATE})
+        row = self.row(RELOCATE, "")
+        self.assertTrue(row.source_detail["applies_everywhere"])
+        for country in ("India", "US", "Germany"):
+            filled = self.draft(self.job_in(country), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+            self.assertEqual(filled.answers[RELOCATE]["value"], "Yes", country)
+
+    def test_an_unknown_job_region_is_not_guessed(self):
+        draft = self.draft(self.job_in(""), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {RELOCATE: "Yes"}, remember={RELOCATE})
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+
+class RememberUiTests(_MemoryBase):
+    def queue(self):
+        return self.client.get(reverse("auto_apply_queue")).content.decode()
+
+    def test_a_t2_question_offers_a_pre_ticked_remember_box(self):
+        self.draft(self.job_in(), (HEARD, TEXT, ()))
+        html = self.queue()
+        self.assertIn("Remember this answer for similar questions", html)
+        self.assertRegex(html, r'name="remember__\d+" checked')
+
+    def test_a_legal_question_offers_an_unticked_always_use_box(self):
+        self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        html = self.queue()
+        self.assertIn("Always use this answer for this question", html)
+        self.assertNotRegex(html, r'name="remember__\d+" checked')
+
+    def test_a_location_sensitive_question_offers_the_any_region_box(self):
+        self.draft(self.job_in("US"), (RELOCATE, SINGLE_SELECT, ("Yes", "No")))
+        html = self.queue()
+        self.assertIn("Use it for jobs in any region", html)
+        self.assertIn("otherwise only", html)
+
+    def test_long_text_files_and_standard_fields_offer_nothing(self):
+        self.draft(self.job_in(), (ESSAY, TEXTAREA, ()))
+        self.assertNotIn("Remember this answer", self.queue())
+
+
+class ObservationTests(_MemoryBase):
+    def send(self, draft):
+        with mock.patch("apps.web.views.submit_auto_apply_draft"):
+            return self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+    def test_sending_records_one_observation_per_answered_non_standard_question(self):
+        job = self.job_in("US")
+        draft = self.draft(job, (HEARD, TEXT, ()), (ESSAY, TEXTAREA, ()))
+        self.review(draft, {HEARD: "LinkedIn", ESSAY: "Because"})
+        self.send(draft)
+
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.SENDING)
+        rows = {o.question_text: o for o in AnswerObservation.objects.all()}
+        self.assertEqual(set(rows), {HEARD, ESSAY})
+        heard = rows[HEARD]
+        self.assertEqual(
+            (heard.value, heard.tier, heard.field_type, heard.user_confirmed, heard.job_id,
+             heard.draft_id, heard.employer_name, heard.job_region),
+            ("LinkedIn", "t2_factual", "text", True, job.pk, draft.pk, "Acme", "US"),
+        )
+        self.assertEqual(heard.profile, self.profile)
+
+    def test_observations_carry_the_provenance_of_what_was_submitted(self):
+        write_answer(self.profile, HEARD, "Referral", "imported")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertEqual(observation.provenance_source, "imported")
+        self.assertEqual(observation.provenance_origin, "answer_bank")
+        self.assertFalse(observation.user_confirmed)
+        self.assertFalse(observation.user_edited)
+        self.assertIsNone(observation.learned_value)
+
+    def test_a_confirmed_learned_prefill_records_what_was_prefilled_and_no_edit(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, confirm={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertEqual(observation.learned_value, "Referral")
+        self.assertEqual(observation.value, "Referral")
+        self.assertTrue(observation.user_confirmed)
+        self.assertFalse(observation.user_edited)
+
+    def test_changing_a_learned_prefill_keeps_the_prefill_and_marks_the_edit(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, confirm={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertEqual((observation.value, observation.learned_value), ("LinkedIn", "Referral"))
+        self.assertTrue(observation.user_edited)
+
+    def test_a_typed_answer_is_marked_edited(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"}, remember={HEARD})
+        self.send(draft)
+        observation = AnswerObservation.objects.get()
+        self.assertTrue(observation.user_edited)
+        self.assertFalse(observation.remember_declined)
+
+    def test_unticking_the_preticked_t2_box_is_recorded_as_declined(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})  # box not posted = unticked
+        self.send(draft)
+        self.assertTrue(AnswerObservation.objects.get().remember_declined)
+
+    def test_a_legal_answer_without_the_always_box_is_not_a_decline(self):
+        """T0 offers "Always use this answer" unticked by default: leaving it
+        so is not a refusal to be remembered."""
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.review(draft, {AUTH: "Yes"})
+        self.send(draft)
+        observation = AnswerObservation.objects.get(question_text=AUTH)
+        self.assertTrue(observation.user_edited)
+        self.assertFalse(observation.remember_declined)
+
+    def test_an_unedited_llm_value_is_not_marked_edited(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        draft.answers[HEARD].update({"value": "A job board", "needs_review": False})
+        draft.save()
+        self.review(draft, remember={HEARD})  # re-posts the value untouched
+        self.send(draft)
+        self.assertFalse(AnswerObservation.objects.get().user_edited)
+
+
+    def test_blank_standard_and_file_fields_are_not_observed(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: ""})
+        # The blank required field blocks sending, so fill it with a space-only
+        # optional placeholder instead: nothing answered -> nothing observed.
+        draft.answers[HEARD]["required"] = False
+        draft.save()
+        self.send(draft)
+        self.assertEqual(AnswerObservation.objects.count(), 0)
+
+    def test_a_refused_send_records_nothing(self):
+        write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        self.send(draft)  # held: unconfirmed
+        self.assertEqual(AnswerObservation.objects.count(), 0)
+
+    def test_a_lost_race_records_nothing(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+
+        def concurrent_edit(answers):
+            AutoApplyDraft.objects.filter(pk=draft.pk).update(answers={})
+            return {"answers": {}}
+
+        with mock.patch("apps.web.views.build_submit_snapshot", side_effect=concurrent_edit), \
+                mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            response = self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(AnswerObservation.objects.count(), 0)
+        task.delay.assert_not_called()
+
+    def test_observations_belong_to_the_sender_only(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        self.send(draft)
+        self.assertEqual(AnswerObservation.objects.filter(profile=self.bob.profile).count(), 0)
+        self.assertEqual(AnswerObservation.objects.filter(profile=self.profile).count(), 1)
+
+    def test_narrative_observations_keep_the_employer_in_their_key(self):
+        draft = self.draft(self.job_in(), (ESSAY, TEXTAREA, ()))
+        self.review(draft, {ESSAY: "Because"})
+        self.send(draft)
+        self.assertIn("acme", AnswerObservation.objects.get().question_key)
+
+
+class LearnedAnswersAreHeldTests(_MemoryBase):
+    """NFR2 extended: a learned answer of ANY tier is never sent unreviewed."""
+
+    def test_a_learned_t2_answer_is_prefilled_but_blocks_sending_until_confirmed(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        entry = draft.answers[HEARD]
+        self.assertEqual(entry["value"], "Referral")
+        self.assertTrue(entry["needs_confirmation"])
+        self.assertEqual(entry["learned_value"], "Referral")
+
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_not_called()
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, AutoApplyDraft.Status.DRAFTED)
+
+        self.review(draft, confirm={HEARD})
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_called_once()
+
+    def test_saving_the_form_alone_never_confirms_a_learned_answer(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft)
+        draft.refresh_from_db()
+        self.assertTrue(draft.answers[HEARD]["needs_confirmation"])
+
+    def test_turning_learning_off_stops_the_prefill(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        self.profile.learning_enabled = False
+        self.profile.save(update_fields=["learning_enabled"])
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.assertNotEqual(draft.answers[HEARD]["value"], "Referral")
+
+
+class LearningTriggerTests(_MemoryBase):
+    def send(self, draft):
+        with mock.patch("apps.web.views.submit_auto_apply_draft"):
+            return self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+
+    def test_sending_schedules_the_learner_only_after_commit(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        with mock.patch("apps.web.views.learn_for_profile_task") as task:
+            with self.captureOnCommitCallbacks() as callbacks:
+                self.send(draft)
+            task.delay.assert_not_called()  # nothing runs before the commit hooks
+            for callback in callbacks:
+                callback()
+        task.delay.assert_called_once_with(self.profile.pk)
+
+    def test_a_broker_failure_dispatching_the_learner_does_not_block_the_send(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        self.review(draft, {HEARD: "LinkedIn"})
+        with mock.patch("apps.web.views.learn_for_profile_task") as task, \
+                mock.patch("apps.web.views.submit_auto_apply_draft") as submit:
+            task.delay.side_effect = ConnectionError("broker down")
+            with self.assertLogs("django.test", level="ERROR"), self.captureOnCommitCallbacks(execute=True):
+                self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        submit.delay.assert_called_once_with(draft.id)
+
+    def test_a_refused_send_schedules_nothing(self):
+        write_answer(self.profile, AUTH, "Yes", "learned", options=("Yes", "No"))
+        draft = self.draft(self.job_in(), (AUTH, SINGLE_SELECT, ("Yes", "No")))
+        with mock.patch("apps.web.views.learn_for_profile_task") as task:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        task.delay.assert_not_called()
+
+    def test_two_employers_giving_the_same_answer_make_the_next_draft_prefilled_and_held(self):
+        """End to end through the real views and (eager) Celery."""
+        notice = "What is your notice period?"  # T1: no pre-ticked remember box
+        for n in range(2):
+            employer = Employer.objects.create(name=f"N{n}", slug=f"n{n}")
+            draft = self.draft(self.job_in(employer=employer), (notice, TEXT, ()))
+            self.review(draft, {notice: "2 weeks"})
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        row = self.row(notice)
+        self.assertEqual((row.value, row.source, row.is_locked), ("2 weeks", "learned", False))
+        self.assertEqual(ProfileSuggestion.objects.get().status, "pending")
+
+        third = Employer.objects.create(name="Gamma", slug="gamma")
+        draft = self.draft(self.job_in(employer=third), (notice, TEXT, ()))
+        entry = draft.answers[notice]
+        self.assertEqual(entry["value"], "2 weeks")
+        self.assertTrue(entry["needs_confirmation"])
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_not_called()  # learned, so held until confirmed
+
+    def test_declining_to_remember_a_t2_answer_keeps_it_out_of_learning(self):
+        for n in range(2):
+            employer = Employer.objects.create(name=f"D{n}", slug=f"d{n}")
+            draft = self.draft(self.job_in(employer=employer), (HEARD, TEXT, ()))
+            self.review(draft, {HEARD: "A friend"})  # pre-ticked box left unticked
+            with self.captureOnCommitCallbacks(execute=True):
+                self.send(draft)
+        self.assertEqual(AnswerBank.objects.count(), 0)
+
+
+class ConfirmLearnedAnswersTests(_MemoryBase):
+    NOTICE = "What is your notice period?"
+
+    def url(self, draft):
+        return reverse("confirm_learned_answers", args=[draft.id])
+
+    def held_draft(self):
+        write_answer(self.profile, HEARD, "Referral", "learned")
+        write_answer(self.profile, self.NOTICE, "2 weeks", "learned")
+        return self.draft(self.job_in(), (HEARD, TEXT, ()), (self.NOTICE, TEXT, ()))
+
+    def test_confirms_every_held_stored_answer_and_nothing_else(self):
+        draft = self.held_draft()
+        # A held value that came from typed settings, not a stored answer:
+        draft.answers[RELOCATE] = {
+            "value": "Yes", "needs_review": True, "needs_confirmation": True,
+            "provenance": {"origin": "profile.location_country", "source": "imported"},
+            "field_type": "text", "category": "custom", "required": False,
+        }
+        # An LLM guess waiting for review:
+        draft.answers[ESSAY] = {
+            "value": "guess", "needs_review": True, "field_type": "text",
+            "category": "custom", "required": False,
+        }
+        draft.save()
+
+        self.client.post(self.url(draft))
+        draft.refresh_from_db()
+        for label in (HEARD, self.NOTICE):
+            entry = draft.answers[label]
+            self.assertFalse(entry["needs_confirmation"], label)
+            self.assertTrue(entry["user_confirmed"], label)
+            self.assertEqual(entry["provenance"]["origin"], "draft_review_bulk")
+            self.assertEqual(entry["confirmed_from"]["source"], "learned")
+        self.assertTrue(draft.answers[RELOCATE]["needs_confirmation"])
+        self.assertTrue(draft.answers[ESSAY]["needs_review"])
+        self.assertNotIn("user_confirmed", draft.answers[ESSAY])
+
+    def test_result_matches_confirming_one_by_one_apart_from_the_origin(self):
+        by_hand = self.held_draft()
+        self.review(by_hand, confirm={HEARD, self.NOTICE})
+        by_hand.refresh_from_db()
+
+        bulk = self.held_draft()
+        self.client.post(self.url(bulk))
+        bulk.refresh_from_db()
+
+        for label in (HEARD, self.NOTICE):
+            expected = dict(by_hand.answers[label])
+            actual = dict(bulk.answers[label])
+            self.assertEqual(expected["provenance"].pop("origin"), "draft_review")
+            self.assertEqual(actual["provenance"].pop("origin"), "draft_review_bulk")
+            # The edit view also records whether the remember box was left
+            # unticked; the bulk action does not touch the form's boxes.
+            expected.pop("remember_declined", None)
+            self.assertEqual(expected, actual)
+
+    def test_does_not_promote_anything_to_the_users_answers(self):
+        draft = self.held_draft()
+        self.client.post(self.url(draft))
+        self.assertEqual(
+            set(AnswerBank.objects.values_list("source", flat=True)), {"learned"}
+        )
+
+    def test_send_is_unblocked_only_when_nothing_else_is_held(self):
+        draft = self.held_draft()
+        draft.answers[RELOCATE] = {
+            "value": "Yes", "needs_review": True, "needs_confirmation": True,
+            "provenance": {"origin": "profile.x", "source": "imported"},
+            "field_type": "text", "category": "custom", "required": False,
+        }
+        draft.save()
+        self.client.post(self.url(draft))
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_not_called()  # the typed-settings hold remains
+
+        draft.refresh_from_db()
+        draft.answers[RELOCATE]["needs_confirmation"] = False
+        draft.answers[RELOCATE]["needs_review"] = False
+        draft.save()
+        with mock.patch("apps.web.views.submit_auto_apply_draft") as task:
+            self.client.post(reverse("send_auto_apply_draft", args=[draft.id]))
+        task.delay.assert_called_once()
+
+    def test_another_users_draft_is_a_404(self):
+        draft = self.held_draft()
+        response = self._client_for(self.bob).post(self.url(draft))
+        self.assertEqual(response.status_code, 404)
+        draft.refresh_from_db()
+        self.assertTrue(draft.answers[HEARD]["needs_confirmation"])
+
+    def test_a_draft_that_is_no_longer_editable_is_a_404(self):
+        draft = self.held_draft()
+        AutoApplyDraft.objects.filter(pk=draft.pk).update(status=AutoApplyDraft.Status.SENDING)
+        self.assertEqual(self.client.post(self.url(draft)).status_code, 404)
+
+    def test_get_is_not_allowed_and_anonymous_is_sent_to_login(self):
+        draft = self.held_draft()
+        self.assertEqual(self.client.get(self.url(draft)).status_code, 405)
+        from django.test import Client
+
+        response = Client().post(self.url(draft))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("login", response["Location"])
+
+    def test_the_button_shows_the_count_and_disappears_at_zero(self):
+        draft = self.held_draft()
+        html = self.client.get(reverse("auto_apply_queue")).content.decode()
+        self.assertIn("Confirm 2 remembered answers", html)
+        self.assertIn("came from your earlier applications", html)
+        self.client.post(self.url(draft))
+        html = self.client.get(reverse("auto_apply_queue")).content.decode()
+        self.assertNotIn("came from your earlier applications", html)
+
+    def test_nothing_to_confirm_is_a_quiet_no_op(self):
+        draft = self.draft(self.job_in(), (HEARD, TEXT, ()))
+        before = draft.updated_at
+        self.client.post(self.url(draft), follow=True)
+        draft.refresh_from_db()
+        self.assertEqual(draft.updated_at, before)

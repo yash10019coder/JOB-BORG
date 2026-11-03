@@ -94,6 +94,7 @@ class AutoApplyDraft(models.Model):
         VERIFICATION_BUSY = "verification_busy", "Another verification in progress"
         VERIFICATION_CODE_REJECTED = "verification_code_rejected", "Verification code rejected"
         RESUME_REPLACED = "resume_replaced", "Resume was replaced"
+        UNCONFIRMED_ANSWERS = "unconfirmed_answers", "Answers awaiting your confirmation"
 
     # Non-terminal statuses that block a concurrent duplicate draft for the
     # same (user, job) -- see uniq_autoapplydraft_user_job_active below.
@@ -131,6 +132,15 @@ class AutoApplyDraft(models.Model):
         help_text="Resolved per-question answer set, including confidence/needs_review metadata.",
     )
     answers_schema_version = models.IntegerField(default=1)
+    submitted_answers_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Write-once record of the exact answers and their provenance at "
+            "the moment the draft moved to SENDING (legal-attestation audit "
+            "trail). See apps.auto_apply.services.confirmation."
+        ),
+    )
     form_schema_snapshot = models.JSONField(
         null=True,
         blank=True,

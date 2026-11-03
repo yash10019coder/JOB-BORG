@@ -1,6 +1,17 @@
 from django.contrib import admin
 
-from .models import EmailInboxCredential, Profile
+from .services import profile_fields
+from .models import (
+    AnswerBank,
+    AnswerBankHistory,
+    AnswerObservation,
+    EmailInboxCredential,
+    ImportJob,
+    Profile,
+    ProfileSkill,
+    ProfileSuggestion,
+    ResumeEntry,
+)
 
 
 class UnresolvedTargetLocationFilter(admin.SimpleListFilter):
@@ -25,7 +36,8 @@ class ProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "full_name", "remote_pref", "is_active", "updated_at")
     list_filter = ("remote_pref", "is_active", UnresolvedTargetLocationFilter)
     search_fields = ("user__username", "full_name")
-    readonly_fields = ("resume_text",)
+    # field_provenance is written only by profile_fields, never by hand.
+    readonly_fields = ("resume_text", "field_provenance")
 
     def save_model(self, request, obj, form, change):
         """The admin is a write path to `Profile.resume` too (see U1), so it
@@ -36,11 +48,16 @@ class ProfileAdmin(admin.ModelAdmin):
         divergent clear-path that bypasses `full_clean()`/the explicit-
         trigger convention `set_resume()` exists to centralize.
         """
+        # Staff edits are user-authored changes for provenance purposes.
+        profile_fields.record_user_edits(
+            obj,
+            {f: form.initial[f] for f in profile_fields.COVERED_FIELDS if f in form.initial},
+        )
         if "resume" in form.changed_data:
             # Save every other field first (this also creates the row on the
             # add view), then apply the resume change through set_resume() --
             # which only saves resume fields -- so nothing else edited in the
-            # same submit is silently dropped. Mirrors ProfileForm.save().
+            # same submit is silently dropped. Mirrors ProfileSearchForm.save().
             new_resume = form.cleaned_data.get("resume")
             obj.resume = form.initial.get("resume") or None
             super().save_model(request, obj, form, change)
@@ -60,3 +77,105 @@ class EmailInboxCredentialAdmin(admin.ModelAdmin):
     # ciphertext shouldn't render at all (contrast ProfileAdmin's
     # `readonly_fields = ("resume_text",)`, which is fine to display).
     exclude = ("app_password_encrypted",)
+
+
+@admin.register(AnswerBank)
+class AnswerBankAdmin(admin.ModelAdmin):
+    list_display = (
+        "profile", "question_key", "scope_region", "source", "risk_tier", "is_locked", "updated_at",
+    )
+    list_filter = ("source", "risk_tier", "is_locked")
+    search_fields = ("question_key", "profile__user__username")
+    # Rows are written through write_answer() so precedence and history are
+    # enforced; the admin only inspects them (and may delete a bad row).
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AnswerBankHistory)
+class AnswerBankHistoryAdmin(admin.ModelAdmin):
+    """Audit trail: browsable, never editable from the admin."""
+
+    list_display = ("profile", "question_key", "source", "superseded_by_source", "superseded_at")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AnswerObservation)
+class AnswerObservationAdmin(admin.ModelAdmin):
+    """What users actually submitted: browsable, never editable."""
+
+    list_display = ("profile", "question_key", "tier", "provenance_source", "user_edited", "created_at")
+    list_filter = ("tier", "provenance_source", "user_edited")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ProfileSuggestion)
+class ProfileSuggestionAdmin(admin.ModelAdmin):
+    """Learner proposals: browsable, status changes happen through the app."""
+
+    list_display = ("profile", "question_key", "tier", "status", "created_at")
+    list_filter = ("tier", "status")
+    search_fields = ("question_key", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ImportJob)
+class ImportJobAdmin(admin.ModelAdmin):
+    """Operational view of imports. The payload (proposed personal data) and the
+    uploaded file are deliberately not shown (rule P1)."""
+
+    list_display = ("public_id", "profile", "source_kind", "status", "extractor", "error_code", "created_at")
+    list_filter = ("status", "source_kind", "extractor")
+    search_fields = ("public_id", "profile__user__username")
+    exclude = ("payload", "source_file")
+    readonly_fields = (
+        "public_id", "profile", "kind", "source_kind", "status", "extractor",
+        "error_code", "created_at", "updated_at", "expires_at", "applied_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ResumeEntry)
+class ResumeEntryAdmin(admin.ModelAdmin):
+    list_display = ("profile", "kind", "title", "organization", "start_date", "is_current", "source")
+    list_filter = ("kind", "source")
+    search_fields = ("title", "organization", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(ProfileSkill)
+class ProfileSkillAdmin(admin.ModelAdmin):
+    list_display = ("profile", "name", "origin", "dismissed", "updated_at")
+    list_filter = ("origin", "dismissed")
+    search_fields = ("name", "profile__user__username")
+
+    def has_add_permission(self, request):
+        return False

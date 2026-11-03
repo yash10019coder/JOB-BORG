@@ -320,9 +320,8 @@ def country_records():
     Never raises: a missing/malformed dataset degrades to an empty list,
     honoring the same contract as ``normalize_location``.
     """
-    try:
-        index = _try_load_index()
-    except LocationDataError:
+    index = _try_load_index()
+    if index is None:
         return []
     records = {}
     for alpha3, canonical in index.country_alpha3.items():
@@ -357,10 +356,10 @@ def country_alpha2_map():
 
     Never raises; returns ``{}`` if the dataset can't load.
     """
-    try:
-        return dict(_try_load_index().country_by_prefix_code)
-    except LocationDataError:
+    index = _try_load_index()
+    if index is None:
         return {}
+    return dict(index.country_by_prefix_code)
 
 
 def alpha3_for_country(value: str) -> str | None:
@@ -449,9 +448,8 @@ def _country_label(canonical: str) -> str:
         return canonical
     if canonical in country_label_supplement:
         return country_label_supplement[canonical]
-    try:
-        index = _try_load_index()
-    except LocationDataError:
+    index = _try_load_index()
+    if index is None:
         return canonical
     best = None
     for alias, owner in index.country_by_alias.items():

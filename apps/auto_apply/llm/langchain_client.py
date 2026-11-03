@@ -15,12 +15,17 @@ vendor.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from html import escape
 
 from django.conf import settings
 from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
+
+from apps.accounts.llm_providers import (  # noqa: F401 -- re-exported
+    PROVIDER_CONFIGS,
+    ProviderConfig,
+    build_chat_model,
+)
 
 from .base import Question, QuestionAnswer, _profile_text
 
@@ -119,76 +124,9 @@ def _build_prompt(questions: list[Question], resume_text: str, profile) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Provider configuration -- a data-only table, deliberately NOT a registry of
-# classes/modules. A prior review flagged this exact area's old two-vendor
-# CLIENT_REGISTRY (module_path, class_name) dispatch as a premature
-# abstraction; this table replaces that class-per-vendor shape with plain
-# config consumed by the single LangChainAnswerInferenceClient below, so
-# adding a provider never means adding a new class or file.
-# ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class ProviderConfig:
-    # The `init_chat_model()` provider prefix, e.g. "anthropic", "openai",
-    # "google_genai".
-    init_model: str
-    default_model: str
-    # Name of the Django setting holding this provider's API key.
-    api_key_setting: str
-    base_url: str | None = None
-    # "function_calling" works for every frontier-model provider registered
-    # here; kept per-provider (not hardcoded) because NVIDIA NIM's small
-    # open-weight instruct model is not guaranteed to support tool-calling
-    # the way frontier models do -- see the plan's D3. NVIDIA is set to
-    # "json_mode" below: the hand-rolled client this supersedes never used
-    # tool-calling either, only prompt-instructed raw-JSON generation --
-    # "json_mode" is the closer-to-prior-behavior, defensible default, not
-    # an untested assumption. Still subject to a live confirmation pass
-    # against the real NIM-hosted model (see the plan's Risks section).
-    structured_output_method: str = "function_calling"
-    # Extra generation kwargs forwarded to init_chat_model() (max_tokens,
-    # temperature, top_p, ...). Only NVIDIA's small open-weight model needs
-    # these constrained today -- carried over from the deleted hand-rolled
-    # nvidia_client.py, which set them for the same reason.
-    model_kwargs: dict = field(default_factory=dict)
-    # Preserve Anthropic/OpenAI defaults; Google needs a smaller retry budget.
-    max_retries: int = 2
-
-
-_PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
-    "anthropic": ProviderConfig(
-        init_model="anthropic",
-        default_model="claude-sonnet-4-5",
-        api_key_setting="ANTHROPIC_API_KEY",
-    ),
-    "openai": ProviderConfig(
-        init_model="openai",
-        default_model="gpt-5.1",
-        api_key_setting="OPENAI_API_KEY",
-    ),
-    "google": ProviderConfig(
-        init_model="google_genai",
-        default_model="gemini-2.5-flash",
-        api_key_setting="GOOGLE_API_KEY",
-        # langchain-google-genai retries up to 6 attempts by default; with a
-        # per-request timeout that can exceed draft_auto_apply's hard time
-        # limit and kill the task before it persists anything. 1 = a single
-        # attempt (0 would fall back to the SDK default).
-        max_retries=1,
-    ),
-    "nvidia": ProviderConfig(
-        # NIM exposes an OpenAI-compatible chat-completions endpoint, so the
-        # "openai" LangChain integration is the client, just pointed at a
-        # different base_url -- same shape as the hand-rolled client this
-        # supersedes.
-        init_model="openai",
-        default_model="meta/llama-3.2-3b-instruct",
-        api_key_setting="NVIDIA_API_KEY",
-        base_url="https://integrate.api.nvidia.com/v1",
-        structured_output_method="json_mode",
-        model_kwargs={"max_tokens": 1024, "temperature": 0.2, "top_p": 0.7},
-    ),
-}
+# The provider table now lives in ``apps.accounts.llm_providers`` (a leaf below
+# this app, shared with profile import). Re-exported here under the old names.
+_PROVIDER_CONFIGS = PROVIDER_CONFIGS
 
 
 class LangChainAnswerInferenceClient:
@@ -213,19 +151,17 @@ class LangChainAnswerInferenceClient:
             self._structured_client = client
             return
 
-        chat_model = init_chat_model(
-            f"{provider_config.init_model}:{model or provider_config.default_model}",
-            api_key=api_key or getattr(settings, provider_config.api_key_setting),
+        chat_model = build_chat_model(
+            provider_config,
+            api_key=api_key,
+            model=model,
             # Both provider SDKs default to a very long request timeout
             # (minutes) when none is given, and draft_auto_apply has no
             # Celery time_limit of its own -- confirmed live that an
             # unbounded NVIDIA NIM call can block a worker slot indefinitely.
-            # This must hold for every provider constructed here, not only
-            # the ones that had this fix before LangChain.
+            # This must hold for every provider constructed here.
             timeout=settings.AUTO_APPLY_LLM_REQUEST_TIMEOUT_SECONDS,
-            max_retries=provider_config.max_retries,
-            base_url=provider_config.base_url,
-            **provider_config.model_kwargs,
+            init=init_chat_model,
         )
         self._structured_client = chat_model.with_structured_output(
             _QuestionAnswerBatchSchema,
