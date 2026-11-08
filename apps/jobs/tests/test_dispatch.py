@@ -22,6 +22,26 @@ class DispatchTests(SimpleTestCase):
     def test_workday_dispatches_to_workday_client(self):
         self.assertIsInstance(get_client(JobSource.ATS.WORKDAY), WorkdayClient)
 
+    def test_smartrecruiters_dispatches_to_smartrecruiters_client(self):
+        from apps.jobs.ingestion.smartrecruiters_client import SmartRecruitersClient
+        self.assertIsInstance(get_client(JobSource.ATS.SMARTRECRUITERS), SmartRecruitersClient)
+
+    def test_workable_dispatches_to_workable_client(self):
+        from apps.jobs.ingestion.workable_client import WorkableClient
+        self.assertIsInstance(get_client(JobSource.ATS.WORKABLE), WorkableClient)
+
+    def test_recruitee_dispatches_to_recruitee_client(self):
+        from apps.jobs.ingestion.recruitee_client import RecruiteeClient
+        self.assertIsInstance(get_client(JobSource.ATS.RECRUITEE), RecruiteeClient)
+
+    def test_personio_dispatches_to_personio_client(self):
+        from apps.jobs.ingestion.personio_client import PersonioClient
+        self.assertIsInstance(get_client(JobSource.ATS.PERSONIO), PersonioClient)
+
+    def test_oracle_cloud_dispatches_to_oracle_cloud_client(self):
+        from apps.jobs.ingestion.oracle_cloud_client import OracleCloudClient
+        self.assertIsInstance(get_client(JobSource.ATS.ORACLE_CLOUD), OracleCloudClient)
+
     def test_string_ats_value_also_dispatches(self):
         # JobSource.ats is stored as a plain string on the model, so the
         # registry must key correctly off the raw string too, not just the

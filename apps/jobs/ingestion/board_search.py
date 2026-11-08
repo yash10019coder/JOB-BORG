@@ -44,19 +44,24 @@ _DATASET_FILENAME = {
     JobSource.ATS.LEVER: "lever.csv",
     JobSource.ATS.ASHBY: "ashby.csv",
     JobSource.ATS.WORKDAY: "workday.csv",
+    JobSource.ATS.SMARTRECRUITERS: "smartrecruiters.csv",
+    JobSource.ATS.WORKABLE: "workable.csv",
+    JobSource.ATS.RECRUITEE: "recruitee.csv",
+    JobSource.ATS.PERSONIO: "personio.csv",
+    JobSource.ATS.ORACLE_CLOUD: "oracle_cloud.csv",
 }
 
-# Which CSV column is the board_token for this ats. Greenhouse/Lever/Ashby
-# use the short `slug` column directly. Workday is the odd one out: its
-# board_token is the full careers URL (see WorkdayClient), and the dataset's
-# `slug` column for Workday is a `company/site` shorthand that doesn't match
-# that shape -- confirmed by a live fetch of workday.csv, whose `url` column
-# holds the real `https://{company}.{instance}.myworkdayjobs.com/{site}` URL.
+# Which CSV column is the board_token for this ats.
 _TOKEN_COLUMN = {
     JobSource.ATS.GREENHOUSE: "slug",
     JobSource.ATS.LEVER: "slug",
     JobSource.ATS.ASHBY: "slug",
     JobSource.ATS.WORKDAY: "url",
+    JobSource.ATS.SMARTRECRUITERS: "slug",
+    JobSource.ATS.WORKABLE: "slug",
+    JobSource.ATS.RECRUITEE: "slug",
+    JobSource.ATS.PERSONIO: "slug",
+    JobSource.ATS.ORACLE_CLOUD: "url",
 }
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
