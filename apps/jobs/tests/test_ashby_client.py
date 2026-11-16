@@ -93,6 +93,14 @@ class AshbyClientTests(SimpleTestCase):
         )
 
     @responses.activate
+    def test_fetch_skips_one_malformed_job_and_keeps_valid_jobs(self):
+        payload = {"jobs": [{"title": "Missing id"}, _load_jobs()[0]]}
+        responses.add(responses.GET, JOBS_URL, json=payload, status=200)
+        jobs = _client().fetch_jobs(BOARD)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["title"], "Senior Backend Engineer")
+
+    @responses.activate
     def test_malformed_json_raises_parse_error(self):
         responses.add(responses.GET, JOBS_URL, body="not json", status=200)
         with self.assertRaises(AshbyParseError):
@@ -144,8 +152,9 @@ class AshbyClientTests(SimpleTestCase):
         # implementation) -- the retry loop must raise before ever
         # attempting to parse this body as JSON.
         responses.add(responses.GET, JOBS_URL, body="Not Found", status=404)
-        with self.assertRaises(AshbyUnavailable):
+        with self.assertRaises(AshbyUnavailable) as ctx:
             _client().fetch_jobs(BOARD)
+        self.assertTrue(ctx.exception.is_permanent)
         self.assertEqual(len(responses.calls), 1)
 
     @responses.activate

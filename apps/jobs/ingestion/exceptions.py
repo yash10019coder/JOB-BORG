@@ -9,6 +9,12 @@ class IngestionUnavailable(IngestionError):
     """A board could not be fetched (network error, 5xx, 429, exhausted retries)."""
 
 
+class PermanentBoardUnavailable(IngestionUnavailable):
+    """A board is permanently unavailable until its registration is repaired."""
+
+    is_permanent = True
+
+
 class IngestionParseError(IngestionError):
     """A response was reached but its body was malformed / unexpected shape."""
 
@@ -19,6 +25,10 @@ class GreenhouseError(IngestionError):
 
 class GreenhouseUnavailable(GreenhouseError, IngestionUnavailable):
     """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class GreenhouseBoardNotFound(GreenhouseUnavailable, PermanentBoardUnavailable):
+    """Greenhouse returned 404 for this board token."""
 
 
 class GreenhouseParseError(GreenhouseError, IngestionParseError):
@@ -33,6 +43,10 @@ class LeverUnavailable(LeverError, IngestionUnavailable):
     """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
 
 
+class LeverBoardNotFound(LeverUnavailable, PermanentBoardUnavailable):
+    """Lever returned 404 for this board token."""
+
+
 class LeverParseError(LeverError, IngestionParseError):
     """The response was reached but its body was malformed / unexpected shape."""
 
@@ -43,6 +57,10 @@ class AshbyError(IngestionError):
 
 class AshbyUnavailable(AshbyError, IngestionUnavailable):
     """The board could not be fetched (network error, 5xx, 429, exhausted retries)."""
+
+
+class AshbyBoardNotFound(AshbyUnavailable, PermanentBoardUnavailable):
+    """Ashby returned 404 for this board token."""
 
 
 class AshbyParseError(AshbyError, IngestionParseError):

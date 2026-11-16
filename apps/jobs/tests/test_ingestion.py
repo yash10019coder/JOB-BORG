@@ -3,7 +3,7 @@ from unittest import mock
 from django.test import TestCase
 
 from apps.employers.models import Employer
-from apps.jobs.ingestion.exceptions import GreenhouseUnavailable
+from apps.jobs.ingestion.exceptions import GreenhouseUnavailable, PermanentBoardUnavailable
 from apps.jobs.ingestion.upsert import upsert_jobs
 from apps.jobs.models import Job, JobSource
 
@@ -43,6 +43,12 @@ class UpsertJobsTests(TestCase):
         self.assertEqual(Job.objects.filter(needs_classification=True).count(), 2)
         # Employer resolved via the JobSource FK, not the payload.
         self.assertTrue(all(j.employer_id == self.employer.id for j in Job.objects.all()))
+
+    def test_source_job_id_can_exceed_255_characters(self):
+        long_id = "x" * 300
+        result = upsert_jobs(self.source, [make_normalized(long_id)])
+        self.assertEqual(len(result.created_ids), 1)
+        self.assertTrue(Job.objects.filter(source_job_id=long_id).exists())
 
     def test_structured_location_fields_persisted_on_create(self):
         upsert_jobs(
@@ -223,6 +229,33 @@ class IngestTaskTests(TestCase):
         # The failing board is reported as an error; the healthy one still ran.
         self.assertTrue(any(r.get("error") for r in results))
         self.assertEqual(Job.objects.filter(source_job_id="50").count(), 1)
+
+    def test_permanent_board_failure_deactivates_after_three_failures(self):
+        from apps.jobs import tasks
+
+        fake = _FakeClient({"acme": PermanentBoardUnavailable("not found")})
+        with mock.patch("apps.jobs.tasks.get_client", return_value=fake):
+            for _ in range(3):
+                tasks.ingest_all_active_sources()
+
+        self.source.refresh_from_db()
+        self.assertFalse(self.source.is_active)
+        self.assertEqual(self.source.consecutive_ingestion_failures, 3)
+
+    def test_success_resets_ingestion_failure_count(self):
+        from apps.jobs import tasks
+
+        self.source.consecutive_ingestion_failures = 2
+        self.source.last_ingestion_error = "old failure"
+        self.source.save(update_fields=["consecutive_ingestion_failures", "last_ingestion_error"])
+        fake = _FakeClient({"acme": [make_normalized(1)]})
+        with mock.patch("apps.jobs.tasks.get_client", return_value=fake), \
+             mock.patch("apps.jobs.tasks.enqueue_classification"):
+            tasks.ingest_source(self.source.id)
+
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.consecutive_ingestion_failures, 0)
+        self.assertEqual(self.source.last_ingestion_error, "")
 
     def test_ingest_source_dispatches_by_ats(self):
         # Covers AE1: a non-Greenhouse JobSource is fetched via the client
