@@ -10,8 +10,8 @@ import time
 
 import requests
 
-from .exceptions import LeverParseError, LeverUnavailable
-from .normalizers import normalize_lever_job
+from .exceptions import LeverBoardNotFound, LeverParseError, LeverUnavailable
+from .normalizers import normalize_jobs, normalize_lever_job
 
 BASE_URL = "https://api.lever.co/v0/postings"
 
@@ -50,7 +50,7 @@ class LeverClient:
             raise LeverParseError(
                 f"Expected a JSON list of postings, got {type(payload).__name__}"
             )
-        return [normalize_lever_job(raw) for raw in payload]
+        return normalize_jobs(payload, normalize_lever_job)
 
     # -- internals ---------------------------------------------------------
 
@@ -65,6 +65,8 @@ class LeverClient:
             except requests.RequestException as exc:
                 last_exc = exc
             else:
+                if response.status_code == 404:
+                    raise LeverBoardNotFound(f"GET {url} failed with HTTP 404")
                 if response.status_code < 400:
                     return response
                 if response.status_code not in _RETRYABLE_STATUS:

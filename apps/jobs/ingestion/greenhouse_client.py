@@ -9,8 +9,8 @@ import time
 
 import requests
 
-from .exceptions import GreenhouseParseError, GreenhouseUnavailable
-from .normalizers import normalize_greenhouse_job
+from .exceptions import GreenhouseBoardNotFound, GreenhouseParseError, GreenhouseUnavailable
+from .normalizers import normalize_greenhouse_job, normalize_jobs
 
 BASE_URL = "https://boards-api.greenhouse.io/v1/boards"
 
@@ -50,7 +50,7 @@ class GreenhouseClient:
             raise GreenhouseParseError(
                 f"Expected a 'jobs' list in the response, got {type(raw_jobs).__name__}"
             )
-        return [normalize_greenhouse_job(raw) for raw in raw_jobs]
+        return normalize_jobs(raw_jobs, normalize_greenhouse_job)
 
     # -- internals ---------------------------------------------------------
 
@@ -65,6 +65,10 @@ class GreenhouseClient:
             except requests.RequestException as exc:
                 last_exc = exc
             else:
+                if response.status_code == 404:
+                    raise GreenhouseBoardNotFound(
+                        f"GET {url} failed with HTTP 404"
+                    )
                 if response.status_code < 400:
                     return response
                 if response.status_code not in _RETRYABLE_STATUS:

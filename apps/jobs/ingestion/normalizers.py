@@ -8,6 +8,7 @@ the matching layer trusts the resulting explicit flag and never re-infers) and
 salary fields normalize to None.
 """
 import html
+import logging
 
 from apps.locations.engine import (
     CURRENT_LOCATION_ALIAS_VERSION,
@@ -16,6 +17,19 @@ from apps.locations.engine import (
 )
 
 from .exceptions import AshbyParseError, GreenhouseParseError, LeverParseError
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_jobs(raw_jobs, normalizer):
+    """Normalize valid postings while isolating malformed individual rows."""
+    normalized = []
+    for raw_job in raw_jobs:
+        try:
+            normalized.append(normalizer(raw_job))
+        except (AshbyParseError, GreenhouseParseError, LeverParseError) as exc:
+            logger.warning("Skipping malformed job payload: %s", exc)
+    return normalized
 
 GREENHOUSE_SOURCE_ATS = "greenhouse"
 LEVER_SOURCE_ATS = "lever"

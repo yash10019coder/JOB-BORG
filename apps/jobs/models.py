@@ -38,6 +38,8 @@ class JobSource(models.Model):
         default=True,
         help_text="Whether the hourly ingestion sweep pulls from this board.",
     )
+    consecutive_ingestion_failures = models.PositiveIntegerField(default=0)
+    last_ingestion_error = models.TextField(blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -125,7 +127,7 @@ class Job(models.Model):
 
     # Idempotency key: a posting is uniquely identified by its ATS + external id.
     source_ats = models.CharField(max_length=32)
-    source_job_id = models.CharField(max_length=255)
+    source_job_id = models.CharField(max_length=1024)
 
     employer = models.ForeignKey(
         "employers.Employer",

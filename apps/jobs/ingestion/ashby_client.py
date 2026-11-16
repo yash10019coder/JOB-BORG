@@ -11,8 +11,8 @@ import time
 
 import requests
 
-from .exceptions import AshbyParseError, AshbyUnavailable
-from .normalizers import normalize_ashby_job
+from .exceptions import AshbyBoardNotFound, AshbyParseError, AshbyUnavailable
+from .normalizers import normalize_ashby_job, normalize_jobs
 
 BASE_URL = "https://api.ashbyhq.com/posting-api/job-board"
 
@@ -52,7 +52,7 @@ class AshbyClient:
             raise AshbyParseError(
                 f"Expected a 'jobs' list in the response, got {type(raw_jobs).__name__}"
             )
-        return [normalize_ashby_job(raw) for raw in raw_jobs]
+        return normalize_jobs(raw_jobs, normalize_ashby_job)
 
     # -- internals ---------------------------------------------------------
 
@@ -67,6 +67,8 @@ class AshbyClient:
             except requests.RequestException as exc:
                 last_exc = exc
             else:
+                if response.status_code == 404:
+                    raise AshbyBoardNotFound(f"GET {url} failed with HTTP 404")
                 if response.status_code < 400:
                     return response
                 if response.status_code not in _RETRYABLE_STATUS:

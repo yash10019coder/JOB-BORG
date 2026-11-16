@@ -15,7 +15,11 @@ from django.db import transaction
 
 from .ingestion.board_search import BoardSearchClient
 from .ingestion.dispatch import get_client
-from .ingestion.exceptions import IngestionParseError, IngestionUnavailable
+from .ingestion.exceptions import (
+    IngestionParseError,
+    IngestionUnavailable,
+    PermanentBoardUnavailable,
+)
 from .ingestion.register import derive_employer_name
 from .ingestion.upsert import upsert_jobs
 from .models import DiscoveredBoard, JobSource
@@ -50,8 +54,43 @@ def ingest_source(source_id):
     """Fetch + upsert a single JobSource. Returns a stats dict."""
     source = JobSource.objects.select_related("employer").get(pk=source_id)
     client = get_client(source.ats)
-    normalized = client.fetch_jobs(source.board_token)
-    result = upsert_jobs(source, normalized)
+    try:
+        normalized = client.fetch_jobs(source.board_token)
+        result = upsert_jobs(source, normalized)
+    except Exception as exc:
+        source.consecutive_ingestion_failures += 1
+        source.last_ingestion_error = str(exc)
+        if (
+            isinstance(exc, PermanentBoardUnavailable)
+            and source.consecutive_ingestion_failures
+            >= settings.INGESTION_PERMANENT_FAILURE_THRESHOLD
+        ):
+            source.is_active = False
+            logger.warning(
+                "Deactivated permanently unavailable source %s after %s failures",
+                source_id,
+                source.consecutive_ingestion_failures,
+            )
+        source.save(
+            update_fields=[
+                "consecutive_ingestion_failures",
+                "last_ingestion_error",
+                "is_active",
+                "updated_at",
+            ]
+        )
+        raise
+
+    if source.consecutive_ingestion_failures or source.last_ingestion_error:
+        source.consecutive_ingestion_failures = 0
+        source.last_ingestion_error = ""
+        source.save(
+            update_fields=[
+                "consecutive_ingestion_failures",
+                "last_ingestion_error",
+                "updated_at",
+            ]
+        )
     enqueue_classification(result.needs_classification_ids)
     stats = {
         "source_id": source_id,

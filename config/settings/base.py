@@ -237,6 +237,9 @@ CELERY_TASK_ROUTES = {
 # ---------------------------------------------------------------------------
 # Batch bound for the classification task (U8).
 CLASSIFICATION_BATCH_SIZE = env.int("CLASSIFICATION_BATCH_SIZE", default=200)
+INGESTION_PERMANENT_FAILURE_THRESHOLD = env.int(
+    "INGESTION_PERMANENT_FAILURE_THRESHOLD", default=3
+)
 # Recency window (days) for profile-centric rematch (U10).
 REMATCH_JOB_WINDOW_DAYS = env.int("REMATCH_JOB_WINDOW_DAYS", default=30)
 # Debounce delay (seconds) collapsing rapid successive profile saves into one
